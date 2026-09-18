@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Offline tests for the hosted-app storage work (2026-09-14):
+"""Offline tests for the database-backed storage (2026-09-14):
 
-- DATABASE_URL (hosted Postgres) beats the sqlite path, with the driver
+- DATABASE_URL (Postgres) beats the sqlite path, with the driver
   spelled out the way SQLAlchemy needs it;
 - startup housekeeping marks orphaned "running" runs failed and prunes
   old transcript and cache rows;
@@ -122,19 +122,9 @@ class TestStartupHousekeeping:
         import time
         from unittest.mock import patch
 
-        from cryptography.fernet import Fernet
-
         from api.app import create_app
-        from api.auth.providers import Identity
-        from src.user_settings import save_user_settings
-        from src.users import upsert_from_identity
 
-        monkeypatch.setenv("APP_ENCRYPTION_KEY", Fernet.generate_key().decode())
-        owner = upsert_from_identity(Identity(provider="google", subject="q"))
-        save_user_settings(owner["id"], llm_model="gemini/gemini-3.8-flash",
-                           llm_api_key="k")
-        history.create_run("waiting", "AAPL", owner_id=owner["id"],
-                           status=history.STATUS_QUEUED,
+        history.create_run("waiting", "AAPL", status=history.STATUS_QUEUED,
                            inputs={"tier": 2, "hold_weeks": 1})
         seen = {}
 
@@ -179,14 +169,11 @@ class TestTranscriptStorage:
         assert history.list_transcript("unknown") == []
 
     def test_transcript_endpoint_serves_the_rows_and_404s_unknown_runs(self, isolated_db):
-        from api.auth.session import current_user
-
         app = FastAPI()
         app.include_router(tiered.router, prefix="/tiered")
-        app.dependency_overrides[current_user] = lambda: {"id": 7}
         client = TestClient(app)
 
-        history.create_run("task-9", "AAPL", owner_id=7)
+        history.create_run("task-9", "AAPL")
         LlmTranscript.for_run("task-9").record(
             stage="s", model="m", temperature=0.0, prompt="p", reply="r",
         )

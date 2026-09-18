@@ -12,9 +12,6 @@ import {
 import { riskPctText } from '../components/tiered-alt/altFormat';
 import { AltRunForm } from '../components/tiered-alt/AltRunForm';
 import { AltRunHistory } from '../components/tiered-alt/AltRunHistory';
-import { AltUserBlock } from '../components/tiered-alt/AltUserBlock';
-import type { UserSettings } from '../api/settings';
-import { useCurrentUser } from '../contexts/CurrentUserContext';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 
 const POLL_INTERVAL_MS = 5000;
@@ -59,8 +56,8 @@ function marketOpenRejection(error: unknown): TieredMarketOpenGate | null {
   };
 }
 
-// The duplicate payload when the backend refused the start because the
-// user's own unfinished run has the same ticker and inputs (409 with the
+// The duplicate payload when the backend refused the start because an
+// unfinished run has the same ticker and inputs (409 with the
 // duplicate_run code); null for every other error.
 function duplicateRejection(error: unknown): TieredDuplicateRun | null {
   if (!axios.isAxiosError(error) || error.response?.status !== 409) {
@@ -106,21 +103,6 @@ function storeNumber(key: string, value: string | null): void {
 // paged rows that expand into the full report).
 const TieredAltPage = () => {
   const { t } = useUiLanguage();
-  const { user, signOut } = useCurrentUser();
-  // The sign-in callback lands on "/?login=failed" when consent was
-  // denied or the provider errored; the user block words it.
-  const loginFailed = useMemo(
-    () => new URLSearchParams(window.location.search).get('login') === 'failed',
-    [],
-  );
-  // The account section's stored settings, as last confirmed by the
-  // server; null until loaded or when signed out.
-  const [account, setAccount] = useState<UserSettings | null>(null);
-  useEffect(() => {
-    if (!user) {
-      setAccount(null);
-    }
-  }, [user]);
   const [ticker, setTicker] = useState<string | null>(null);
   const [tier, setTier] = useState<TieredDepth | null>(DEFAULT_TIER);
   // Capital is in the ticker's own currency, so it stays empty until a
@@ -160,34 +142,18 @@ const TieredAltPage = () => {
     [runs],
   );
 
-  // Run history is per account: nothing to list while signed out, and a
-  // sign-out clears what the previous account was looking at.
   const refreshRuns = useCallback(async () => {
-    if (!user) {
-      return;
-    }
     try {
       const items = await tieredApi.listRuns();
       setRuns(items);
     } catch {
       // transient — next poll retries
     }
-  }, [user]);
+  }, []);
 
   useEffect(() => {
-    if (user) {
-      void refreshRuns();
-    } else {
-      setRuns([]);
-      setExpandedTaskId(null);
-      setDetails({});
-    }
-  }, [user, refreshRuns]);
-
-  const handleSignOut = useCallback(async () => {
-    await signOut();
-    setSubmitError(null);
-  }, [signOut]);
+    void refreshRuns();
+  }, [refreshRuns]);
 
   // Server-side sizing defaults (.env) beat the built-in suggestions when
   // the browser has no remembered values of its own.
@@ -299,7 +265,7 @@ const TieredAltPage = () => {
   const handleStart = useCallback(
     async (runAnyway = false) => {
       // The form popup enforces every field; this is the last-line guard.
-      if (!ticker || tier === null || !capital || !riskPct || !reward || !hold || submitting || !user) {
+      if (!ticker || tier === null || !capital || !riskPct || !reward || !hold || submitting) {
         return;
       }
       setSubmitError(null);
@@ -367,74 +333,55 @@ const TieredAltPage = () => {
         setSubmitting(false);
       }
     },
-    [ticker, submitting, tier, capital, riskPct, reward, hold, refreshRuns, user],
+    [ticker, submitting, tier, capital, riskPct, reward, hold, refreshRuns],
   );
 
   return (
     <main className="mx-auto flex min-h-full w-full max-w-7xl flex-col gap-6 px-4 pb-8 pt-4 md:px-6 lg:px-8">
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-          {t('tiered.user.title')}
+          {t('tiered.altForm.title')}
         </h2>
         <div className="rounded bg-gray-900 p-4 text-gray-400 sm:p-6">
-          <AltUserBlock user={user} onSignOut={handleSignOut} loginFailed={loginFailed} onSettings={setAccount} />
+          <AltRunForm
+            ticker={ticker}
+            tier={tier}
+            capital={capital}
+            riskPct={riskPct}
+            reward={reward}
+            hold={hold}
+            submitting={submitting}
+            error={submitError}
+            gate={gate}
+            duplicate={duplicate}
+            onTicker={handleTicker}
+            onTier={setTier}
+            onCapital={setCapital}
+            onRiskPct={setRiskPct}
+            onReward={setReward}
+            onHold={setHold}
+            onStart={() => void handleStart()}
+            onRunAnyway={() => void handleStart(true)}
+            onGateClose={() => setGate(null)}
+            onDuplicateClose={() => setDuplicate(null)}
+          />
         </div>
       </section>
 
-      {/* The run sections only make sense with an account behind them
-          (owner request 2026-09-15): signed out, the page is the sign-in
-          block alone. */}
-      {user ? (
-        <>
-        <section className="flex flex-col gap-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-            {t('tiered.altForm.title')}
-          </h2>
-          <div className="rounded bg-gray-900 p-4 text-gray-400 sm:p-6">
-            <AltRunForm
-              ticker={ticker}
-              tier={tier}
-              capital={capital}
-              riskPct={riskPct}
-              reward={reward}
-              hold={hold}
-              submitting={submitting}
-              error={submitError}
-              gate={gate}
-              duplicate={duplicate}
-              signedIn={Boolean(user)}
-              hasMainLlm={Boolean(account?.llm_model)}
-              hasLlmKey={Boolean(account?.llm_api_key.set)}
-              onTicker={handleTicker}
-              onTier={setTier}
-              onCapital={setCapital}
-              onRiskPct={setRiskPct}
-              onReward={setReward}
-              onHold={setHold}
-              onStart={() => void handleStart()}
-              onRunAnyway={() => void handleStart(true)}
-              onGateClose={() => setGate(null)}
-              onDuplicateClose={() => setDuplicate(null)}
-            />
-          </div>
-        </section>
-
-        <section className="flex flex-col gap-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-            {t('tiered.history')}
-          </h2>
-          <div className="rounded bg-gray-900 p-4 text-gray-400 sm:p-6">
-            <AltRunHistory
-              runs={annotatedRuns}
-              expandedTaskId={expandedTaskId}
-              expandedResult={expandedTaskId ? (details[expandedTaskId] ?? null) : null}
-              expandedError={detailError}
-              onToggle={handleToggle}
-            />
-          </div>
-        </section>
-        </>
-      ) : null}
+      <section className="flex flex-col gap-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+          {t('tiered.history')}
+        </h2>
+        <div className="rounded bg-gray-900 p-4 text-gray-400 sm:p-6">
+          <AltRunHistory
+            runs={annotatedRuns}
+            expandedTaskId={expandedTaskId}
+            expandedResult={expandedTaskId ? (details[expandedTaskId] ?? null) : null}
+            expandedError={detailError}
+            onToggle={handleToggle}
+          />
+        </div>
+      </section>
     </main>
   );
 };

@@ -6,15 +6,13 @@ Compared with the parent project this serves exactly three things:
 - a health probe at ``/api/health``
 - the built frontend (``web/`` -> ``static/``) as a single-page app
 
-Public-server work (2026-09-14):
-- sign-in: Google/Discord OAuth under /api/auth and a signed session
-  cookie; CORS is narrowed to CORS_ALLOW_ORIGINS (none by default — the
-  frontend is served from the same origin, and the Vite dev server
-  proxies /api).
-- startup housekeeping: runs execute as in-process threads, so any run
-  still "running" when the process starts belongs to a process that
-  died — it is marked failed. Runs still "queued" are resumed through
-  the global run queue. Old transcript and cache rows are pruned.
+Startup housekeeping: runs execute as in-process threads, so any run
+still "running" when the process starts belongs to a process that died
+— it is marked failed. Runs still "queued" are resumed through the
+global run queue. Old transcript and cache rows are pruned.
+
+CORS is narrowed to CORS_ALLOW_ORIGINS (none by default — the frontend
+is served from the same origin, and the Vite dev server proxies /api).
 """
 from __future__ import annotations
 
@@ -27,11 +25,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.sessions import SessionMiddleware
 
-from api.auth import session as auth_session
 from api.middlewares.error_handler import add_error_handlers
-from api.v1.endpoints import auth, settings, tiered
+from api.v1.endpoints import tiered
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +57,6 @@ def startup_housekeeping() -> None:
         orphaned = history.fail_stale_running_runs()
         if orphaned:
             logger.warning("marked %d orphaned run(s) failed at startup", orphaned)
-        # A run waiting on a source the old process was running (now
-        # failed) or already settled goes back in the line as its own run.
-        requeued = history.requeue_orphaned_waiters()
-        if requeued:
-            logger.warning("requeued %d run(s) whose source run is gone", requeued)
     except Exception as exc:
         logger.warning("startup run cleanup skipped: %s", exc)
     try:
@@ -102,18 +93,8 @@ def create_app() -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=auth_session.session_secret(),
-        session_cookie=auth_session.SESSION_COOKIE,
-        max_age=auth_session.SESSION_MAX_AGE_SECONDS,
-        same_site="lax",
-        https_only=auth_session.cookie_is_https_only(),
-    )
     add_error_handlers(app)
 
-    app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
-    app.include_router(settings.router, prefix="/api/v1/settings", tags=["Settings"])
     app.include_router(tiered.router, prefix="/api/v1/tiered", tags=["TieredAnalysis"])
 
     @app.get("/api/health", include_in_schema=False)

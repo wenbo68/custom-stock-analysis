@@ -25,7 +25,6 @@ from sqlalchemy import (
     Float,
     DateTime,
     Integer,
-    UniqueConstraint,
     Text,
     text,
     event,
@@ -136,16 +135,6 @@ class TieredRunRecord(Base):
     #: JSON, recorded at creation so history rows can show them while the
     #: run is still in flight (owner decision 2026-07-24).
     inputs_json = Column(Text)
-    #: The signed-in user who started the run (hosted app); NULL on
-    #: rows from before accounts existed, which no one can see.
-    owner_user_id = Column(Integer, index=True)
-    #: Run reuse (2026-09-17): the trading day the run analyses — the
-    #: most recent completed session at creation, ISO "YYYY-MM-DD" — the
-    #: main model that produced (or will produce) its outlook, and, on a
-    #: run that borrowed another run's outlook, that run's task id.
-    bar_date = Column(String(10), index=True)
-    model = Column(String(128))
-    source_task_id = Column(String(64), index=True)
     error = Column(Text)
     created_at = Column(DateTime, default=utc_naive_now, index=True)
     updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
@@ -178,43 +167,6 @@ class TieredRunTranscriptRecord(Base):
     error = Column(Text)
     prompt = Column(Text)
     reply = Column(Text)
-
-
-class UserRecord(Base):
-    """A signed-in person (src/users.py): one row per provider account."""
-
-    __tablename__ = 'users'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    provider = Column(String(32), nullable=False)
-    #: The provider's stable account id (never the email, which can change).
-    provider_subject = Column(String(255), nullable=False)
-    email = Column(String(255), index=True)
-    display_name = Column(String(255))
-    avatar_url = Column(Text)
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
-    last_login_at = Column(DateTime, default=utc_naive_now)
-
-    __table_args__ = (
-        UniqueConstraint('provider', 'provider_subject', name='uix_user_provider_subject'),
-    )
-
-
-class UserSettingsRecord(Base):
-    """A user's model choice and encrypted keys (src/user_settings.py)."""
-
-    __tablename__ = 'user_settings'
-
-    user_id = Column(Integer, primary_key=True)
-    llm_model = Column(String(128))
-    # The cheaper model for screening chores (news relevance); empty =
-    # the main model does that work too.
-    llm_sub_model = Column(String(128))
-    llm_api_key_enc = Column(Text)
-    finnhub_key_enc = Column(Text)
-    alphavantage_key_enc = Column(Text)
-    fred_key_enc = Column(Text)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now)
 
 
 class TieredCacheRecord(Base):
@@ -307,11 +259,6 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             # 创建所有表
             Base.metadata.create_all(self._engine)
             self._ensure_column(TieredRunRecord.__tablename__, "inputs_json", "TEXT")
-            self._ensure_column(TieredRunRecord.__tablename__, "owner_user_id", "INTEGER")
-            self._ensure_column(TieredRunRecord.__tablename__, "bar_date", "VARCHAR(10)")
-            self._ensure_column(TieredRunRecord.__tablename__, "model", "VARCHAR(128)")
-            self._ensure_column(TieredRunRecord.__tablename__, "source_task_id", "VARCHAR(64)")
-            self._ensure_column(UserSettingsRecord.__tablename__, "llm_sub_model", "VARCHAR(128)")
             self._ensure_schema_migration_record()
             self._apply_rename_migration()
 
@@ -480,7 +427,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
 
     def _upsert_insert(self, model):
         """An INSERT that supports ``on_conflict_do_update`` on the
-        engine in use — sqlite locally, Postgres on the public host."""
+        engine in use — sqlite by default, Postgres under DATABASE_URL."""
         return sqlite_insert(model) if self._is_sqlite_engine else pg_insert(model)
 
     def _is_file_sqlite_database(self) -> bool:

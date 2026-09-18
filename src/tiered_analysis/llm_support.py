@@ -24,7 +24,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Type
 from pydantic import BaseModel, ValidationError
 
 from .providers.base import DimensionResult
-from .run_context import RunSettings
 
 logger = logging.getLogger(__name__)
 
@@ -181,17 +180,10 @@ class LlmUsageTracker:
     of the run lands in one file without extra plumbing.
     """
 
-    def __init__(
-        self,
-        transcript: Optional[LlmTranscript] = None,
-        settings: Optional[RunSettings] = None,
-    ) -> None:
+    def __init__(self, transcript: Optional[LlmTranscript] = None) -> None:
         self._stages: Dict[str, _StageUsage] = {}
         self._current: Optional[str] = None
         self.transcript = transcript
-        #: The run's own model/keys (run_context) — rides the activation
-        #: into worker threads exactly like the transcript does.
-        self.settings = settings
         # Debate stages run two LLM calls in parallel threads; both report
         # into the same tracker.
         self._lock = threading.Lock()
@@ -319,17 +311,13 @@ def _summarize(
     model: Optional[str] = None,
     schema: Any = None,
 ) -> str:
-    from .run_context import llm_api_key, llm_model
+    from .run_context import llm_model
 
     resolved = (model or llm_model() or "").strip()
     if not resolved:
-        raise LlmConfigError(
-            "no LLM model configured: the run carries none and "
-            "LITELLM_MODEL is not set"
-        )
-    # The run's own key (a signed-in user's) goes to litellm explicitly;
-    # without one litellm reads the provider's standard variable.
-    api_key = llm_api_key()
+        raise LlmConfigError("no LLM model configured: LITELLM_MODEL is not set")
+    # The provider's API key is its standard environment variable
+    # (GEMINI_API_KEY, OPENAI_API_KEY, ...), which litellm reads itself.
     import litellm
 
     response_format = (
@@ -348,8 +336,6 @@ def _summarize(
         kwargs: Dict[str, Any] = {}
         if fmt is not None:
             kwargs["response_format"] = fmt
-        if api_key:
-            kwargs["api_key"] = api_key
         return litellm.completion(
             model=resolved,
             messages=[{"role": "user", "content": prompt}],
@@ -421,10 +407,9 @@ def screen_summarizer(prompt: str, schema: Any = None) -> str:
     """Summarizer for the news screen's classification chores.
 
     A faster, cheaper model — screening is is-this-about-the-company
-    bookkeeping, not analysis: the run's own sub model, else its main
-    model, else the server's ``NEWS_SCREEN_MODEL``; None falls through
-    to the standard ``LITELLM_MODEL`` so unconfigured keeps working.
-    See ``run_context.llm_sub_model``. Temperature 0 like every stage.
+    bookkeeping, not analysis: ``NEWS_SCREEN_MODEL``, else the standard
+    ``LITELLM_MODEL`` so unconfigured keeps working. See
+    ``run_context.llm_sub_model``. Temperature 0 like every stage.
     """
     from .run_context import llm_sub_model
 

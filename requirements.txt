@@ -1,6 +1,6 @@
 # Standalone tiered-analysis app — backend dependencies.
 # Trimmed from the parent project's requirements: only what the tiered
-# engine, its API, storage, and the forward-test script actually import.
+# engine, its API and storage actually import.
 
 # --- web server ---
 fastapi>=0.109.0            # Web framework (the tiered API)
@@ -9,16 +9,11 @@ uvicorn[standard]>=0.27.0   # ASGI server
 # --- core ---
 python-dotenv>=1.0.0        # .env loading
 sqlalchemy>=2.0.0           # ORM (run history, transcripts, caches)
-psycopg[binary]>=3.1,<4     # Postgres driver (DATABASE_URL on the public host)
+psycopg[binary]>=3.1,<4     # Postgres driver (only used when DATABASE_URL is set)
 pandas>=2.0.0               # Dataframes for price bars
 requests>=2.31.0            # HTTP for the news/fundamentals providers and price-bar fetchers
 tenacity>=8.2.0             # Retry decorators on the price-bar fetchers
 exchange-calendars>=4.13.0  # Trading calendars (clock gate + grading windows)
-
-# --- sign-in ---
-authlib>=1.3,<2             # OAuth client (Google, Discord)
-itsdangerous>=2.1           # Signed session cookie (Starlette SessionMiddleware)
-cryptography>=42            # Fernet encryption of stored user keys
 
 # --- LLM ---
 litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0   # Unified LLM client (same pin as parent repo)

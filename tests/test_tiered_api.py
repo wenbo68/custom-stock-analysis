@@ -17,12 +17,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from api.auth.providers import Identity
-from api.auth.session import current_user
 from api.v1.endpoints import tiered
 from src.tiered_analysis.integration import TieredRunOutcome
-from src.user_settings import save_user_settings
-from src.users import upsert_from_identity
 from src.tiered_analysis.providers.base import (
     Citation,
     DimensionResult,
@@ -80,34 +76,20 @@ def open_clock_gate(monkeypatch):
 
 
 @pytest.fixture()
-def encryption_key(monkeypatch):
-    from cryptography.fernet import Fernet
+def llm_configured(monkeypatch):
+    """The model a run needs, as .env provides it."""
+    monkeypatch.setenv("LITELLM_MODEL", "gemini/test-model")
 
-    monkeypatch.setenv("APP_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
-
-def _signed_in_client(user):
-    """A client whose every request is made by ``user`` (the sign-in
-    dependency is overridden; sign-in itself is covered in test_auth)."""
+def _client():
     app = FastAPI()
     app.include_router(tiered.router, prefix="/tiered")
-    app.dependency_overrides[current_user] = lambda: user
     return TestClient(app)
 
 
 @pytest.fixture()
-def user(isolated_db, encryption_key):
-    """A signed-in user with a model and LLM key on file."""
-    account = upsert_from_identity(Identity(provider="google", subject="u1",
-                                            email="u1@example.com"))
-    save_user_settings(account["id"], llm_model="gemini/gemini-3.8-flash",
-                       llm_api_key="sk-user-one")
-    return account
-
-
-@pytest.fixture()
-def client(user):
-    return _signed_in_client(user)
+def client(isolated_db, llm_configured):
+    return _client()
 
 
 def _outcome(symbol="AAPL"):
@@ -138,20 +120,6 @@ def _outcome(symbol="AAPL"):
     )
     state = TierState(symbol=symbol, market=Market.US, reports={1: report})
     return TieredRunOutcome(report=report, state=state)
-
-
-def _quick_outcome(symbol="AAPL"):
-    """Depth-1 outcome with a neutral outlook and the quick judge's detail."""
-    base = _outcome(symbol)
-    from dataclasses import replace
-
-    report = replace(base.report, debate_detail={
-        "format": "quick_v1", "outlook": {"direction": "hold", "final_score": 5.5}})
-    return TieredRunOutcome(
-        report=report, state=TierState(symbol=symbol, market=Market.US,
-                                       reports={1: report}),
-        outlook=Outlook.NEUTRAL, action=Action.NO_TRADE,
-    )
 
 
 def _deep_outcome(symbol="AAPL"):
@@ -260,6 +228,7 @@ class TestTieredAnalyzeEndpoint:
     def test_unknown_run_is_404(self, client):
         response = client.get("/tiered/runs/nope")
         assert response.status_code == 404
+        assert client.get("/tiered/runs/nope/transcript").status_code == 404
 
     def test_sizing_defaults_reflect_env_settings(self, client, monkeypatch):
         monkeypatch.setenv("TIERED_SIZING_CAPITAL", "100000")
@@ -277,6 +246,21 @@ class TestTieredAnalyzeEndpoint:
         # reward_risk always has a default — the form needs a number.
         assert response.json() == {
             "capital": None, "risk_fraction": None, "reward_risk": 2.0}
+
+
+class TestLlmConfiguration:
+    """A run needs LITELLM_MODEL in the environment; without it the start
+    is refused up front instead of failing minutes later."""
+
+    def test_run_without_a_model_is_refused_before_starting(self, isolated_db, monkeypatch):
+        monkeypatch.delenv("LITELLM_MODEL", raising=False)
+        client = _client()
+        response = client.post("/tiered/analyze", json={"stock_code": "AAPL"})
+        assert response.status_code == 400
+        assert response.json()["detail"]["error"] == "llm_not_configured"
+        assert client.get("/tiered/runs").json() == {"items": []}
+        # the sizing defaults are server config and need no model
+        assert client.get("/tiered/sizing-defaults").status_code == 200
 
 
 class TestTieredDepthAndSizingApi:
@@ -310,7 +294,6 @@ class TestTieredDepthAndSizingApi:
             captured["code"] = code
             captured["depth"] = depth
             captured["sizing_overrides"] = sizing_overrides
-            captured["settings"] = kwargs.get("settings")
             return _deep_outcome(code)
 
         with patch.object(tiered, "_run_analysis", fake_run):
@@ -326,9 +309,6 @@ class TestTieredDepthAndSizingApi:
         assert captured["depth"] == 2
         assert captured["sizing_overrides"] == {"capital": 50000.0,
                                                 "risk_fraction": 0.02}
-        # The run carries the caller's own model and key (never the env).
-        assert captured["settings"].llm_model == "gemini/gemini-3.8-flash"
-        assert captured["settings"].llm_api_key == "sk-user-one"
 
     def test_deep_run_response_contract(self, client):
         with patch.object(tiered, "_run_analysis",
@@ -431,7 +411,7 @@ class TestClockGateEndpoint:
         assert detail["session_close"] == "2026-08-11T16:00:00-04:00"
 
     def test_blocked_409_survives_the_global_error_handlers(
-        self, user, monkeypatch
+        self, isolated_db, llm_configured, monkeypatch
     ):
         """Regression (2026-08-11): the server registers add_error_handlers,
         which used to flatten any non-ErrorResponse dict detail into a
@@ -444,7 +424,6 @@ class TestClockGateEndpoint:
         app = FastAPI()
         add_error_handlers(app)
         app.include_router(tiered.router, prefix="/tiered")
-        app.dependency_overrides[current_user] = lambda: user
         handled_client = TestClient(app)
 
         monkeypatch.setattr(run_gate, "clock_gate", self._gate(blocked=True))
@@ -491,58 +470,10 @@ class TestClockGateEndpoint:
         assert response.status_code == 422
 
 
-class TestAccessControl:
-    """Public server: sign-in required, runs belong to their owner, and a
-    run without an LLM key is refused up front."""
-
-    def test_signed_out_requests_are_401(self, isolated_db):
-        from starlette.middleware.sessions import SessionMiddleware
-
-        app = FastAPI()
-        app.add_middleware(SessionMiddleware, secret_key="t")
-        app.include_router(tiered.router, prefix="/tiered")
-        anonymous = TestClient(app)
-        assert anonymous.post("/tiered/analyze", json={"stock_code": "AAPL"}).status_code == 401
-        assert anonymous.get("/tiered/runs").status_code == 401
-        assert anonymous.get("/tiered/runs/x").status_code == 401
-        assert anonymous.get("/tiered/runs/x/transcript").status_code == 401
-        # the sizing defaults are server config, not user data
-        assert anonymous.get("/tiered/sizing-defaults").status_code == 200
-
-    def test_runs_are_private_to_their_owner(self, client, isolated_db, encryption_key):
-        with patch.object(tiered, "_run_analysis",
-                          lambda code, **kwargs: _outcome(code)):
-            accepted = client.post("/tiered/analyze", json={"stock_code": "AAPL"})
-            task_id = accepted.json()["task_id"]
-            _poll_until_done(client, task_id)
-        assert [r["task_id"] for r in client.get("/tiered/runs").json()["items"]] == [task_id]
-
-        other = upsert_from_identity(Identity(provider="discord", subject="u2"))
-        save_user_settings(other["id"], llm_model="openai/gpt-5.6-luna", llm_api_key="k")
-        stranger = _signed_in_client(other)
-        assert stranger.get("/tiered/runs").json() == {"items": []}
-        assert stranger.get(f"/tiered/runs/{task_id}").status_code == 404
-        assert stranger.get(f"/tiered/runs/{task_id}/transcript").status_code == 404
-
-    def test_run_without_an_llm_key_is_refused_before_starting(self, isolated_db, encryption_key):
-        account = upsert_from_identity(Identity(provider="google", subject="nokey"))
-        bare = _signed_in_client(account)
-        response = bare.post("/tiered/analyze", json={"stock_code": "AAPL"})
-        assert response.status_code == 400
-        assert response.json()["detail"]["error"] == "llm_not_configured"
-        assert bare.get("/tiered/runs").json() == {"items": []}
-
-    def test_missing_encryption_key_is_a_clear_503(self, user, monkeypatch):
-        monkeypatch.delenv("APP_ENCRYPTION_KEY")
-        response = _signed_in_client(user).post("/tiered/analyze", json={"stock_code": "AAPL"})
-        assert response.status_code == 503
-        assert response.json()["detail"]["error"] == "encryption_not_configured"
-
-
 class TestRunQueueEndpoint:
     """The global run queue (2026-09-15): a run past the concurrency cap
-    waits as ``queued`` and starts by itself; an exact duplicate of the
-    caller's own unfinished run is refused with a 409."""
+    waits as ``queued`` and starts by itself; an exact duplicate of an
+    unfinished run is refused with a 409."""
 
     @staticmethod
     def _gated_runner():
@@ -605,275 +536,3 @@ class TestRunQueueEndpoint:
         with patch.object(tiered, "_run_analysis",
                           lambda code, **kwargs: _outcome(code)):
             assert client.post("/tiered/analyze", json=body).status_code == 202
-
-    def test_duplicates_are_per_user(self, client, user, monkeypatch):
-        monkeypatch.setenv("TIERED_MAX_CONCURRENT_RUNS", "1")
-        runner, release = self._gated_runner()
-        other = upsert_from_identity(Identity(provider="discord", subject="u2"))
-        save_user_settings(other["id"], llm_model="openai/gpt-5.6-luna", llm_api_key="k")
-        with patch.object(tiered, "_run_analysis", runner):
-            mine = client.post("/tiered/analyze", json={"stock_code": "AAPL"})
-            theirs = _signed_in_client(other).post("/tiered/analyze",
-                                                   json={"stock_code": "AAPL"})
-            assert mine.status_code == 202
-            assert theirs.status_code == 202
-            release.set()
-            _poll_until_done(client, mine.json()["task_id"])
-            _poll_until_done(_signed_in_client(other), theirs.json()["task_id"])
-
-    def test_a_queued_run_reads_the_owners_key_when_it_starts(self, client, user, monkeypatch):
-        monkeypatch.setenv("TIERED_MAX_CONCURRENT_RUNS", "1")
-        runner, release = self._gated_runner()
-        seen = {}
-
-        def capturing(code, **kwargs):
-            seen[code] = kwargs.get("settings")
-            return runner(code, **kwargs)
-
-        with patch.object(tiered, "_run_analysis", capturing):
-            client.post("/tiered/analyze", json={"stock_code": "AAPL"})
-            queued = client.post("/tiered/analyze", json={"stock_code": "MSFT"}).json()
-            assert queued["status"] == "queued"
-            save_user_settings(user["id"], llm_api_key="sk-rotated")
-            release.set()
-            _poll_until_done(client, queued["task_id"])
-        assert seen["MSFT"].llm_api_key == "sk-rotated"
-
-    def test_a_queued_run_whose_owner_lost_their_key_fails_cleanly(
-        self, client, user, monkeypatch
-    ):
-        monkeypatch.setenv("TIERED_MAX_CONCURRENT_RUNS", "1")
-        runner, release = self._gated_runner()
-        with patch.object(tiered, "_run_analysis", runner):
-            client.post("/tiered/analyze", json={"stock_code": "AAPL"})
-            queued = client.post("/tiered/analyze", json={"stock_code": "MSFT"}).json()
-            save_user_settings(user["id"], llm_api_key="")
-            release.set()
-            body = _poll_until_done(client, queued["task_id"])
-        assert body["status"] == "failed"
-        assert "no LLM model and API key" in body["error"]
-
-
-class TestRunReuseEndpoint:
-    """Run reuse (2026-09-17): a run of the same ticker, trading day and
-    max hold time by the same-or-stronger model of the same provider at
-    the same-or-deeper tier lends its outlook; only the requester's
-    trade-plan stages run."""
-
-    @staticmethod
-    def _other_user(model="gemini/gemini-3.8-flash"):
-        other = upsert_from_identity(Identity(provider="discord", subject="u2"))
-        save_user_settings(other["id"], llm_model=model, llm_api_key="k2")
-        return _signed_in_client(other)
-
-    @staticmethod
-    def _gated_runner(outcome=_deep_outcome):
-        release = threading.Event()
-        calls = []
-
-        def runner(code, **kwargs):
-            calls.append(kwargs)
-            if "providers" not in kwargs:
-                release.wait(timeout=5)
-            return outcome(code)
-
-        return runner, release, calls
-
-    def test_a_finished_run_finishes_the_new_run_from_it(self, client, user):
-        runner, release, calls = self._gated_runner()
-        release.set()
-        with patch.object(tiered, "_run_analysis", runner):
-            first = client.post("/tiered/analyze",
-                                json={"stock_code": "AAPL", "depth": 2}).json()
-            _poll_until_done(client, first["task_id"])
-
-            other = self._other_user()
-            second = other.post("/tiered/analyze", json={
-                "stock_code": "aapl", "depth": 1,
-                "sizing": {"capital": 5000, "risk_fraction": 0.01, "reward_risk": 3},
-            }).json()
-            assert second["status"] == "running"
-            body = _poll_until_done(other, second["task_id"])
-
-        assert body["status"] == "done"
-        assert body["reused"] is True
-        assert body["model"] == "gemini/gemini-3.8-flash"
-        assert body["result"]["reused"] == {
-            "tier": 2, "model": "gemini/gemini-3.8-flash",
-            "model_label": "Gemini 3.8 Flash",
-        }
-        # the second run went through the pipeline with the stand-ins,
-        # at the source's depth, with the requester's own sizing and key
-        reused_call = calls[-1]
-        assert reused_call["depth"] == 2
-        assert reused_call["tier2_stage"] is not None
-        assert reused_call["quick_judge"] is None
-        assert [p.dimension for p in reused_call["providers"]] == ["fundamentals", "sentiment"]
-        assert reused_call["sizing_overrides"] == {
-            "capital": 5000, "risk_fraction": 0.01, "reward_risk": 3}
-        assert reused_call["settings"].llm_api_key == "k2"
-        # the history row says tier 2 and marks the outlook as shared
-        row = {r["task_id"]: r for r in other.get("/tiered/runs").json()["items"]}
-        assert row[second["task_id"]]["tier"] == 2
-        assert row[second["task_id"]]["reused"] is True
-        assert row[second["task_id"]]["model_label"] == "Gemini 3.8 Flash"
-        # the source's own row is untouched
-        mine = {r["task_id"]: r for r in client.get("/tiered/runs").json()["items"]}
-        assert mine[first["task_id"]]["reused"] is False
-
-    def test_a_running_run_parks_the_new_run_as_waiting_then_finishes_it(
-        self, client, monkeypatch
-    ):
-        monkeypatch.setenv("TIERED_MAX_CONCURRENT_RUNS", "1")
-        runner, release, calls = self._gated_runner()
-        with patch.object(tiered, "_run_analysis", runner):
-            first = client.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            other = self._other_user()
-            second = other.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            # to its owner the new run reads as the source reads to its owner
-            assert second["status"] == "running"
-            listed = other.get("/tiered/runs").json()["items"][0]
-            assert listed["status"] == "running"
-            assert listed["queue_ahead"] is None
-            assert listed["reused"] is True
-            # a third user behind a queued source sees the source's place in line
-            third_owner = upsert_from_identity(Identity(provider="google", subject="u3"))
-            save_user_settings(third_owner["id"], llm_model="gemini/gemini-3.8-flash",
-                               llm_api_key="k3")
-            third = _signed_in_client(third_owner)
-            queued_src = client.post("/tiered/analyze", json={"stock_code": "MSFT"}).json()
-            assert queued_src["status"] == "queued"
-            behind = third.post("/tiered/analyze", json={"stock_code": "MSFT"}).json()
-            assert behind["status"] == "queued"
-            behind_row = third.get("/tiered/runs").json()["items"][0]
-            assert behind_row["status"] == "queued"
-            assert behind_row["queue_ahead"] == 0
-            assert third.get(f"/tiered/runs/{behind['task_id']}").json()["status"] == "queued"
-            release.set()
-            _poll_until_done(client, queued_src["task_id"])
-            _poll_until_done(third, behind["task_id"])
-            _poll_until_done(client, first["task_id"])
-            body = _poll_until_done(other, second["task_id"])
-        assert body["status"] == "done"
-        assert body["result"]["reused"]["tier"] == 2
-        # two fresh runs (AAPL, MSFT), two finished from them
-        assert sum("providers" in call for call in calls) == 2
-        assert sum("providers" not in call for call in calls) == 2
-
-    def test_a_failed_source_sends_the_waiting_run_back_to_the_queue(
-        self, client, monkeypatch
-    ):
-        monkeypatch.setenv("TIERED_MAX_CONCURRENT_RUNS", "1")
-        release = threading.Event()
-        calls = []
-
-        def runner(code, **kwargs):
-            calls.append(kwargs)
-            if len(calls) == 1:
-                release.wait(timeout=5)
-                raise RuntimeError("LLM exploded")
-            return _deep_outcome(code)
-
-        with patch.object(tiered, "_run_analysis", runner):
-            first = client.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            other = self._other_user()
-            second = other.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            assert second["status"] == "running"
-            release.set()
-            assert _poll_until_done(client, first["task_id"])["status"] == "failed"
-            body = _poll_until_done(other, second["task_id"])
-        assert body["status"] == "done"
-        assert "reused" not in body["result"]
-        assert body["reused"] is False
-        assert len(calls) == 2 and "providers" not in calls[-1]
-
-    @pytest.mark.parametrize("payload, model", [
-        # weaker model of the same provider asks for more than the source gave
-        ({"stock_code": "AAPL"}, "gemini/gemini-3.1-pro-preview"),
-        # another provider
-        ({"stock_code": "AAPL"}, "openai/gpt-6-astra"),
-        # another max hold time
-        ({"stock_code": "AAPL", "hold_weeks": 3}, "gemini/gemini-3.8-flash"),
-        # a deeper tier than the source ran
-        ({"stock_code": "AAPL", "depth": 2}, "gemini/gemini-3.8-flash"),
-    ])
-    def test_mismatches_run_afresh(self, client, payload, model):
-        runner, release, calls = self._gated_runner(_outcome)
-        release.set()
-        quick = lambda code, **kw: _quick_outcome(code)  # noqa: E731
-        with patch.object(tiered, "_run_analysis", quick):
-            first = client.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            _poll_until_done(client, first["task_id"])
-        with patch.object(tiered, "_run_analysis", runner):
-            other = self._other_user(model)
-            second = other.post("/tiered/analyze", json=payload).json()
-            assert second["status"] == "running"
-            body = _poll_until_done(other, second["task_id"])
-        assert body["reused"] is False
-        assert "providers" not in calls[-1]
-
-    def test_a_stronger_model_and_ones_own_run_are_reused(self, client, user):
-        runner, release, calls = self._gated_runner()
-        release.set()
-        with patch.object(tiered, "_run_analysis", runner):
-            first = client.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            _poll_until_done(client, first["task_id"])
-            # the same user, a different capital: their own run lends its outlook
-            again = client.post("/tiered/analyze", json={
-                "stock_code": "AAPL", "sizing": {"capital": 123}}).json()
-            assert again["status"] == "running"
-            assert _poll_until_done(client, again["task_id"])["reused"] is True
-            # a weaker model of the same provider gets the stronger run's outlook
-            other = self._other_user("gemini/gemini-3.5-flash-lite")
-            weaker = other.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            body = _poll_until_done(other, weaker["task_id"])
-        assert body["result"]["reused"]["model"] == "gemini/gemini-3.8-flash"
-
-    def test_a_run_without_an_outlook_is_never_reused(self, client):
-        with patch.object(tiered, "_run_analysis", lambda code, **kw: _outcome(code)):
-            first = client.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            assert _poll_until_done(client, first["task_id"])["status"] == "done"
-        runner, release, calls = self._gated_runner()
-        release.set()
-        with patch.object(tiered, "_run_analysis", runner):
-            other = self._other_user()
-            second = other.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
-            body = _poll_until_done(other, second["task_id"])
-        assert body["reused"] is False
-        assert "providers" not in calls[-1]
-
-    def test_an_exact_duplicate_of_ones_own_waiting_run_is_still_refused(
-        self, client, monkeypatch
-    ):
-        monkeypatch.setenv("TIERED_MAX_CONCURRENT_RUNS", "1")
-        runner, release, calls = self._gated_runner()
-        with patch.object(tiered, "_run_analysis", runner):
-            client.post("/tiered/analyze", json={"stock_code": "AAPL"})
-            other = self._other_user()
-            waiting = other.post("/tiered/analyze", json={"stock_code": "AAPL"})
-            assert waiting.json()["status"] == "running"
-            again = other.post("/tiered/analyze", json={"stock_code": "AAPL"})
-            assert again.status_code == 409
-            assert again.json()["detail"]["status"] == "running"
-            release.set()
-            _poll_until_done(other, waiting.json()["task_id"])
-
-    def test_a_source_that_became_unfit_requeues_the_requester(self, client, user):
-        """The reuse path re-checks the source when it actually finishes
-        the run — e.g. the source owner switched to another provider's
-        model while it waited in the queue."""
-        from src.tiered_analysis import history
-
-        history.create_run("src", "AAPL", inputs={"tier": 1, "hold_weeks": 2},
-                           owner_id=user["id"], status="done",
-                           bar_date="2026-09-16", model="openai/gpt-6-astra")
-        history.mark_done("src", {"outlook": "unknown"})
-        history.create_run("req", "AAPL", inputs={"tier": 1, "hold_weeks": 2},
-                           owner_id=user["id"], status="running",
-                           bar_date="2026-09-16", model="gemini/gemini-3.8-flash",
-                           source_task_id="src")
-        with patch.object(tiered, "_run_analysis", lambda code, **kw: _deep_outcome(code)):
-            tiered._reuse_finished_source("req", "src")
-            body = _poll_until_done(client, "req")
-        assert body["status"] == "done"
-        assert body["reused"] is False

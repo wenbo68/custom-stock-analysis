@@ -2,20 +2,19 @@
 """Global run queue: at most N tiered runs execute at once (owner decision
 2026-09-15); the rest wait their turn, first come, first served.
 
-Why: the public host is one small process (Render free tier, 512 MB) and
-every run holds price history, news and LLM replies in memory while
+Why: every run holds price history, news and LLM replies in memory while
 fanning out parallel LLM calls. A few runs at once are fine; a burst of
-them from several users kills the process and every run with it. The cap
+them can exhaust the machine and take every run down with it. The cap
 is ``TIERED_MAX_CONCURRENT_RUNS`` (default ``DEFAULT_MAX_CONCURRENT_RUNS``),
-read on every dispatch so the host's setting applies without a redeploy.
+read on every dispatch so a changed setting applies without a restart.
 
 How: the line itself lives in the database — a run is created ``queued``
 (src/tiered_analysis/history.py) and ``dispatch`` promotes the oldest
 queued rows to ``running`` while slots are free, one daemon thread each.
 When a thread finishes it dispatches again. Because the line is rows,
 not memory, ``resume`` at startup picks up whatever the previous process
-left waiting (the free host restarts often), whereas a run that was
-mid-flight is failed by startup housekeeping as before.
+left waiting, whereas a run that was mid-flight is failed by startup
+housekeeping as before.
 
 The queue knows nothing about the analysis: the endpoint hands it a
 ``runner`` that executes one ``QueuedRun`` and records its outcome.
@@ -59,7 +58,6 @@ class QueuedRun:
 
     task_id: str
     stock_code: str
-    owner_id: Optional[int]
     #: The stored creation-time inputs (tier, hold_weeks, sizing_overrides, …).
     inputs: Dict[str, Any]
 
@@ -117,7 +115,6 @@ class RunQueue:
                 run = QueuedRun(
                     task_id=row["task_id"],
                     stock_code=row["stock_code"],
-                    owner_id=row["owner_id"],
                     inputs=dict(row["inputs"] or {}),
                 )
                 history.mark_running(run.task_id)

@@ -18,9 +18,6 @@ function renderForm(overrides: Partial<AltRunFormProps> = {}) {
     error: null,
     gate: null,
     duplicate: null,
-    signedIn: true,
-    hasMainLlm: true,
-    hasLlmKey: true,
     onTicker: vi.fn(),
     onTier: vi.fn(),
     onCapital: vi.fn(),
@@ -63,54 +60,37 @@ describe('AltRunForm', () => {
   });
 
   it('refuses to start with fields missing and lists them in an Error popup', () => {
-    const props = renderForm({ ticker: 'AAPL', tier: 1, capital: null, riskPct: '1', hasLlmKey: false });
+    const props = renderForm({ ticker: 'AAPL', tier: 1, capital: null, riskPct: '1' });
 
     fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
 
     expect(props.onStart).not.toHaveBeenCalled();
     expect(screen.getByText(/^错误$|^Error$/)).toBeInTheDocument();
     expect(screen.getByText(/尚未填写|not filled in/)).toBeInTheDocument();
-    // two parts, account first, each in on-screen field order
+    // the fields in on-screen order, under the section's own title
     const dialog = screen.getByRole('dialog');
-    expect(dialog).toHaveTextContent(/账户|Your account/);
     expect(dialog).toHaveTextContent(/发起分析|New run/);
-    // no divider between the parts: only the modal's own title rule
+    // no divider below the title: only the modal's own title rule
     expect(dialog.querySelectorAll('hr')).toHaveLength(1);
     const listed = screen.getAllByRole('listitem').map((item) => item.textContent);
     expect(listed).toEqual([
-      expect.stringMatching(/LLM 提供商 API 密钥|LLM provider API key/),
       expect.stringMatching(/本金|Capital/),
       expect.stringMatching(/盈亏比|Reward ratio/),
       expect.stringMatching(/最长持有|Max hold/),
     ]);
   });
 
-  it('shows only the run part when the account is complete', () => {
+  it('lists a single missing field on its own', () => {
     renderForm({ ticker: 'AAPL', tier: null, capital: '100000', riskPct: '1', reward: '2', hold: '2' });
 
     fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
 
-    const dialog = screen.getByRole('dialog');
-    expect(dialog).not.toHaveTextContent(/账户|Your account/);
-    expect(dialog.querySelectorAll('hr')).toHaveLength(1);
     expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
       expect.stringMatching(/层级|Tier/),
     ]);
   });
 
-  it('asks for a sign-in before anything else', () => {
-    const props = renderForm({
-      ticker: 'AAPL', tier: 1, capital: '100000', riskPct: '1', reward: '2', hold: '2', signedIn: false,
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
-
-    expect(props.onStart).not.toHaveBeenCalled();
-    expect(screen.getByText(/^错误$|^Error$/)).toBeInTheDocument();
-    expect(screen.getByText(/请先登录|Sign in before/)).toBeInTheDocument();
-  });
-
-  it('starts when every field and the account are in place', () => {
+  it('starts when every field is in place', () => {
     const props = renderForm({
       ticker: 'AAPL', tier: 1, capital: '100000', riskPct: '1', reward: '2', hold: '2',
     });

@@ -346,17 +346,6 @@ export const AltResult = ({ result, taskId }: AltResultProps) => {
         </AltBlock>
       ) : null}
       <div className="flex flex-col gap-1 text-xs">
-        {result.reused ? (
-          // Run reuse (2026-09-17): the outlook was borrowed from a
-          // matching run; say at which tier and by which model, and
-          // that only the trade plan is this user's own computation.
-          <p className="text-gray-500" data-testid="alt-reused-note">
-            {t('tiered.reused', {
-              tier: result.reused.tier,
-              model: result.reused.model_label ?? result.reused.model ?? '?',
-            })}
-          </p>
-        ) : null}
         {usage && usage.total.calls > 0 ? (
           taskId && usage.transcript_entries ? (
             // The usage line is the transcript toggle when the run kept

@@ -76,19 +76,13 @@ export interface AltRunFormProps {
   hold: string | null;
   submitting: boolean;
   error: string | null;
-  /** The account section's state: a run needs a signed-in user with a
-   *  main LLM and that provider's key. Missing ones join the Error
-   *  popup's list instead of failing on the server. */
-  signedIn: boolean;
-  hasMainLlm: boolean;
-  hasLlmKey: boolean;
   /** Clock gate: the backend rejected the start because the ticker's
    *  market is open — non-null shows the popup (market + session hours
    *  + the "run anyway" choice). */
   gate: TieredMarketOpenGate | null;
-  /** Duplicate run: the backend refused the start because this user's
-   *  own unfinished run has the same ticker and inputs — non-null shows
-   *  it in the Error popup. */
+  /** Duplicate run: the backend refused the start because an unfinished
+   *  run has the same ticker and inputs — non-null shows it in the
+   *  Error popup. */
   duplicate: TieredDuplicateRun | null;
   onTicker: (value: string | null) => void;
   onTier: (value: TieredDepth | null) => void;
@@ -120,9 +114,6 @@ export const AltRunForm = ({
   error,
   gate,
   duplicate,
-  signedIn,
-  hasMainLlm,
-  hasLlmKey,
   onTicker,
   onTier,
   onCapital,
@@ -186,42 +177,28 @@ export const AltRunForm = ({
   };
 
   const handleStart = () => {
-    if (!signedIn) {
-      setError(t('tiered.user.signInFirst'));
-      return;
-    }
-    // Each part lists its section's fields in on-screen order; a part
-    // with nothing missing is left out.
-    const missingIn = (fields: ReadonlyArray<readonly [unknown, UiTextKey]>) =>
-      fields.filter(([filled]) => !filled).map(([, key]) => t(key));
-    const account = missingIn([
-      [hasMainLlm, 'tiered.altForm.req.mainLlm'],
-      [hasLlmKey, 'tiered.altForm.req.llmKey'],
-    ]);
-    const run = missingIn([
+    // The missing fields, in on-screen order.
+    const fields: ReadonlyArray<readonly [unknown, UiTextKey]> = [
       [ticker, 'tiered.altForm.req.ticker'],
       [capital, 'tiered.altForm.req.capital'],
       [riskPct, 'tiered.altForm.req.risk'],
       [reward, 'tiered.altForm.req.reward'],
       [hold, 'tiered.altForm.req.hold'],
       [tier !== null, 'tiered.altForm.req.tier'],
-    ]);
-    if (account.length > 0 || run.length > 0) {
-      const part = (title: string, names: string[]) => (
-        <div>
-          <AltSectionLabel>{title}</AltSectionLabel>
-          <ul className="list-disc pl-5">
-            {names.map((name) => (
-              <li key={name}>{name}</li>
-            ))}
-          </ul>
-        </div>
-      );
+    ];
+    const missing = fields.filter(([filled]) => !filled).map(([, key]) => t(key));
+    if (missing.length > 0) {
       setError(
         <>
           <p>{t('tiered.altForm.missingIntro')}</p>
-          {account.length > 0 ? part(t('tiered.user.title'), account) : null}
-          {run.length > 0 ? part(t('tiered.altForm.title'), run) : null}
+          <div>
+            <AltSectionLabel>{t('tiered.altForm.title')}</AltSectionLabel>
+            <ul className="list-disc pl-5">
+              {missing.map((name) => (
+                <li key={name}>{name}</li>
+              ))}
+            </ul>
+          </div>
         </>,
       );
       return;

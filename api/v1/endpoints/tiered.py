@@ -7,27 +7,16 @@ persist in the tiered_runs table (src/tiered_analysis/history.py), so
 GET /runs serves a clickable history that survives page navigation and
 server restarts, and GET /runs/{task_id} returns the stored full report.
 
-Public server (2026-09-14): every route here needs a signed-in user. A
-run carries that user's own model and keys and belongs to them — the
-list and detail routes only ever show the caller's runs.
+Self-host: one person, one machine. There is no sign-in; the model and
+its API key come from the environment (``LITELLM_MODEL`` and the
+provider's standard key variable, see .env.example), and every run is
+visible in the history.
 
 Run queue (2026-09-15): a new run is stored ``queued`` and the global
 queue (src/tiered_analysis/run_queue.py) starts it when one of the
-``TIERED_MAX_CONCURRENT_RUNS`` slots is free. An exact duplicate of the
-caller's own unfinished run (same ticker and inputs) is refused with a
-409 naming that run, so a double click never pays twice.
-
-Run reuse (2026-09-17): when another run — anyone's — of the same ticker
-on the same trading day with the same max hold time, the same or a
-deeper tier and the same or a stronger model of the same provider
-exists, the new run borrows its outlook instead of paying for its own
-(src/tiered_analysis/reuse.py). A finished source finishes the new run
-within seconds (only the personal trade-plan stages run); a source
-still in flight parks the new run as ``waiting`` until the source
-settles, then finishes it the same way — or, if the source failed or
-changed in a way that disqualifies it, puts the run back in the queue.
-To its owner a waiting run reads as the source reads to the source's
-owner (running, or queued with the source's place in line).
+``TIERED_MAX_CONCURRENT_RUNS`` slots is free. An exact duplicate of an
+unfinished run (same ticker and inputs) is refused with a 409 naming
+that run, so a double click never pays twice.
 """
 from __future__ import annotations
 
@@ -36,21 +25,13 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from api.auth.session import current_user
 from src.tiered_analysis import history
 from src.tiered_analysis.llm_support import LlmTranscript
-from src.tiered_analysis.reuse import ReuseUnavailable, reuse_kit
-from src.tiered_analysis.run_context import RunSettings
+from src.tiered_analysis.run_context import llm_model
 from src.tiered_analysis.run_queue import QueuedRun, RunQueue
-from src.user_settings import (
-    EncryptionNotConfigured,
-    covers_model,
-    model_label,
-    run_settings_for,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -60,18 +41,13 @@ router = APIRouter()
 def _run_analysis(stock_code: str, depth: int = 1,
                   sizing_overrides: Optional[Dict[str, float]] = None,
                   hold_weeks: int = 2,
-                  transcript: Optional[LlmTranscript] = None,
-                  settings: Optional[RunSettings] = None,
-                  **stand_ins: Any):
-    """Indirection so tests can patch the multi-minute production run.
-    ``stand_ins`` are a reused run's ``providers`` / ``quick_judge`` /
-    ``tier2_stage`` (src/tiered_analysis/reuse.py); absent on a fresh run."""
+                  transcript: Optional[LlmTranscript] = None):
+    """Indirection so tests can patch the multi-minute production run."""
     from src.tiered_analysis.integration import run_tiered_analysis
 
     return run_tiered_analysis(
         stock_code, depth=depth, sizing_overrides=sizing_overrides,
-        hold_weeks=hold_weeks, transcript=transcript, settings=settings,
-        **stand_ins,
+        hold_weeks=hold_weeks, transcript=transcript,
     )
 
 
@@ -174,8 +150,7 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
         "narrative": report.narrative,
         "warnings": list(report.warnings),
         # The quick judge's 0-10 outlook (depth 1); None at depth 2, whose
-        # judge detail sits under ``tier2``. Run reuse rebuilds a quick
-        # outlook from it.
+        # judge detail sits under ``tier2``.
         "debate_detail": report.debate_detail,
         "dimensions": dimensions,
         # v2 slice 6 (additive): depth, deeper-tier sections, sizing, cost.
@@ -206,26 +181,10 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
     }
 
 
-def _settings_for_queued_run(owner_id: Optional[int]) -> RunSettings:
-    """The owner's model and keys as they are when the run STARTS (a
-    queued run may wait a while; the key on file then is the one that
-    pays). Raises when there is no owner or no usable LLM key — the run
-    is then marked failed with that reason."""
-    if owner_id is None:
-        raise RuntimeError("run has no owner")
-    settings = run_settings_for(owner_id)
-    if not settings.is_llm_configured:
-        raise RuntimeError("no LLM model and API key on file for this run's owner")
-    return settings
-
-
 def _execute_run(run: QueuedRun) -> None:
-    """The queue's runner: execute one run and record its outcome, then
-    finish (or requeue) every run waiting on this one. Never raises — a
-    failure lands on the run row."""
+    """The queue's runner: execute one run and record its outcome. Never
+    raises — a failure lands on the run row."""
     try:
-        settings = _settings_for_queued_run(run.owner_id)
-        history.set_model(run.task_id, settings.llm_model)
         inputs = run.inputs
         outcome = _run_analysis(
             run.stock_code,
@@ -233,128 +192,20 @@ def _execute_run(run: QueuedRun) -> None:
             sizing_overrides=inputs.get("sizing_overrides") or None,
             hold_weeks=int(inputs.get("hold_weeks") or 2),
             transcript=LlmTranscript.for_run(run.task_id),
-            settings=settings,
         )
         history.mark_done(run.task_id, _serialize_outcome(outcome))
     except Exception as exc:
         logger.error("tiered analysis task failed for %s: %s",
                      run.stock_code, exc, exc_info=True)
         history.mark_failed(run.task_id, str(exc))
-    _settle_waiters(run.task_id)
 
 
 #: The one queue this process runs; app startup calls ``resume`` on it.
 run_queue = RunQueue(_execute_run)
 
-#: Serializes the duplicate/reuse check with the row insert so two clicks
-#: that arrive together cannot both pass the check, and so a source
-#: cannot settle its waiters between a requester finding it and the
-#: requester's row being written.
+#: Serializes the duplicate check with the row insert so two clicks that
+#: arrive together cannot both pass the check.
 _submit_lock = threading.Lock()
-
-
-def _source_serves(source: Dict[str, Any], requester: Dict[str, Any]) -> bool:
-    """Whether a settled source still qualifies for a waiting requester:
-    finished with a reusable result, at the requester's tier or deeper,
-    with a model that covers the requester's (the source's owner may
-    have changed models while it waited in the queue)."""
-    from src.tiered_analysis.reuse import is_reusable_result
-
-    if source["status"] != history.STATUS_DONE:
-        return False
-    if not is_reusable_result(source["result"]):
-        return False
-    source_tier = source["inputs"].get("tier")
-    wanted_tier = requester["inputs"].get("tier") or 1
-    if not isinstance(source_tier, int) or source_tier < int(wanted_tier):
-        return False
-    return covers_model(source["model"], requester["model"])
-
-
-def _finish_from_source(requester: Dict[str, Any], source: Dict[str, Any]) -> None:
-    """Finish ``requester`` (a row already marked running) by running the
-    pipeline with the source's data and outlook standing in for the
-    shared stages. Only the requester's personal stages run — the plan
-    levels, the plan review, sizing, the action — with their own key.
-    A source that turns out unfit goes back in the queue as a fresh run;
-    any other failure lands on the run row like a normal failure."""
-    task_id = requester["task_id"]
-    try:
-        kit = reuse_kit(source["result"] or {})
-    except ReuseUnavailable as exc:
-        logger.warning("run %s cannot reuse %s (%s); running afresh",
-                       task_id, source["task_id"], exc)
-        history.requeue(task_id)
-        return
-    try:
-        settings = _settings_for_queued_run(requester["owner_id"])
-        inputs = requester["inputs"]
-        outcome = _run_analysis(
-            requester["stock_code"],
-            depth=kit.depth,
-            sizing_overrides=inputs.get("sizing_overrides") or None,
-            hold_weeks=int(inputs.get("hold_weeks") or 2),
-            transcript=LlmTranscript.for_run(task_id),
-            settings=settings,
-            providers=kit.providers,
-            quick_judge=kit.quick_judge,
-            tier2_stage=kit.tier2_stage,
-        )
-        result = _serialize_outcome(outcome)
-        # What the report page tells the user: the outlook came from a
-        # shared run at this tier by this model; only the trade plan is
-        # theirs. Never who ran the source.
-        result["reused"] = {
-            "tier": kit.depth,
-            "model": source["model"],
-            "model_label": model_label(source["model"]),
-        }
-        history.set_model(task_id, source["model"])
-        history.mark_done(task_id, result)
-    except Exception as exc:
-        logger.error("reused tiered analysis failed for %s: %s",
-                     requester["stock_code"], exc, exc_info=True)
-        history.mark_failed(task_id, str(exc))
-
-
-def _reuse_finished_source(task_id: str, source_task_id: str) -> None:
-    """Background thread for a run that reuses an already-finished
-    source: finish it now, then let the queue fill any slot a requeue
-    freed. Never raises."""
-    try:
-        requester = history.run_for_reuse(task_id)
-        source = history.run_for_reuse(source_task_id)
-        if requester is None or source is None or not _source_serves(source, requester):
-            history.requeue(task_id)
-        else:
-            _finish_from_source(requester, source)
-    except Exception:
-        logger.exception("run %s could not be finished from %s", task_id, source_task_id)
-        history.requeue(task_id)
-    run_queue.dispatch()
-
-
-def _settle_waiters(source_task_id: str) -> None:
-    """After ``source_task_id`` settled: finish every run waiting on it,
-    or put back in the queue those it can no longer serve. Runs in the
-    source's worker thread (so the waiters' plan reviews take the slot
-    the source held); the queue dispatches once they are done."""
-    try:
-        with _submit_lock:
-            waiters = history.list_waiters(source_task_id)
-        if not waiters:
-            return
-        source = history.run_for_reuse(source_task_id)
-        for requester in waiters:
-            if source is None or not _source_serves(source, requester):
-                logger.info("run %s requeued: source %s cannot serve it",
-                            requester["task_id"], source_task_id)
-                history.requeue(requester["task_id"])
-                continue
-            history.mark_running(requester["task_id"])
-            _finish_from_source(requester, source)
-    except Exception:
-        logger.exception("settling the runs waiting on %s failed", source_task_id)
 
 
 def _effective_run_inputs(request: TieredAnalyzeRequest) -> Dict[str, Any]:
@@ -384,37 +235,19 @@ def _effective_run_inputs(request: TieredAnalyzeRequest) -> Dict[str, Any]:
     }
 
 
-def _bar_date_for(stock_code: str) -> Optional[str]:
-    """The trading day a run started now analyses (the most recent
-    completed session in the ticker's market), ISO; None for an unknown
-    market — such runs are never matched for reuse."""
-    from src.tiered_analysis.run_gate import expected_bar_date, market_for_symbol
-
-    day = expected_bar_date(market_for_symbol(stock_code))
-    return day.isoformat() if day is not None else None
-
-
-def _settings_for_run(user: Dict[str, Any]) -> RunSettings:
-    """The caller's model and keys; 400 when they have not set up an LLM
-    key yet (the run would only fail minutes later otherwise)."""
-    try:
-        settings = run_settings_for(user["id"])
-    except EncryptionNotConfigured as exc:
-        raise HTTPException(status_code=503, detail={
-            "error": "encryption_not_configured", "message": str(exc)})
-    if not settings.is_llm_configured:
+def _require_llm_configured() -> None:
+    """400 when no model is configured (the run would only fail minutes
+    later otherwise). The key itself is the provider's standard variable,
+    read by litellm at call time."""
+    if llm_model() is None:
         raise HTTPException(status_code=400, detail={
             "error": "llm_not_configured",
-            "message": "pick a model and add its API key in the user block first",
+            "message": "set LITELLM_MODEL (and the provider's API key) in .env first",
         })
-    return settings
 
 
 @router.post("/analyze", status_code=202)
-def start_tiered_analysis(
-    request: TieredAnalyzeRequest,
-    user: Dict[str, Any] = Depends(current_user),
-) -> Dict[str, Any]:
+def start_tiered_analysis(request: TieredAnalyzeRequest) -> Dict[str, Any]:
     """Kick off a tiered run in the background; returns a pollable task.
 
     CLOCK GATE (2026-08-08): runs are rejected (409, code market_open)
@@ -423,22 +256,16 @@ def start_tiered_analysis(
     ``run_anyway: true`` overrides and analyzes the previous completed
     session instead.
 
-    DUPLICATE (2026-09-15): the caller's own queued/running run with the
-    same ticker and inputs is refused (409, code duplicate_run, with
-    that run's task_id and status).
+    DUPLICATE (2026-09-15): a queued or running run with the same ticker
+    and inputs is refused (409, code duplicate_run, with that run's
+    task_id and status).
 
-    The response ``status`` is ``running`` when a slot was free (or the
-    run is being finished from an already-finished matching run), else
-    ``queued``. A run that will be finished from a matching run still
-    in flight reports that run's status — to its owner it looks exactly
-    as the source looks to the source's owner.
+    The response ``status`` is ``running`` when a slot was free, else
+    ``queued``.
     """
     from src.tiered_analysis.run_gate import clock_gate
 
-    # Refuse up front when the caller has no LLM key; the run itself
-    # re-reads the settings when it leaves the queue. The model on file
-    # now is what the reuse matching compares.
-    settings = _settings_for_run(user)
+    _require_llm_configured()
     gate = clock_gate(request.stock_code, override=request.run_anyway)
     if gate.blocked:
         logger.info(
@@ -458,11 +285,9 @@ def start_tiered_analysis(
         overrides = request.sizing.model_dump(exclude_none=True)
         if overrides:
             inputs["sizing_overrides"] = overrides
-    bar_date = _bar_date_for(request.stock_code)
 
     with _submit_lock:
-        duplicate = history.find_active_duplicate(
-            user["id"], request.stock_code, inputs)
+        duplicate = history.find_active_duplicate(request.stock_code, inputs)
         if duplicate is not None:
             logger.info("tiered run refused as a duplicate of %s for %s",
                         duplicate["task_id"], request.stock_code)
@@ -471,42 +296,10 @@ def start_tiered_analysis(
                 "task_id": duplicate["task_id"],
                 "status": duplicate["status"],
             })
-        source = history.find_reusable_run(
-            request.stock_code, bar_date, request.hold_weeks,
-            request.depth, settings.llm_model,
-        )
         task_id = uuid.uuid4().hex
-        if source is None:
-            history.create_run(task_id, request.stock_code, inputs=inputs,
-                               owner_id=user["id"],
-                               status=history.STATUS_QUEUED,
-                               bar_date=bar_date, model=settings.llm_model)
-        elif source["status"] == history.STATUS_DONE:
-            history.create_run(task_id, request.stock_code, inputs=inputs,
-                               owner_id=user["id"],
-                               status=history.STATUS_RUNNING,
-                               bar_date=bar_date, model=settings.llm_model,
-                               source_task_id=source["task_id"])
-        else:
-            history.create_run(task_id, request.stock_code, inputs=inputs,
-                               owner_id=user["id"],
-                               status=history.STATUS_WAITING,
-                               bar_date=bar_date, model=settings.llm_model,
-                               source_task_id=source["task_id"])
-    if source is None:
-        status = run_queue.submit(task_id)
-    elif source["status"] == history.STATUS_DONE:
-        logger.info("tiered run %s reuses finished run %s for %s",
-                    task_id, source["task_id"], request.stock_code)
-        threading.Thread(
-            target=_reuse_finished_source, args=(task_id, source["task_id"]),
-            name=f"tiered-reuse-{request.stock_code}", daemon=True,
-        ).start()
-        status = history.STATUS_RUNNING
-    else:
-        logger.info("tiered run %s waits on %s run %s for %s",
-                    task_id, source["status"], source["task_id"], request.stock_code)
-        status = source["status"]
+        history.create_run(task_id, request.stock_code, inputs=inputs,
+                           status=history.STATUS_QUEUED)
+    status = run_queue.submit(task_id)
     return {"task_id": task_id, "stock_code": request.stock_code,
             "depth": request.depth, "status": status}
 
@@ -525,30 +318,24 @@ def get_sizing_defaults() -> Dict[str, Optional[float]]:
 
 
 @router.get("/runs")
-def list_tiered_runs(
-    limit: int = 50, user: Dict[str, Any] = Depends(current_user)
-) -> Dict[str, List[Dict[str, Any]]]:
-    """The caller's run history, newest first (summaries only)."""
-    return {"items": history.list_runs(limit=limit, owner_id=user["id"])}
+def list_tiered_runs(limit: int = 50) -> Dict[str, List[Dict[str, Any]]]:
+    """Run history, newest first (summaries only)."""
+    return {"items": history.list_runs(limit=limit)}
 
 
 @router.get("/runs/{task_id}")
-def get_tiered_run(
-    task_id: str, user: Dict[str, Any] = Depends(current_user)
-) -> Dict[str, Any]:
-    """One of the caller's runs with its stored full report."""
-    run = history.get_run(task_id, owner_id=user["id"])
+def get_tiered_run(task_id: str) -> Dict[str, Any]:
+    """One run with its stored full report."""
+    run = history.get_run(task_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return run
 
 
 @router.get("/runs/{task_id}/transcript")
-def get_tiered_run_transcript(
-    task_id: str, user: Dict[str, Any] = Depends(current_user)
-) -> Dict[str, List[Dict[str, Any]]]:
+def get_tiered_run_transcript(task_id: str) -> Dict[str, List[Dict[str, Any]]]:
     """The run's LLM exchanges (prompt, raw reply, error) in call order —
     served separately from the run so the report stays light."""
-    if history.get_run(task_id, owner_id=user["id"]) is None:
+    if history.get_run(task_id) is None:
         raise HTTPException(status_code=404, detail="run not found")
     return {"items": history.list_transcript(task_id)}

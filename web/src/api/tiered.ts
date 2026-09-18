@@ -362,24 +362,11 @@ export type TieredResult = {
   // Max hold time in weeks the run was judged against (2026-08-08);
   // absent on old stored runs.
   hold_weeks?: number | null;
-  // Run reuse (2026-09-17): set when the outlook came from another run.
-  reused?: TieredReused | null;
 };
 
 // queued (2026-09-15): waiting for a free slot in the server's global run
-// queue; it becomes running by itself. A run that will borrow its outlook
-// from a matching run still in flight (2026-09-17) reports that run's
-// status and place in line, so it reads exactly as the source does.
+// queue; it becomes running by itself.
 export type TieredRunStatus = 'queued' | 'running' | 'done' | 'failed';
-
-// Run reuse (2026-09-17): the outlook came from a shared run at this tier
-// by this model; only the trade plan was computed with the user's own
-// settings. Absent on a run that did its own analysis.
-export type TieredReused = {
-  tier: number;
-  model: string | null;
-  model_label: string | null;
-};
 
 export type TieredRunSummary = {
   task_id: string;
@@ -388,13 +375,8 @@ export type TieredRunSummary = {
   error: string | null;
   created_at: string | null;
   updated_at: string | null;
-  // Queued rows only: how many runs (anyone's) are ahead in the line.
+  // Queued rows only: how many runs are ahead in the line.
   queue_ahead?: number | null;
-  // The main model behind the outlook (on a reused run, the source's) and
-  // whether the outlook was borrowed from another run.
-  model?: string | null;
-  model_label?: string | null;
-  reused?: boolean;
   // Digest of the stored report for the history rows. Null while running,
   // after a failure, or on rows stored before the backend sent these.
   // shares mirrors the report card: 0 = sizing ran but bought nothing,
@@ -450,9 +432,9 @@ export type TieredMarketOpenGate = {
   sessionClose: string | null;
 };
 
-// The 409 duplicate-run rejection body (2026-09-15): the caller's own
-// unfinished run with the same ticker and inputs — the Start popup names
-// it and the history expands it.
+// The 409 duplicate-run rejection body (2026-09-15): an unfinished run
+// with the same ticker and inputs — the Start popup names it and the
+// history expands it.
 export type TieredDuplicateRun = {
   taskId: string;
   status: 'queued' | 'running';
