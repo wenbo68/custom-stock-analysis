@@ -78,7 +78,7 @@ def open_clock_gate(monkeypatch):
 @pytest.fixture()
 def llm_configured(monkeypatch):
     """The model a run needs, as .env provides it."""
-    monkeypatch.setenv("LITELLM_MODEL", "gemini/test-model")
+    monkeypatch.setenv("MAIN_LLM", "gemini/test-model")
 
 
 def _client():
@@ -249,11 +249,11 @@ class TestTieredAnalyzeEndpoint:
 
 
 class TestLlmConfiguration:
-    """A run needs LITELLM_MODEL in the environment; without it the start
+    """A run needs MAIN_LLM in the environment; without it the start
     is refused up front instead of failing minutes later."""
 
     def test_run_without_a_model_is_refused_before_starting(self, isolated_db, monkeypatch):
-        monkeypatch.delenv("LITELLM_MODEL", raising=False)
+        monkeypatch.delenv("MAIN_LLM", raising=False)
         client = _client()
         response = client.post("/tiered/analyze", json={"stock_code": "AAPL"})
         assert response.status_code == 400
@@ -486,7 +486,7 @@ class TestRunQueueEndpoint:
         return runner, release
 
     def test_second_run_past_the_cap_waits_then_runs(self, client, monkeypatch):
-        monkeypatch.setenv("TIERED_MAX_CONCURRENT_RUNS", "1")
+        monkeypatch.setenv("MAX_CONCURRENT_RUNS", "1")
         runner, release = self._gated_runner()
         with patch.object(tiered, "_run_analysis", runner):
             first = client.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
@@ -506,7 +506,7 @@ class TestRunQueueEndpoint:
             assert _poll_until_done(client, second["task_id"])["status"] == "done"
 
     def test_exact_duplicate_of_an_unfinished_run_is_409(self, client, monkeypatch):
-        monkeypatch.setenv("TIERED_MAX_CONCURRENT_RUNS", "1")
+        monkeypatch.setenv("MAX_CONCURRENT_RUNS", "1")
         runner, release = self._gated_runner()
         body = {"stock_code": "AAPL", "depth": 2, "hold_weeks": 3,
                 "sizing": {"capital": 50000, "risk_fraction": 0.02, "reward_risk": 2}}

@@ -311,13 +311,15 @@ def _summarize(
     model: Optional[str] = None,
     schema: Any = None,
 ) -> str:
-    from .run_context import llm_model
+    from .run_context import llm_api_key, llm_model
 
     resolved = (model or llm_model() or "").strip()
     if not resolved:
-        raise LlmConfigError("no LLM model configured: LITELLM_MODEL is not set")
-    # The provider's API key is its standard environment variable
-    # (GEMINI_API_KEY, OPENAI_API_KEY, ...), which litellm reads itself.
+        raise LlmConfigError("no LLM model configured: MAIN_LLM is not set")
+    # One provider-agnostic key (LLM_API_KEY) handed to litellm on every
+    # call; when it is unset litellm reads the provider's own standard
+    # variable (GEMINI_API_KEY, OPENAI_API_KEY, ...) itself.
+    api_key = llm_api_key()
     import litellm
 
     response_format = (
@@ -336,6 +338,8 @@ def _summarize(
         kwargs: Dict[str, Any] = {}
         if fmt is not None:
             kwargs["response_format"] = fmt
+        if api_key:
+            kwargs["api_key"] = api_key
         return litellm.completion(
             model=resolved,
             messages=[{"role": "user", "content": prompt}],
@@ -407,8 +411,8 @@ def screen_summarizer(prompt: str, schema: Any = None) -> str:
     """Summarizer for the news screen's classification chores.
 
     A faster, cheaper model — screening is is-this-about-the-company
-    bookkeeping, not analysis: ``NEWS_SCREEN_MODEL``, else the standard
-    ``LITELLM_MODEL`` so unconfigured keeps working. See
+    bookkeeping, not analysis: ``SUB_LLM``, else the standard
+    ``MAIN_LLM`` so unconfigured keeps working. See
     ``run_context.llm_sub_model``. Temperature 0 like every stage.
     """
     from .run_context import llm_sub_model

@@ -155,12 +155,12 @@ class TestFailures(unittest.TestCase):
 
         def summarizer(prompt):
             calls.append(prompt)
-            raise LlmConfigError("LITELLM_MODEL is not set")
+            raise LlmConfigError("MAIN_LLM is not set")
 
         result = _run(summarizer)
         self.assertEqual(len(calls), 1)
         self.assertIsNone(result.outlook)
-        self.assertTrue(any("LITELLM_MODEL" in w for w in result.warnings))
+        self.assertTrue(any("MAIN_LLM" in w for w in result.warnings))
 
     def test_transient_llm_crash_is_retried_then_reported(self):
         calls = []

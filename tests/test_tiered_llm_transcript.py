@@ -128,7 +128,7 @@ class TestSummarizerTranscript(unittest.TestCase):
 
     def _summarize_with(self, fake):
         with mock.patch.dict(sys.modules, {"litellm": fake}):
-            with mock.patch.dict(os.environ, {"LITELLM_MODEL": "fake/model"}):
+            with mock.patch.dict(os.environ, {"MAIN_LLM": "fake/model"}):
                 return default_summarizer("the prompt")
 
     def test_successful_call_lands_in_the_transcript_with_its_stage(self):

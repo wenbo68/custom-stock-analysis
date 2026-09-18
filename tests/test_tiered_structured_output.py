@@ -202,7 +202,7 @@ class _FakeLitellm:
 
 def _summarize_with(fake, schema):
     with mock.patch.dict(sys.modules, {"litellm": fake}):
-        with mock.patch.dict(os.environ, {"LITELLM_MODEL": "fake/model"}):
+        with mock.patch.dict(os.environ, {"MAIN_LLM": "fake/model"}):
             return default_summarizer("the prompt", schema=schema)
 
 
@@ -240,7 +240,7 @@ class TestProviderEnforcement(unittest.TestCase):
     def test_no_schema_keeps_the_old_call_shape(self):
         fake = _FakeLitellm()
         with mock.patch.dict(sys.modules, {"litellm": fake}):
-            with mock.patch.dict(os.environ, {"LITELLM_MODEL": "fake/model"}):
+            with mock.patch.dict(os.environ, {"MAIN_LLM": "fake/model"}):
                 default_summarizer("the prompt")
         [call] = fake.calls
         self.assertNotIn("response_format", call)

@@ -8,13 +8,12 @@ GET /runs serves a clickable history that survives page navigation and
 server restarts, and GET /runs/{task_id} returns the stored full report.
 
 Self-host: one person, one machine. There is no sign-in; the model and
-its API key come from the environment (``LITELLM_MODEL`` and the
-provider's standard key variable, see .env.example), and every run is
-visible in the history.
+its API key come from the environment (``MAIN_LLM`` and ``LLM_API_KEY``,
+see .env.example), and every run is visible in the history.
 
 Run queue (2026-09-15): a new run is stored ``queued`` and the global
 queue (src/tiered_analysis/run_queue.py) starts it when one of the
-``TIERED_MAX_CONCURRENT_RUNS`` slots is free. An exact duplicate of an
+``MAX_CONCURRENT_RUNS`` slots is free. An exact duplicate of an
 unfinished run (same ticker and inputs) is refused with a 409 naming
 that run, so a double click never pays twice.
 """
@@ -237,12 +236,12 @@ def _effective_run_inputs(request: TieredAnalyzeRequest) -> Dict[str, Any]:
 
 def _require_llm_configured() -> None:
     """400 when no model is configured (the run would only fail minutes
-    later otherwise). The key itself is the provider's standard variable,
-    read by litellm at call time."""
+    later otherwise). The key (``LLM_API_KEY``) is only checked at call
+    time, since litellm can also read the provider's own variable."""
     if llm_model() is None:
         raise HTTPException(status_code=400, detail={
             "error": "llm_not_configured",
-            "message": "set LITELLM_MODEL (and the provider's API key) in .env first",
+            "message": "set MAIN_LLM and LLM_API_KEY in .env first",
         })
 
 

@@ -10,7 +10,7 @@ fundamentals, news, macro, an AI debate, a trade plan with sizing — plus a
 run history.
 
 This is the self-host version: one person, one machine, no sign-in. The
-model and its API key come from `.env`. A hosted, many-user version with
+model (`MAIN_LLM`) and its key (`LLM_API_KEY`) come from `.env`. A hosted, many-user version with
 sign-in and per-user keys lives in the separate
 [custom-stock-analysis-hosted](https://github.com/wenbo68/custom-stock-analysis-hosted)
 repo (split 2026-09-18); engine and UI improvements flow between the two
@@ -50,7 +50,7 @@ cd web && npm run dev
 
 ## Run queue
 
-At most `TIERED_MAX_CONCURRENT_RUNS` analyses (default 4) run at once;
+At most `MAX_CONCURRENT_RUNS` analyses (default 4) run at once;
 the rest wait in line and start by themselves, and a restart resumes
 whatever was still waiting. An unfinished run with the same ticker and
 inputs cannot be started twice — the Start popup names the existing one.

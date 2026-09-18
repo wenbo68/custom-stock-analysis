@@ -10,8 +10,8 @@ actually read by the copied modules:
                           vendor API keys (all keys optional; a missing
                           key just skips that fallback source)
 
-Everything else the tiered engine reads (LITELLM_MODEL, FINNHUB_API_KEY,
-FRED_API_KEY, ALPHAVANTAGE_API_KEY, NEWS_SCREEN_MODEL, TIERED_* sizing
+Everything else the tiered engine reads (MAIN_LLM, FINNHUB_API_KEY,
+FRED_API_KEY, ALPHAVANTAGE_API_KEY, SUB_LLM, TIERED_* sizing
 defaults) is read straight from the environment by the engine itself, so
 it does not appear here.
 """

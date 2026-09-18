@@ -5,7 +5,7 @@
 Why: every run holds price history, news and LLM replies in memory while
 fanning out parallel LLM calls. A few runs at once are fine; a burst of
 them can exhaust the machine and take every run down with it. The cap
-is ``TIERED_MAX_CONCURRENT_RUNS`` (default ``DEFAULT_MAX_CONCURRENT_RUNS``),
+is ``MAX_CONCURRENT_RUNS`` (default ``DEFAULT_MAX_CONCURRENT_RUNS``),
 read on every dispatch so a changed setting applies without a restart.
 
 How: the line itself lives in the database — a run is created ``queued``
@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
-MAX_CONCURRENT_RUNS_ENV = "TIERED_MAX_CONCURRENT_RUNS"
+MAX_CONCURRENT_RUNS_ENV = "MAX_CONCURRENT_RUNS"
 DEFAULT_MAX_CONCURRENT_RUNS = 4
 
 

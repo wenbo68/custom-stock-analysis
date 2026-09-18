@@ -19,17 +19,27 @@ DATA_KEY_ENV: Dict[str, str] = {
 
 
 def llm_model() -> Optional[str]:
-    """``LITELLM_MODEL`` — the model that does the analysis."""
-    model = os.getenv("LITELLM_MODEL") or ""
+    """``MAIN_LLM`` — the model that does the analysis."""
+    model = os.getenv("MAIN_LLM") or ""
     return model.strip() or None
 
 
 def llm_sub_model() -> Optional[str]:
-    """The screening model (``NEWS_SCREEN_MODEL``, a cheaper one for the
+    """The screening model (``SUB_LLM``, a cheaper one for the
     news screen's is-this-about-the-company chores), else the main
     model."""
-    model = os.getenv("NEWS_SCREEN_MODEL") or os.getenv("LITELLM_MODEL") or ""
+    model = os.getenv("SUB_LLM") or os.getenv("MAIN_LLM") or ""
     return model.strip() or None
+
+
+def llm_api_key() -> Optional[str]:
+    """``LLM_API_KEY`` — the key for whichever provider ``MAIN_LLM`` (and
+    ``SUB_LLM``) belongs to. One variable, any provider: it is passed to
+    litellm explicitly on every call. None when unset, in which case
+    litellm falls back to the provider's own standard variable
+    (GEMINI_API_KEY, OPENAI_API_KEY, ...)."""
+    key = os.getenv("LLM_API_KEY") or ""
+    return key.strip() or None
 
 
 def data_key(name: str) -> Optional[str]:
