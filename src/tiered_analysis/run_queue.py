@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT_RUNS_ENV = "TIERED_MAX_CONCURRENT_RUNS"
-DEFAULT_MAX_CONCURRENT_RUNS = 2
+DEFAULT_MAX_CONCURRENT_RUNS = 4
 
 
 def max_concurrent_runs() -> int:
