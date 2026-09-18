@@ -17,16 +17,14 @@ import logging
 import re
 import threading
 import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Type
 
 from pydantic import BaseModel, ValidationError
 
 from .providers.base import DimensionResult
+from .run_context import RunSettings
 
 logger = logging.getLogger(__name__)
 
@@ -35,63 +33,53 @@ class LlmConfigError(RuntimeError):
     """LLM configuration missing — callers surface this as a warning."""
 
 
-#: Where per-run LLM transcripts live; files older than
-#: ``TRANSCRIPT_MAX_AGE_DAYS`` are pruned when a new run writes its first
-#: entry (news-cache retention convention).
-DEFAULT_TRANSCRIPT_DIR = Path("data") / "llm_transcripts"
+#: Transcript rows older than this are pruned at server startup.
 TRANSCRIPT_MAX_AGE_DAYS = 14
+
+#: One transcript entry as a plain dict (the storage row's fields).
+TranscriptWriter = Callable[[Dict[str, Any]], None]
 
 
 class LlmTranscript:
-    """Append-only JSONL record of every LLM exchange in one run.
+    """Record of every LLM exchange in one run.
 
-    One file per run, one line per call: stage, model, the full prompt
-    and raw reply, token counts, duration, and the error when the call
-    itself raised. Exists so a "returned no usable JSON" warning is
-    diagnosable from stored evidence instead of a re-run (owner request
-    2026-08-25 — the original bad grouping reply was unrecoverable).
+    One entry per call: stage, model, the full prompt and raw reply,
+    token counts, duration, and the error when the call itself raised.
+    Exists so a "returned no usable JSON" warning is diagnosable from
+    stored evidence instead of a re-run (owner request 2026-08-25).
 
-    The file is created lazily on the first ``record`` — a run whose
-    summarizers are all fakes (tests, demo seeds) writes nothing. Any
-    filesystem problem disables writing for the rest of the run and is
-    logged; a transcript must never fail an analysis (cache convention).
+    Entries go through a ``writer`` — in production the run's rows in
+    the ``tiered_run_transcripts`` table (``for_run``), in tests a list.
+    ``discard()`` builds a transcript that counts entries and stores
+    nothing (CLI runs, harnesses). Any writer failure disables the
+    transcript for the rest of the run and is logged; a transcript must
+    never fail an analysis (cache convention).
     """
 
-    def __init__(self, path: Path) -> None:
-        self._path = Path(path)
+    def __init__(self, run_id: str, writer: Optional[TranscriptWriter] = None) -> None:
+        self._run_id = run_id
+        self._writer = writer
         self._lock = threading.Lock()
         self._disabled = False
         self._entries = 0
 
     @classmethod
-    def for_run(
-        cls,
-        symbol: str,
-        directory: Path = DEFAULT_TRANSCRIPT_DIR,
-        now: Any = datetime.now,
-    ) -> "LlmTranscript":
-        stamp = now().strftime("%Y%m%d-%H%M%S")
-        name = f"{stamp}_{symbol.upper()}_{uuid.uuid4().hex[:8]}.jsonl"
-        return cls(Path(directory) / name)
+    def for_run(cls, run_id: str) -> "LlmTranscript":
+        """The production transcript: rows keyed by the run's task id."""
+        return cls(run_id, writer=_database_transcript_writer(run_id))
+
+    @classmethod
+    def discard(cls) -> "LlmTranscript":
+        """Counts entries, stores nothing."""
+        return cls("", writer=None)
 
     @property
-    def filename(self) -> str:
-        return self._path.name
+    def run_id(self) -> str:
+        return self._run_id
 
     @property
     def entries(self) -> int:
         return self._entries
-
-    def _prepare_directory(self) -> None:
-        directory = self._path.parent
-        directory.mkdir(parents=True, exist_ok=True)
-        cutoff = time.time() - TRANSCRIPT_MAX_AGE_DAYS * 86400
-        for old in directory.glob("*.jsonl"):
-            try:
-                if old.stat().st_mtime < cutoff:
-                    old.unlink()
-            except OSError:
-                continue  # a vanished/locked old file must not stop the run
 
     def record(
         self,
@@ -109,9 +97,10 @@ class LlmTranscript:
     ) -> None:
         if self._disabled:
             return
-        line = json.dumps(
-            {
-                "ts": datetime.now().isoformat(timespec="seconds"),
+        with self._lock:
+            entry = {
+                "task_id": self._run_id,
+                "seq": self._entries + 1,
                 "stage": stage,
                 "model": model,
                 "temperature": temperature,
@@ -125,23 +114,29 @@ class LlmTranscript:
                 "error": error,
                 "prompt": prompt,
                 "reply": reply,
-            },
-            ensure_ascii=False,
-        )
-        try:
-            with self._lock:
-                if self._entries == 0:
-                    self._prepare_directory()
-                with self._path.open("a", encoding="utf-8") as fh:
-                    fh.write(line + "\n")
+            }
+            try:
+                if self._writer is not None:
+                    self._writer(entry)
                 self._entries += 1
-        except OSError as exc:
-            self._disabled = True
-            logger.warning(
-                "LLM transcript write failed (%s) — transcript off for the"
-                " rest of this run",
-                exc,
-            )
+            except Exception as exc:
+                self._disabled = True
+                logger.warning(
+                    "LLM transcript write failed (%s) — transcript off for the"
+                    " rest of this run",
+                    exc,
+                )
+
+
+def _database_transcript_writer(run_id: str) -> TranscriptWriter:
+    def write(entry: Dict[str, Any]) -> None:
+        from src.storage import DatabaseManager, TieredRunTranscriptRecord
+
+        with DatabaseManager.get_instance().get_session() as session:
+            session.add(TieredRunTranscriptRecord(**entry))
+            session.commit()
+
+    return write
 
 
 @dataclass
@@ -168,7 +163,7 @@ USAGE_SCOPE_NOTE = (
     "synthesis ran inside the DSA pipeline and is not counted"
 )
 
-_UNATTRIBUTED_STAGE = "unattributed"
+_UNKNOWN_STAGE = "unknown"
 
 _active = threading.local()
 
@@ -186,10 +181,17 @@ class LlmUsageTracker:
     of the run lands in one file without extra plumbing.
     """
 
-    def __init__(self, transcript: Optional[LlmTranscript] = None) -> None:
+    def __init__(
+        self,
+        transcript: Optional[LlmTranscript] = None,
+        settings: Optional[RunSettings] = None,
+    ) -> None:
         self._stages: Dict[str, _StageUsage] = {}
         self._current: Optional[str] = None
         self.transcript = transcript
+        #: The run's own model/keys (run_context) — rides the activation
+        #: into worker threads exactly like the transcript does.
+        self.settings = settings
         # Debate stages run two LLM calls in parallel threads; both report
         # into the same tracker.
         self._lock = threading.Lock()
@@ -217,14 +219,14 @@ class LlmUsageTracker:
     ) -> None:
         with self._lock:
             stage = self._stages.setdefault(
-                self._current or _UNATTRIBUTED_STAGE, _StageUsage()
+                self._current or _UNKNOWN_STAGE, _StageUsage()
             )
             stage.calls += 1
             stage.prompt_tokens += int(prompt_tokens or 0)
             stage.completion_tokens += int(completion_tokens or 0)
 
     def current_stage(self) -> str:
-        return self._current or _UNATTRIBUTED_STAGE
+        return self._current or _UNKNOWN_STAGE
 
     def to_detail(self) -> Dict[str, Any]:
         total = _StageUsage()
@@ -238,9 +240,9 @@ class LlmUsageTracker:
             "scope": USAGE_SCOPE_NOTE,
         }
         # Only a transcript that actually holds entries is worth pointing
-        # a reader at — zero-LLM runs (staleness stop) never made a file.
+        # a reader at — zero-LLM runs (staleness stop) recorded nothing.
         if self.transcript is not None and self.transcript.entries > 0:
-            detail["transcript_file"] = self.transcript.filename
+            detail["transcript_entries"] = self.transcript.entries
         return detail
 
 
@@ -317,14 +319,17 @@ def _summarize(
     model: Optional[str] = None,
     schema: Any = None,
 ) -> str:
-    import os
+    from .run_context import llm_api_key, llm_model
 
-    resolved = (model or os.getenv("LITELLM_MODEL") or "").strip()
+    resolved = (model or llm_model() or "").strip()
     if not resolved:
         raise LlmConfigError(
-            "LITELLM_MODEL is not set; tiered-analysis LLM stages need the "
-            "repo's standard LLM configuration"
+            "no LLM model configured: the run carries none and "
+            "LITELLM_MODEL is not set"
         )
+    # The run's own key (a signed-in user's) goes to litellm explicitly;
+    # without one litellm reads the provider's standard variable.
+    api_key = llm_api_key()
     import litellm
 
     response_format = (
@@ -343,6 +348,8 @@ def _summarize(
         kwargs: Dict[str, Any] = {}
         if fmt is not None:
             kwargs["response_format"] = fmt
+        if api_key:
+            kwargs["api_key"] = api_key
         return litellm.completion(
             model=resolved,
             messages=[{"role": "user", "content": prompt}],
@@ -413,15 +420,15 @@ def default_summarizer(prompt: str, schema: Any = None) -> str:
 def screen_summarizer(prompt: str, schema: Any = None) -> str:
     """Summarizer for the news screen's classification chores.
 
-    ``NEWS_SCREEN_MODEL`` (a faster, cheaper model — screening is
-    is-this-about-the-company bookkeeping, not analysis) when set, the
-    standard ``LITELLM_MODEL`` otherwise: unconfigured keeps working,
-    configured speeds it up. Temperature 0 like every other stage.
+    A faster, cheaper model — screening is is-this-about-the-company
+    bookkeeping, not analysis: the run's own sub model, else its main
+    model, else the server's ``NEWS_SCREEN_MODEL``; None falls through
+    to the standard ``LITELLM_MODEL`` so unconfigured keeps working.
+    See ``run_context.llm_sub_model``. Temperature 0 like every stage.
     """
-    import os
+    from .run_context import llm_sub_model
 
-    model = (os.getenv("NEWS_SCREEN_MODEL") or "").strip() or None
-    return _summarize(prompt, temperature=0.0, model=model, schema=schema)
+    return _summarize(prompt, temperature=0.0, model=llm_sub_model(), schema=schema)
 
 
 def deterministic_summarizer(prompt: str, schema: Any = None) -> str:

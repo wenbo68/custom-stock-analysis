@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """LLM news screen — the judgment stage of the company-news pipeline.
 
-The deterministic relevance filter (company_events.py) answers "does the
+The deterministic relevance filter (company_news.py) answers "does the
 article NAME the company?" — cheap, no AI, cuts the bulk junk. This
 stage answers what a keyword cannot, split into two LLM steps with
 opposite caching behavior:
@@ -15,8 +15,8 @@ opposite caching behavior:
    entries are pruned once the article's publish date ages out of any
    possible card window (``CACHE_MAX_AGE_DAYS``); until then they never
    go stale. Uncached articles are judged in size-bounded batches that
-   run in PARALLEL threads, and verdicts are compact arrays
-   (``[n, about, materiality]``) because verdict-TYPING time dominates
+   run in PARALLEL threads, and judgments are compact arrays
+   (``[n, about, materiality]``) because judgment-TYPING time dominates
    latency (measured 2026-08-15; ``include_reasons=True`` restores the
    audit phrase for trials).
 
@@ -51,7 +51,7 @@ shows only what passed the bar: the ceiling never pads.
    fail-soft fallback.
 
 Fail-soft contract: an LLM failure (config missing, bad JSON, missing
-verdicts) must never HIDE news. An article without a usable judgment is
+judgments) must never HIDE news. An article without a usable judgment is
 kept with materiality None — which passes selection — with a warning,
 and such fallbacks are NEVER written to the cache (a failure must not
 persist as fact). A failed grouping call degrades to no grouping
@@ -65,20 +65,20 @@ Wired into the provider's collect() since 2026-08-15.
 
 Two prompt sets share these mechanics (``ScreenPrompts``,
 2026-08-16): ``COMPANY_PROMPTS`` (the default — per-company news, "is
-it about this company?") and ``WORLD_PROMPTS`` (the world_events
+it about this company?") and ``WORLD_PROMPTS`` (the world_news
 provider — general market/world news, "is it about the macro backdrop,
 and how much could it move the OVERALL market?").
-Everything below the prompt layer — verdict parsing, caching,
+Everything below the prompt layer — judgment parsing, caching,
 grouping, ranking, selection — is prompt-set-blind.
 """
 from __future__ import annotations
 
-import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
+
+from .cache_store import CacheStore, default_cache_store
 
 from pydantic import BaseModel
 
@@ -97,8 +97,9 @@ INCLUDE_THRESHOLD = 3
 
 #: The card's ceiling: when more bar-passing events exist, the rank
 #: call orders them and the top MAX_EVENTS survive. Never a target — a
-#: quiet week shows fewer, nothing is padded.
-MAX_EVENTS = 20
+#: quiet week shows fewer, nothing is padded. 20 -> 30 (owner decision
+#: 2026-09-18).
+MAX_EVENTS = 30
 
 #: One summary sentence may use at most this many words (prompt-level
 #: guidance; the model is not hard-truncated).
@@ -116,8 +117,6 @@ _MAX_PARALLEL_BATCHES = 8
 #: never goes stale; the article just stops being fetchable.
 CACHE_MAX_AGE_DAYS = 35
 
-#: Same cache home the macro provider uses.
-DEFAULT_CACHE_DIR = Path("data") / "tiered_analysis_cache"
 
 _JUDGE_PROMPT = """You are screening news articles fetched for the US stock {symbol} ({company}).
 For each numbered article you get the publish date, the outlet, the headline, and the feed's abstract.
@@ -189,7 +188,7 @@ Articles:
 # group -> select -> rank -> summarize) are shared with company news;
 # only the judgment lens differs: "is this about the macro/world
 # backdrop, and how much could it move the OVERALL market?" instead of
-# "is this about the company?". The compact verdict array keeps the
+# "is this about the company?". The compact judgment array keeps the
 # same positional shape ([n, relevant, materiality]) so every parser
 # and cache below is prompt-set-blind.
 # ---------------------------------------------------------------------------
@@ -285,7 +284,7 @@ COMPANY_PROMPTS = ScreenPrompts(
     summarize=_SUMMARIZE_PROMPT,
 )
 
-#: The macro/world-backdrop lens (world_events provider).
+#: The macro/world-backdrop lens (world_news provider).
 WORLD_PROMPTS = ScreenPrompts(
     judge=_WORLD_JUDGE_PROMPT,
     answer_compact=_WORLD_ANSWER_COMPACT,
@@ -315,7 +314,7 @@ def build_judge_prompt(
     """The judge prompt: numbered headline+abstract lines.
 
     ``include_reasons`` adds a per-article audit phrase to the requested
-    output — trials only; production skips it because verdict-typing
+    output — trials only; production skips it because judgment-typing
     time dominates the whole pipeline's latency.
     """
     return prompts.judge.format(
@@ -460,7 +459,7 @@ def _clean_judgment(raw: Any, count: int) -> Optional[Dict[str, Any]]:
 
 
 def _kept_fallback(index: int) -> Dict[str, Any]:
-    """The fail-soft judgment: no usable model verdict -> keep the
+    """The fail-soft judgment: no usable model judgment -> keep the
     article. ``from_model`` False keeps it out of the cache — a failure
     must never persist as fact."""
     return {
@@ -525,17 +524,17 @@ def llm_judge_news(
     missing = count - len(by_index)
     if missing:
         warnings.append(
-            f"news judge verdict missing for {missing} article(s) — those kept"
+            f"news judge gave no judgment for {missing} article(s) — those kept"
         )
     judgments = [by_index.get(i) or _kept_fallback(i) for i in range(count)]
     return {"judgments": judgments, "warnings": warnings}
 
 
 class NewsJudgmentCache:
-    """Disk cache of per-article judgments and card summaries, keyed by
+    """Cache of per-article judgments and card summaries, keyed by
     article URL.
 
-    One JSON file per symbol under the tiered cache home. Judgments and
+    One cache-store entry per symbol. Judgments and
     summaries are article-intrinsic, so there is no freshness TTL: an
     entry lives until its article's publish date is older than
     ``CACHE_MAX_AGE_DAYS`` (out of every possible card window), then is
@@ -543,7 +542,7 @@ class NewsJudgmentCache:
     summary only when it wins a card slot, so most judged articles never
     have one (and a summary-only entry must never masquerade as a
     judgment). Corrupt or unwritable cache degrades to a cold cache,
-    never to a failed run (macro_econ cache convention).
+    never to a failed run (macro_economy cache convention).
     """
 
     version = 1
@@ -551,10 +550,11 @@ class NewsJudgmentCache:
     def __init__(
         self,
         symbol: str,
-        cache_dir: Path = DEFAULT_CACHE_DIR,
+        cache: Optional[CacheStore] = None,
         today: Callable[[], date] = date.today,
     ) -> None:
-        self._path = Path(cache_dir) / f"news_screen_{symbol.upper()}.json"
+        self._store = cache if cache is not None else default_cache_store()
+        self._key = f"news_screen_{symbol.upper()}"
         self._today = today
         self._articles: Dict[str, Dict[str, Any]] = {}
         self._summaries: Dict[str, Dict[str, Any]] = {}
@@ -575,15 +575,13 @@ class NewsJudgmentCache:
 
     def load(self) -> None:
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            raw = self._store.read(self._key)
             if not isinstance(raw, Mapping) or raw.get("version") != self.version:
                 return
             oldest = self._today() - timedelta(days=CACHE_MAX_AGE_DAYS)
             self._articles = self._fresh(raw.get("articles"), oldest)
-            # Older cache files predate summaries; missing -> empty.
+            # Older cache entries predate summaries; missing -> empty.
             self._summaries = self._fresh(raw.get("summaries"), oldest)
-        except FileNotFoundError:
-            pass
         except Exception:
             pass  # corrupt cache: re-judge, never fail on cache
 
@@ -616,21 +614,16 @@ class NewsJudgmentCache:
             self._summaries[url] = {"text": text, "date": published}
 
     def save(self) -> None:
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps(
-                    {
-                        "version": self.version,
-                        "articles": self._articles,
-                        "summaries": self._summaries,
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass  # a cold cache tomorrow is acceptable; failing the run is not
+        # The store never raises: a cold cache tomorrow is acceptable,
+        # failing the run is not.
+        self._store.write(
+            self._key,
+            {
+                "version": self.version,
+                "articles": self._articles,
+                "summaries": self._summaries,
+            },
+        )
 
 
 def judge_news_cached(
@@ -973,12 +966,12 @@ def summarize_articles_cached(
 
 def select_events(
     entries: Sequence[Mapping[str, Any]],
-    verdicts: Sequence[Mapping[str, Any]],
+    judgments: Sequence[Mapping[str, Any]],
     threshold: int = INCLUDE_THRESHOLD,
 ) -> Dict[str, Any]:
     """Plain-code selection over screened articles — no further AI.
 
-    ``verdicts`` are judgments plus an ``event`` key (0-based index of
+    ``judgments`` are judgments plus an ``event`` key (0-based index of
     the group's anchor article). Collapses each event group to its most
     important article (highest materiality; an abstract beats a bare
     headline, then newest, break ties) and keeps every event whose best
@@ -986,7 +979,7 @@ def select_events(
     lives in ``screen_news`` (rank-ordered). Unknown materiality (an
     LLM failure upstream) passes selection: fail-soft never hides news.
 
-    Returns ``{"selected": [{"entry", "verdict", "materiality",
+    Returns ``{"selected": [{"entry", "judgment", "materiality",
     "group_size"}], "mention_only": n, "below_threshold": n,
     "warnings": [...]}`` with ``selected`` ordered by materiality, then
     date, newest first.
@@ -994,11 +987,11 @@ def select_events(
     warnings: List[str] = []
     groups: Dict[int, List[Mapping[str, Any]]] = {}
     mention_only = 0
-    for verdict in verdicts:
-        if not verdict["about_company"]:
+    for judgment in judgments:
+        if not judgment["about_company"]:
             mention_only += 1
             continue
-        groups.setdefault(verdict["event"], []).append(verdict)
+        groups.setdefault(judgment["event"], []).append(judgment)
 
     events: List[Dict[str, Any]] = []
     for members in groups.values():
@@ -1021,7 +1014,7 @@ def select_events(
         events.append(
             {
                 "entry": entries[best["index"]],
-                "verdict": best,
+                "judgment": best,
                 "materiality": max(scores) if scores else None,
                 "group_size": len(members),
             }
@@ -1105,11 +1098,11 @@ def screen_news(
         for local in local_group:
             anchor_of[candidates[local]] = anchor
 
-    verdicts = [
+    judgments = [
         {**judgment, "event": anchor_of.get(judgment["index"], judgment["index"])}
         for judgment in judgments
     ]
-    selection = select_events(entries, verdicts, threshold=threshold)
+    selection = select_events(entries, judgments, threshold=threshold)
     selected = selection["selected"]
 
     # Ceiling: rank the finalists (comparative, reliable at this size)

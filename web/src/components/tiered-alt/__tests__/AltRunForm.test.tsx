@@ -17,6 +17,10 @@ function renderForm(overrides: Partial<AltRunFormProps> = {}) {
     submitting: false,
     error: null,
     gate: null,
+    duplicate: null,
+    signedIn: true,
+    hasMainLlm: true,
+    hasLlmKey: true,
     onTicker: vi.fn(),
     onTier: vi.fn(),
     onCapital: vi.fn(),
@@ -26,6 +30,7 @@ function renderForm(overrides: Partial<AltRunFormProps> = {}) {
     onStart: vi.fn(),
     onRunAnyway: vi.fn(),
     onGateClose: vi.fn(),
+    onDuplicateClose: vi.fn(),
     ...overrides,
   };
   render(
@@ -57,13 +62,62 @@ describe('AltRunForm', () => {
     expect(props.onTicker).toHaveBeenCalledWith('AAPL');
   });
 
-  it('refuses to start with fields missing and explains in a popup', () => {
-    const props = renderForm({ ticker: 'AAPL', tier: 1, capital: null, riskPct: '1' });
+  it('refuses to start with fields missing and lists them in an Error popup', () => {
+    const props = renderForm({ ticker: 'AAPL', tier: 1, capital: null, riskPct: '1', hasLlmKey: false });
 
     fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
 
     expect(props.onStart).not.toHaveBeenCalled();
-    expect(screen.getByText(/六项都需要填写|All six fields are required/)).toBeInTheDocument();
+    expect(screen.getByText(/^错误$|^Error$/)).toBeInTheDocument();
+    expect(screen.getByText(/尚未填写|not filled in/)).toBeInTheDocument();
+    // two parts, account first, each in on-screen field order
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(/账户|Your account/);
+    expect(dialog).toHaveTextContent(/发起分析|New run/);
+    // no divider between the parts: only the modal's own title rule
+    expect(dialog.querySelectorAll('hr')).toHaveLength(1);
+    const listed = screen.getAllByRole('listitem').map((item) => item.textContent);
+    expect(listed).toEqual([
+      expect.stringMatching(/LLM 提供商 API 密钥|LLM provider API key/),
+      expect.stringMatching(/本金|Capital/),
+      expect.stringMatching(/盈亏比|Reward ratio/),
+      expect.stringMatching(/最长持有|Max hold/),
+    ]);
+  });
+
+  it('shows only the run part when the account is complete', () => {
+    renderForm({ ticker: 'AAPL', tier: null, capital: '100000', riskPct: '1', reward: '2', hold: '2' });
+
+    fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
+
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).not.toHaveTextContent(/账户|Your account/);
+    expect(dialog.querySelectorAll('hr')).toHaveLength(1);
+    expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      expect.stringMatching(/层级|Tier/),
+    ]);
+  });
+
+  it('asks for a sign-in before anything else', () => {
+    const props = renderForm({
+      ticker: 'AAPL', tier: 1, capital: '100000', riskPct: '1', reward: '2', hold: '2', signedIn: false,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
+
+    expect(props.onStart).not.toHaveBeenCalled();
+    expect(screen.getByText(/^错误$|^Error$/)).toBeInTheDocument();
+    expect(screen.getByText(/请先登录|Sign in before/)).toBeInTheDocument();
+  });
+
+  it('starts when every field and the account are in place', () => {
+    const props = renderForm({
+      ticker: 'AAPL', tier: 1, capital: '100000', riskPct: '1', reward: '2', hold: '2',
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
+
+    expect(props.onStart).toHaveBeenCalled();
   });
 
   it('shows selections as Label: value pills; clicking a pill removes it', () => {
@@ -116,7 +170,7 @@ describe('AltRunForm', () => {
     fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
 
     expect(props.onStart).not.toHaveBeenCalled();
-    expect(screen.getByText(/六项都需要填写|All six fields are required/)).toBeInTheDocument();
+    expect(screen.getByText(/尚未填写|not filled in/)).toBeInTheDocument();
   });
 
   it('requires the max hold time like every other field', () => {
@@ -127,7 +181,7 @@ describe('AltRunForm', () => {
     fireEvent.click(screen.getByRole('button', { name: /开始|Start/ }));
 
     expect(props.onStart).not.toHaveBeenCalled();
-    expect(screen.getByText(/六项都需要填写|All six fields are required/)).toBeInTheDocument();
+    expect(screen.getByText(/尚未填写|not filled in/)).toBeInTheDocument();
   });
 
   it('shows the max-hold pill and clicking it removes it', () => {
@@ -165,6 +219,26 @@ describe('AltRunForm', () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Run anyway|仍要运行/ }));
     expect(props.onRunAnyway).toHaveBeenCalled();
+  });
+
+  it('shows the duplicate-run refusal in the Error popup and reports its close', () => {
+    const props = renderForm({
+      ticker: 'NVDA',
+      duplicate: { taskId: 't1', status: 'running' },
+    });
+
+    expect(screen.getByText(/^错误$|^Error$/)).toBeInTheDocument();
+    expect(screen.getByText(/完全相同的 NVDA 分析正在运行|identical NVDA run is already running/)).toBeInTheDocument();
+
+    // No ✕ button by design — Escape closes the popup.
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(props.onDuplicateClose).toHaveBeenCalled();
+  });
+
+  it('words a queued duplicate as waiting in the queue', () => {
+    renderForm({ ticker: 'NVDA', duplicate: { taskId: 't1', status: 'queued' } });
+
+    expect(screen.getByText(/已在排队|already waiting in the queue/)).toBeInTheDocument();
   });
 
   it('omits the session-hours line when the gate has no bounds', () => {
@@ -211,5 +285,16 @@ describe('AltRunForm', () => {
     expect(
       screen.getByRole('button', { name: /1: preliminary analysis|1：初步分析/ }),
     ).toBeInTheDocument();
+  });
+
+  it("colors a set field's title like its pill and leaves the others gray", () => {
+    renderForm({ ticker: 'AAPL', hold: '4' });
+    // the title span itself carries the color (ticker = red, hold = emerald)
+    expect(screen.getByText(/^Ticker$|^代码$/)).toHaveClass('text-red-300');
+    expect(screen.getByText(/^Max hold: weeks$|^最长持有: 周$/).closest('.font-semibold')).toHaveClass(
+      'text-emerald-300',
+    );
+    // (capital is labeled with the ticker's currency once a ticker is set)
+    expect(screen.getByText(/^Capital|^本金/).closest('.font-semibold')).toHaveClass('text-gray-300');
   });
 });

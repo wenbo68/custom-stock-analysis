@@ -49,7 +49,7 @@ class Direction(str, Enum):
 class Outlook(str, Enum):
     """The impersonal judgment about the stock (outlook redesign,
     2026-07-20): what the evidence says, with no knowledge of the user's
-    position. Renamed from the old buy/hold/sell verdict — an assessment
+    position. Renamed from the old buy/hold/sell outlook — an assessment
     can't literally mean "you should sell" when it doesn't know whether
     you own anything."""
 
@@ -57,11 +57,8 @@ class Outlook(str, Enum):
     NEUTRAL = "neutral"
     BEARISH = "bearish"
     UNKNOWN = "unknown"
-    #: Staleness gate (2026-08-08): the run stopped BEFORE any LLM stage
-    #: because the newest daily bar predates the most recent completed
-    #: trading session. No analysis or plan exists; the outlook itself is
-    #: the whole user-facing story (the reason lives in logs only).
-    STOPPED = "stopped"
+    # (A "stopped" outlook for stale-data runs existed 2026-08-08 to
+    # 2026-09-17; such runs now fail with StaleDataError instead.)
 
     @classmethod
     def from_direction(cls, direction: Direction) -> "Outlook":
@@ -73,50 +70,40 @@ class Outlook(str, Enum):
 
 
 class Action(str, Enum):
-    """The personal instruction, derived by code from outlook × ownership
-    (plus, for entries, the plan's reward-to-risk vs the user's goal).
-    The outlook decides WHETHER the stock deserves money; the action is
-    what that means for THIS user's shares."""
+    """The personal instruction, derived by code from the outlook plus,
+    for entries, the plan's reward-to-risk vs the user's goal. The
+    outlook decides WHETHER the stock deserves money; the action is what
+    that means for a new position. (The held-shares column — keep
+    holding / sell all — was removed with the ownership input,
+    2026-09-16; a future portfolio feature would reintroduce it.)"""
 
     ENTER = "enter"  # buy now: the plan's reward-to-risk meets the goal
     ENTER_LATER = "enter_later"  # buy later: reward-to-risk below the goal
-    KEEP_HOLDING = "keep_holding"  # no new money; existing exits stand
     NO_TRADE = "no_trade"  # nothing to do
-    SELL_ALL = "sell_all"  # exit the full holding now
     UNKNOWN = "unknown"
 
 
-def derive_action(outlook: Outlook, ownership: int,
-                  plan_meets_goal: bool = True) -> Action:
-    """The outlook × ownership table (docs/tiered-analysis-formulas.md):
+def derive_action(outlook: Outlook, plan_meets_goal: bool = True) -> Action:
+    """The outlook → action table:
 
-    | outlook  | ownership = 0       | ownership > 0 |
-    |----------|---------------------|----------------|
-    | bullish  | enter / enter_later | keep_holding   |
-    | neutral  | no_trade            | keep_holding   |
-    | bearish  | no_trade            | sell_all       |
+    | outlook  | action              |
+    |----------|---------------------|
+    | bullish  | enter / enter_later |
+    | neutral  | no_trade            |
+    | bearish  | no_trade            |
 
-    ``plan_meets_goal`` splits the bullish-without-shares cell (owner
-    decision 2026-08-23): ENTER ("buy now") when the trade plan's actual
+    ``plan_meets_goal`` splits the bullish cell (owner decision
+    2026-08-23): ENTER ("buy now") when the trade plan's actual
     reward-to-risk ratio reaches the user's chosen goal, ENTER_LATER
     ("buy later") when it falls short — the same comparison as the plan
     card's reward-below-goal warning, so the two can never disagree. A
     ratio that cannot be computed counts as meeting the goal, mirroring
     that warning's silence.
-
-    Bullish-while-holding is deliberately NOT "buy more": sizing is not
-    yet combined-position aware, so adds are deferred (plan decision,
-    2026-07-20).
     """
-    holding = ownership > 0
     if outlook is Outlook.BULLISH:
-        if holding:
-            return Action.KEEP_HOLDING
         return Action.ENTER if plan_meets_goal else Action.ENTER_LATER
-    if outlook is Outlook.NEUTRAL:
-        return Action.KEEP_HOLDING if holding else Action.NO_TRADE
-    if outlook is Outlook.BEARISH:
-        return Action.SELL_ALL if holding else Action.NO_TRADE
+    if outlook in (Outlook.NEUTRAL, Outlook.BEARISH):
+        return Action.NO_TRADE
     return Action.UNKNOWN
 
 
@@ -178,10 +165,9 @@ class SizingSlots:
 
 @dataclass(frozen=True)
 class SniperLevels:
-    """Normalized price levels from DSA's sniper points."""
+    """The plan's price levels (formula-computed, see levels.py)."""
 
     entry: Optional[float] = None
-    secondary_entry: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
 
@@ -223,11 +209,8 @@ class TierReport:
     #: (reason, evidence, rejection). JSON-ready dict; None on pre-v2 reports.
     levels_detail: Optional[Dict[str, Any]] = None
     #: v2 slice 4 audit trail (tier-2 reports only): debate turns + judge
-    #: verdict with anchored reasons. JSON-ready dict; None elsewhere.
+    #: outlook with anchored reasons. JSON-ready dict; None elsewhere.
     debate_detail: Optional[Dict[str, Any]] = None
-    #: v2 slice 5 audit trail (tier-3 reports only): persona takes + risk
-    #: judge verdict (size multiplier, stop advice). JSON-ready dict.
-    risk_detail: Optional[Dict[str, Any]] = None
     #: Max hold time in weeks the run was judged against (2026-08-08);
     #: None on reports stored before the hold-time picker existed.
     hold_weeks: Optional[int] = None

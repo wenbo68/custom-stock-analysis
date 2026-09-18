@@ -36,9 +36,6 @@ class TierState:
     #: higher tiers can debate over the evidence (falls back to the
     #: dimensions attached to the tier-1 report when unset).
     dimensions: List[DimensionResult] = field(default_factory=list)
-    #: Shares of this stock the user already holds (per-run input, 0 =
-    #: none) — drives the action table and the sell share count.
-    ownership: int = 0
     #: Max hold time in weeks (per-run input, 2026-08-08): the debate
     #: judges evidence against this horizon and the grader scores at it.
     hold_weeks: int = 2
@@ -60,7 +57,7 @@ class Tier2Stage(TierStage):
     (the tiered package's own LLM calls). Any failure — no foundation
     report, no evidence, LLM down — is a report with an UNKNOWN
     direction and explicit warnings. There is deliberately no
-    fallback to the tier-1 one-blob verdict: substituting the weakest
+    fallback to the tier-1 one-blob outlook: substituting the weakest
     judge when the best one fails would present a downgrade as a result.
     """
 
@@ -106,27 +103,27 @@ class Tier2Stage(TierStage):
             state.symbol, foundation, dimensions, hold_weeks=state.hold_weeks
         )
 
-        if result.verdict is None:
+        if result.outlook is None:
             return self._failed(
                 state, foundation.levels,
                 list(result.warnings)
-                + ["debate produced no verdict — no outlook (re-run)"],
+                + ["debate produced no outlook (re-run)"],
                 detail=result.to_detail(),
             )
 
-        verdict = result.verdict
+        outlook = result.outlook
         return TierReport(
             tier=self.tier,
             symbol=state.symbol,
             market=state.market,
-            direction=verdict.direction,
-            # The verdict is computed by formula from the vote outcomes,
+            direction=outlook.direction,
+            # The outlook is computed by formula from the vote outcomes,
             # so there is no judge confidence — the score lives in
-            # debate_detail.verdict.final_score.
+            # debate_detail.outlook.final_score.
             confidence=None,
             score=foundation.score,
             levels=foundation.levels,
-            narrative=verdict.summary or None,
+            narrative=outlook.summary or None,
             warnings=list(result.warnings),
             debate_detail=result.to_detail(),
         )

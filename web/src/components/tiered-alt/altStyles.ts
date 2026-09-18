@@ -1,10 +1,10 @@
-import type { TieredResult, TieredRunStatus } from '../../api/tiered';
+import type { TieredResult } from '../../api/tiered';
 
 // showplayer badge recipe: soft tinted fill + matching inset ring, no border.
 export const TAG_BASE =
   'inline-flex items-center rounded px-[9px] py-0.5 text-xs font-semibold ring-1 ring-inset';
 
-// Verdicts render as plain colored text, not pills.
+// Outlooks render as plain colored text, not pills.
 export const DIRECTION_TEXT: Record<TieredResult['direction'], string> = {
   buy: 'text-emerald-300',
   hold: 'text-amber-300',
@@ -12,25 +12,13 @@ export const DIRECTION_TEXT: Record<TieredResult['direction'], string> = {
   unknown: 'text-gray-400',
 };
 
-// Outlooks share the verdict palette: bullish = buy green, neutral =
+// Outlooks share the outlook palette: bullish = buy green, neutral =
 // hold amber, bearish = sell red.
 export const OUTLOOK_TEXT: Record<string, string> = {
   bullish: 'text-emerald-300',
   neutral: 'text-amber-300',
   bearish: 'text-red-300',
   unknown: 'text-gray-400',
-  // Staleness gate (2026-08-08): the run halted before any analysis —
-  // deliberately plain, neither a verdict color nor the failure red.
-  stopped: 'text-gray-300',
-};
-
-// -300 shades on purpose: the app-wide index.css redefines
-// --color-emerald-400/--color-red-400 as bare HSL triplets for its own
-// hsl(var(...)) tokens, which silently voids Tailwind's bg-*-400 utilities.
-export const STATUS_DOT: Record<TieredRunStatus, string> = {
-  running: 'bg-sky-300',
-  done: 'bg-emerald-300',
-  failed: 'bg-red-300',
 };
 
 // The showplayer pill palette (tagClassMap order, stone skipped by owner
@@ -49,6 +37,12 @@ export const ALT_COLOR = {
   9: 'bg-violet-500/20 text-violet-300 ring-violet-500/30',
   gray: 'bg-gray-500/20 text-gray-300 ring-gray-500/30',
 } as const;
+
+// The text color alone out of a pill tone, for a field title that turns
+// the pill's color while a value is committed (owner request 2026-09-18):
+// a colored title means "this filter is set", a gray one means it is not.
+export const toneText = (tone: string): string =>
+  tone.split(' ').find((token) => token.startsWith('text-')) ?? '';
 
 // One line of a formula block (words / plugged-in / result): same element,
 // font and spacing on every line, never wrapping. Colors match the shared

@@ -66,14 +66,14 @@ def _technicals_dim():
 
 
 class _FakeQuickJudge:
-    """Canned BUY verdict — levels wiring is what's under test here."""
+    """Canned BUY outlook — levels wiring is what's under test here."""
 
-    def run(self, symbol, dimensions, levels, hold_weeks):
-        from src.tiered_analysis.quick_judge import QuickResult, QuickVerdict
+    def run(self, symbol, dimensions, hold_weeks):
+        from src.tiered_analysis.quick_judge import QuickResult, QuickOutlook
         from src.tiered_analysis.schema import Direction
 
         return QuickResult(
-            verdict=QuickVerdict(
+            outlook=QuickOutlook(
                 direction=Direction.BUY,
                 final_score=7.5,
                 summary="buy the pullback",
@@ -87,9 +87,8 @@ def _run(providers=None):
         market=Market.US,
         providers=providers or [_StubProvider(_technicals_dim())],
         quick_judge=_FakeQuickJudge(),
-        log_signal=False,
         earnings_lookup=lambda symbol, market: EarningsInfo(),
-        # BUY verdicts whose plan trips a check (the downtrend test)
+        # BUY outlooks whose plan trips a check (the downtrend test)
         # consult the plan-review AI; without this canned "no change
         # helps" reply the test made a REAL network LLM call whenever an
         # earlier test had already loaded .env (found via the run
@@ -103,7 +102,6 @@ class TestLevelsWiring(unittest.TestCase):
         outcome = _run()
         levels = outcome.report.levels
         self.assertAlmostEqual(levels.entry, 96.0)  # not 210.0
-        self.assertIsNone(levels.secondary_entry)  # backup entry retired
         self.assertAlmostEqual(levels.stop_loss, 90.0)
         self.assertAlmostEqual(levels.take_profit, 108.0)
 
@@ -116,7 +114,7 @@ class TestLevelsWiring(unittest.TestCase):
 
     def test_missing_technicals_leaves_levels_empty_with_warning(self):
         other = DimensionResult(
-            dimension="macro_econ", kind=SourceKind.NUMERIC,
+            dimension="macro_economy", kind=SourceKind.NUMERIC,
             payload={"x": 1},
         )
         outcome = _run(providers=[_StubProvider(other)])

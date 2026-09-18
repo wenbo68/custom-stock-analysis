@@ -27,38 +27,36 @@ retry-friendly messages.
 """
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: Tree order for the debated dimension groups; also the id-prefix map.
-#: company_events joined 2026-08-16 (owner decision): each card news
+#: company_news joined 2026-08-16 (owner decision): each card news
 #: event is a gradable row like any numeric field — debate.py enumerates
 #: one ref per news bullet and relaxes the value-copy rule for them
 #: (a 40-word summary is anchored by its ref, not by verbatim copying).
-#: world_events joined the same day: the macro/world news card, graded
-#: through the same news-row contract. opinion joined 2026-08-18: the
-#: analyst + crowd sentiment card — numeric metric envelopes (analyst
-#: consensus/targets/action counts, Reddit-chatter measures), graded
-#: like any other numeric field; moved between macro_econ and the news
-#: cards 2026-08-19 (owner display order).
+#: world_news joined the same day: the macro/world news card, graded
+#: through the same news-row contract. (The opinion card — analyst
+#: consensus + crowd chatter — was retired 2026-08-23 and removed
+#: 2026-09-16.)
 DIMENSIONS: Tuple[str, ...] = (
-    "technicals", "fundamentals", "positioning", "macro_econ",
-    "opinion", "company_events", "world_events",
+    "technicals", "fundamentals", "positioning", "macro_economy",
+    "company_news", "world_news",
 )
 DIMENSION_PREFIX: Dict[str, str] = {
     "technicals": "T",
     "fundamentals": "F",
     "positioning": "P",
-    "macro_econ": "E",
-    "company_events": "N",
-    "world_events": "W",
-    "opinion": "O",
+    "macro_economy": "E",
+    "company_news": "N",
+    "world_news": "W",
 }
 
 Dimension = Literal[
-    "technicals", "fundamentals", "macro_econ", "positioning",
-    "opinion", "company_events", "world_events",
+    "technicals", "fundamentals", "macro_economy", "positioning",
+    "company_news", "world_news",
 ]
 ItemDirection = Literal["bullish", "bearish"]
 #: A grade adds "neutral": the field carries no lean (metadata, dates,
@@ -81,10 +79,24 @@ class _StageModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+#: A news-event anchor: ``<card>.<group>.items.<i>.text``. The AI cites
+#: the event by its ref and copies nothing (a 40-word summary has no
+#: short display value), so these links may come without "value".
+_NEWS_ITEM_REF_RE = re.compile(r"\.items\.\d+\.text$")
+
+
+def is_news_item_ref(ref: str) -> bool:
+    return bool(_NEWS_ITEM_REF_RE.search(ref.strip()))
+
+
 class LinkModel(_StageModel):
     """One citation: a payload ref carrying "value" — the value copied
     exactly as the report displays it (code verifies the copy AND that
-    the sentence contains it)."""
+    the sentence contains it). News-event refs are the one exception
+    (see ``is_news_item_ref``): before 2026-09-16 this validator
+    demanded a value from them too, which contradicted the prompts'
+    "there is no value to copy" and made every summary that cited a
+    news event fail — the deep-analysis card then showed no summary."""
 
     ref: str = Field(min_length=1)
     value: Optional[Union[float, str]] = None
@@ -92,6 +104,8 @@ class LinkModel(_StageModel):
     @model_validator(mode="after")
     def _payload_needs_value(self) -> "LinkModel":
         ref = self.ref.strip()
+        if is_news_item_ref(ref):
+            return self
         if self.value is None or (
             isinstance(self.value, str) and not self.value.strip()
         ):
@@ -152,11 +166,11 @@ class VoteModel(_StageModel):
     vote's mark. Numbers inside the reason must be cited with the same
     code-checked links the bullets use."""
 
-    verdict: Literal["valid", "invalid"]
+    validity: Literal["valid", "invalid"]
     reason: Optional[str] = None
     links: List[LinkModel] = Field(default_factory=list)
     #: The voter's own importance rating of the bullet (1-5), cast
-    #: regardless of the verdict — it joins the bullet's weight median.
+    #: regardless of the validity — it joins the bullet's weight median.
     weight: Weight = DEFAULT_WEIGHT
     #: One short plain sentence explaining the rating (see the item's
     #: field of the same name).
@@ -200,14 +214,22 @@ class StructuredSummaryModel(_StageModel):
     decisive reasons; each dimension group covers what its surviving
     evidence says."""
 
+    # Every group is REQUIRED (2026-09-17). With defaults, the JSON
+    # schema handed to the provider listed only "summary" as required,
+    # and Gemini's enforced decoding then let the model skip optional
+    # keys: it orders properties alphabetically, so a model that starts
+    # with "summary" (as the prompt's example does) had already passed
+    # company_news, fundamentals, macro_economy and positioning and could
+    # never write them — every deep analysis lost its summary. The
+    # summary stage still fills a missing group with [] before
+    # validating, for plain-JSON models that leave empty groups out.
     summary: List[SummaryBulletModel] = Field(min_length=1)
-    technicals: List[SummaryBulletModel] = Field(default_factory=list)
-    fundamentals: List[SummaryBulletModel] = Field(default_factory=list)
-    positioning: List[SummaryBulletModel] = Field(default_factory=list)
-    macro_econ: List[SummaryBulletModel] = Field(default_factory=list)
-    opinion: List[SummaryBulletModel] = Field(default_factory=list)
-    company_events: List[SummaryBulletModel] = Field(default_factory=list)
-    world_events: List[SummaryBulletModel] = Field(default_factory=list)
+    technicals: List[SummaryBulletModel]
+    fundamentals: List[SummaryBulletModel]
+    positioning: List[SummaryBulletModel]
+    macro_economy: List[SummaryBulletModel]
+    company_news: List[SummaryBulletModel]
+    world_news: List[SummaryBulletModel]
 
 
 class VoteFixModel(_StageModel):

@@ -32,9 +32,8 @@ MIN_REWARD_RISK = 1.5
 ADJUSTMENT_BAND_ATR_MULTIPLE = 1.0
 
 #: Level keys, in both SniperLevels field order and adjustment-application
-#: order (entry first so stop/target checks see the final entry). The
-#: backup entry is retired (owner decision, 2026-07-21): the plan is one
-#: order at the ideal entry — old stored runs may still carry one.
+#: order (entry first so stop/target checks see the final entry). The plan
+#: is one order at the ideal entry (owner decision, 2026-07-21).
 LEVEL_KEYS = ("entry", "stop_loss", "take_profit")
 
 
@@ -272,7 +271,7 @@ class AdjustmentProposal:
 
 @dataclass(frozen=True)
 class LevelDecision:
-    """Final verdict for one level: base, accepted adjustment, or rejection."""
+    """Final decision for one level: base, accepted adjustment, or rejection."""
 
     base: Optional[LevelBasis] = None
     adjusted: Optional[float] = None

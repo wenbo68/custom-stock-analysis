@@ -148,15 +148,14 @@ class TestTieredRunHistory:
         assert row["reward_risk"] == 3.0
         assert row["hold_weeks"] == 2
 
-    def test_list_digest_degrades_on_old_or_refused_runs(self, isolated_db):
-        # v1 result: no final/sizing/depth -> top-level direction, dash
-        # shares, and the top-level tier (v1 runs were tier 1 only)
+    def test_list_digest_degrades_on_refused_runs(self, isolated_db):
+        # no sizing block at all -> dash shares
         create_run("task-1", "AAPL")
-        mark_done("task-1", {**RESULT, "tier": 1})
+        mark_done("task-1", {**RESULT, "depth": 1})
         # sizing ran but refused to buy (shares None) -> 0, like the report
-        # card; no depth stored -> tier falls back to final.tier
+        # card
         create_run("task-2", "MSFT")
-        mark_done("task-2", {**RESULT,
+        mark_done("task-2", {**RESULT, "depth": 2,
                              "final": {"direction": "hold", "tier": 2},
                              "sizing": {"shares": None}})
         runs = {r["task_id"]: r for r in list_runs()}
@@ -170,6 +169,18 @@ class TestTieredRunHistory:
         for index in range(5):
             create_run(f"task-{index}", "AAPL")
         assert len(list_runs(limit=3)) == 3
+
+    def test_owner_scoping(self, isolated_db):
+        create_run("mine", "AAPL", owner_id=1)
+        create_run("theirs", "MSFT", owner_id=2)
+        create_run("orphan", "NVDA")  # pre-accounts row: nobody's
+        assert [r["task_id"] for r in list_runs(owner_id=1)] == ["mine"]
+        assert [r["task_id"] for r in list_runs(owner_id=2)] == ["theirs"]
+        assert len(list_runs()) == 3
+        assert get_run("mine", owner_id=1)["stock_code"] == "AAPL"
+        assert get_run("mine", owner_id=2) is None
+        assert get_run("orphan", owner_id=1) is None
+        assert get_run("orphan")["stock_code"] == "NVDA"
 
     def test_corrupt_result_json_surfaces_as_failed_parse(self, isolated_db):
         from src.storage import DatabaseManager, TieredRunRecord

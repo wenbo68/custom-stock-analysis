@@ -23,7 +23,7 @@ from src.tiered_analysis.integration import (
     run_tiered_analysis,
 )
 from src.tiered_analysis.providers.technicals import technicals_as_of
-from src.tiered_analysis.quick_judge import QuickResult, QuickVerdict
+from src.tiered_analysis.quick_judge import QuickResult, QuickOutlook
 from src.tiered_analysis.run_gate import expected_bar_date
 from src.tiered_analysis.schema import Action, Outlook, derive_action
 from src.tiered_analysis.providers.base import (
@@ -104,14 +104,14 @@ def _dim(name):
 
 
 class _FakeQuickJudge:
-    """Canned tier-1 verdict; records (symbol, hold_weeks) calls."""
+    """Canned tier-1 outlook; records (symbol, hold_weeks) calls."""
 
     def __init__(self, score=7.5, summary="buy the pullback",
-                 verdict=True, warnings=()):
+                 outlook=True, warnings=()):
         self.calls = []
-        if verdict:
+        if outlook:
             self._result = QuickResult(
-                verdict=QuickVerdict(
+                outlook=QuickOutlook(
                     direction=direction_from_final(score),
                     final_score=score,
                     summary=summary,
@@ -121,7 +121,7 @@ class _FakeQuickJudge:
         else:
             self._result = QuickResult(warnings=list(warnings))
 
-    def run(self, symbol, dimensions, levels, hold_weeks):
+    def run(self, symbol, dimensions, hold_weeks):
         self.calls.append((symbol, hold_weeks))
         return self._result
 
@@ -132,34 +132,22 @@ def _no_earnings(symbol, market):
 
 
 class TestRunTieredAnalysis(unittest.TestCase):
-    def _run(self, providers=None, log_signal=True, logger=None, judge=None):
-        logged = []
-
-        def default_logger(report, trace_id=None):
-            logged.append((report, trace_id))
-            return "log-result"
-
+    def _run(self, providers=None, judge=None):
         outcome = run_tiered_analysis(
             "AAPL",
             market=Market.US,
             providers=providers if providers is not None
             else [_StubProvider("technicals", _dim("technicals"))],
             quick_judge=judge or _FakeQuickJudge(),
-            signal_logger=logger or default_logger,
-            log_signal=log_signal,
-            trace_id="t-1",
             earnings_lookup=_no_earnings,
         )
-        return outcome, logged
+        return outcome, []
 
-    def test_dimensions_attached_and_signal_logged(self):
-        outcome, logged = self._run()
+    def test_dimensions_attached(self):
+        outcome, _ = self._run()
         report = outcome.report
         self.assertEqual(report.direction, Direction.BUY)
         self.assertEqual([d.dimension for d in report.dimensions], ["technicals"])
-        self.assertEqual(outcome.signal, "log-result")
-        self.assertEqual(logged[0][1], "t-1")
-        self.assertIs(logged[0][0], report)  # the enriched report is logged
 
     def test_crashing_provider_becomes_warned_empty_dimension(self):
         providers = [_StubProvider("fundamentals", crash=True)]
@@ -168,11 +156,6 @@ class TestRunTieredAnalysis(unittest.TestCase):
         self.assertEqual(dim.dimension, "fundamentals")
         self.assertIsNone(dim.payload)
         self.assertTrue(any("provider blew up" in w for w in dim.warnings))
-
-    def test_log_signal_false_skips_logging(self):
-        outcome, logged = self._run(log_signal=False)
-        self.assertIsNone(outcome.signal)
-        self.assertEqual(logged, [])
 
     def test_injected_providers_with_explicit_cross_loader_enrich(self):
         """The cross_bars_loader seam: a harness that injects providers
@@ -188,8 +171,6 @@ class TestRunTieredAnalysis(unittest.TestCase):
             market=Market.US,
             providers=[_StubProvider("technicals", tech)],
             quick_judge=_FakeQuickJudge(),
-            signal_logger=lambda report, trace_id=None: None,
-            log_signal=False,
             earnings_lookup=_no_earnings,
             cross_bars_loader=lambda ticker: [],
         )
@@ -201,7 +182,7 @@ class TestRunTieredAnalysis(unittest.TestCase):
 
     def test_failed_tier1_still_returns_report_with_dimensions(self):
         judge = _FakeQuickJudge(
-            verdict=False,
+            outlook=False,
             warnings=["quick judge LLM call failed: LLM down"],
         )
         outcome, _ = self._run(judge=judge)
@@ -211,8 +192,8 @@ class TestRunTieredAnalysis(unittest.TestCase):
 
 
 class _FakeDebateEngine:
-    def __init__(self, verdict=None, warnings=()):
-        self._verdict = verdict
+    def __init__(self, outlook=None, warnings=()):
+        self._outlook = outlook
         self._warnings = list(warnings)
         self.calls = []
 
@@ -220,7 +201,7 @@ class _FakeDebateEngine:
         from src.tiered_analysis.debate import DebateResult
 
         self.calls.append(symbol)
-        return DebateResult(verdict=self._verdict, warnings=self._warnings)
+        return DebateResult(outlook=self._outlook, warnings=self._warnings)
 
 
 def _env(value):
@@ -254,10 +235,10 @@ def _technicals_dim_with_levels():
     )
 
 
-def _debate_verdict(direction=Direction.BUY, score=7.4):
-    from src.tiered_analysis.debate import DebateVerdict
+def _debate_outlook(direction=Direction.BUY, score=7.4):
+    from src.tiered_analysis.debate import DebateOutlook
 
-    return DebateVerdict(direction=direction, final_score=score,
+    return DebateOutlook(direction=direction, final_score=score,
                          summary="the vote settled it", initial_score=score,
                          pools={})
 
@@ -266,15 +247,9 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
     """Outlook redesign: depth 1|2 routing, outlook/action, sizing."""
 
     def _run(self, depth=1, sizing_settings=None, sizing_overrides=None,
-             debate_verdict=None, quick_score=7.5, tech_payload=None):
+             debate_outlook=None, quick_score=7.5, tech_payload=None):
         from src.tiered_analysis.settings import SizingSettings
         from src.tiered_analysis.tiers import Tier2Stage
-
-        logged = []
-
-        def logger(report, trace_id=None):
-            logged.append(report)
-            return "log-result"
 
         technicals = (
             DimensionResult(dimension="technicals", kind=SourceKind.NUMERIC,
@@ -282,19 +257,21 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
             if tech_payload is not None else _technicals_dim_with_levels()
         )
         judge = _FakeQuickJudge(score=quick_score)
-        debate_engine = _FakeDebateEngine(verdict=debate_verdict)
+        debate_engine = _FakeDebateEngine(outlook=debate_outlook)
         outcome = run_tiered_analysis(
             "AAPL",
             market=Market.US,
             providers=[_StubProvider("technicals", technicals)],
             quick_judge=judge,
-            signal_logger=logger,
             depth=depth,
             sizing_settings=sizing_settings or SizingSettings(),
             sizing_overrides=sizing_overrides,
             tier2_stage=Tier2Stage(engine=debate_engine),
             earnings_lookup=_no_earnings,
         )
+        # ``logged`` mirrors the deepest report (the parent project's
+        # signal ledger is gone; the report itself is what matters).
+        logged = [outcome.final_report]
         return outcome, logged, debate_engine, judge.calls
 
     def test_default_depth_is_tier1_only(self):
@@ -311,7 +288,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
 
     def test_depth_2_skips_the_quick_judge_and_runs_the_vote(self):
         outcome, logged, debate_engine, judge_calls = self._run(
-            depth=2, debate_verdict=_debate_verdict())
+            depth=2, debate_outlook=_debate_outlook())
         # The quick-judge call must NOT run at depth 2.
         self.assertEqual(judge_calls, [])
         self.assertEqual(sorted(outcome.state.reports), [1, 2])
@@ -326,7 +303,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         self.assertTrue(logged[0].dimensions)
 
     def test_depth_2_failure_has_no_tier1_fallback(self):
-        outcome, _, _, _ = self._run(depth=2, debate_verdict=None)
+        outcome, _, _, _ = self._run(depth=2, debate_outlook=None)
         self.assertEqual(outcome.final_report.direction, Direction.UNKNOWN)
         self.assertEqual(outcome.outlook, Outlook.UNKNOWN)
         self.assertEqual(outcome.action, Action.UNKNOWN)
@@ -341,12 +318,13 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
     def test_missing_sizing_falls_back_to_the_form_defaults(self):
         # Owner decision 2026-07-24: every run sizes. With no settings and
         # no overrides, the web form's defaults fill in (100k capital, 1%
-        # risk) — entry 96, stop 90 → loss/share 6 → floor(1000/6) = 166.
+        # risk) — entry 96, stop 90 → loss/share 6 → 1000/6 = 166.666
+        # (fractional shares, floored to a thousandth).
         outcome, _, _, _ = self._run()
         self.assertTrue(outcome.sizing["enabled"])
         self.assertEqual(outcome.sizing["inputs"]["capital"], 100000.0)
         self.assertEqual(outcome.sizing["inputs"]["risk_fraction"], 0.01)
-        self.assertEqual(outcome.sizing["shares"], 166)
+        self.assertEqual(outcome.sizing["shares"], 166.666)
 
     def test_enabled_sizing_computes_shares_from_final_levels(self):
         from src.tiered_analysis.settings import SizingSettings
@@ -354,12 +332,11 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         outcome, logged, _, _ = self._run(
             sizing_settings=SizingSettings(capital=100000.0,
                                            risk_fraction=0.01))
-        # entry 96, stop 90 → loss/share 6 → floor(1000/6) = 166 shares
-        self.assertEqual(outcome.sizing["shares"], 166)
+        # entry 96, stop 90 → loss/share 6 → 1000/6 = 166.666 shares
+        self.assertEqual(outcome.sizing["shares"], 166.666)
         self.assertTrue(outcome.sizing["enabled"])
-        self.assertEqual(outcome.final_report.sizing.shares, 166.0)
-        # the sized position reaches the signal ledger
-        self.assertEqual(logged[0].sizing.shares, 166.0)
+        self.assertEqual(outcome.final_report.sizing.shares, 166.666)
+        self.assertEqual(logged[0].sizing.shares, 166.666)
 
     def test_hold_direction_refuses_sizing_and_maps_to_no_trade(self):
         outcome, _, _, _ = self._run(quick_score=5.0)
@@ -370,7 +347,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
     def test_per_run_overrides_enable_sizing(self):
         outcome, _, _, _ = self._run(
             sizing_overrides={"capital": 100000.0, "risk_fraction": 0.01})
-        self.assertEqual(outcome.sizing["shares"], 166)
+        self.assertEqual(outcome.sizing["shares"], 166.666)
 
     def test_reward_capped_plan_maps_bullish_to_buy_later(self):
         # Resistance at 104 caps the target (geometric would be 108):
@@ -381,44 +358,30 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         self.assertEqual(outcome.outlook, Outlook.BULLISH)
         self.assertEqual(outcome.action, Action.ENTER_LATER)
 
-    def test_bullish_while_holding_is_keep_holding(self):
-        outcome, _, _, _ = self._run(sizing_overrides={"ownership": 300})
-        self.assertEqual(outcome.outlook, Outlook.BULLISH)
-        self.assertEqual(outcome.action, Action.KEEP_HOLDING)
-        self.assertEqual(outcome.sizing["ownership"], 300)
-
-    def test_bearish_with_ownership_sells_the_full_holding(self):
+    def test_bearish_is_no_trade_and_sizes_nothing(self):
         outcome, _, _, _ = self._run(
-            depth=2, debate_verdict=_debate_verdict(Direction.SELL, 2.5),
-            sizing_overrides={"ownership": 300})
+            depth=2, debate_outlook=_debate_outlook(Direction.SELL, 2.5))
         self.assertEqual(outcome.outlook, Outlook.BEARISH)
-        self.assertEqual(outcome.action, Action.SELL_ALL)
-        self.assertEqual(outcome.sizing["sell_shares"], 300)
-        # buy sizing still refuses with not_a_buy... unless settings off
-        self.assertIn(outcome.sizing["reason_code"], ("not_a_buy", "sizing_off"))
-
-    def test_bearish_without_ownership_is_no_trade(self):
-        outcome, _, _, _ = self._run(
-            depth=2, debate_verdict=_debate_verdict(Direction.SELL, 2.5))
         self.assertEqual(outcome.action, Action.NO_TRADE)
-        self.assertEqual(outcome.sizing["ownership"], 0)
-        self.assertIsNone(outcome.sizing["sell_shares"])
+        # The ownership input is gone (2026-09-16): no held-shares block.
+        self.assertNotIn("ownership", outcome.sizing)
+        self.assertNotIn("sell_shares", outcome.sizing)
+        self.assertIn(outcome.sizing["reason_code"], ("not_a_buy", "sizing_off"))
 
     def test_plan_review_emits_structured_warnings_and_shares_detail(self):
         outcome, _, _, _ = self._run(
             sizing_overrides={"capital": 100000.0, "risk_fraction": 0.01})
-        self.assertIsNone(outcome.risk_card)  # retired 2026-07-22
         pw = outcome.plan_warnings
         self.assertEqual(sorted(pw), ["entry", "shares", "stop_loss", "take_profit"])
         gap = pw["stop_loss"][0]
         self.assertEqual(gap["id"], "gap_atr")
-        # open = stop 90 − 1×ATR 3 = 87; loss = 166 × (96 − 87) = 1494
+        # open = stop 90 − 1×ATR 3 = 87; loss = 166.666 × (96 − 87) = 1499.994
         self.assertAlmostEqual(gap["values"]["atr_open"], 87.0)
-        self.assertAlmostEqual(gap["values"]["atr_loss"], 1494.0)
+        self.assertAlmostEqual(gap["values"]["atr_loss"], 1499.994)
         self.assertEqual(pw["take_profit"], [])  # R:R exactly the 2× goal
         shares_detail = outcome.report.levels_detail["levels"]["shares"]
-        self.assertEqual(shares_detail["base"], 166)
-        self.assertEqual(shares_detail["final"], 166)
+        self.assertEqual(shares_detail["base"], 166.666)
+        self.assertEqual(shares_detail["final"], 166.666)
         self.assertIsNone(shares_detail["adjusted"])
 
     def test_plan_review_absent_on_non_buy(self):
@@ -433,7 +396,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         self.assertIsNone(outcome.earnings.next_date)
 
     def test_llm_usage_always_present_with_scope_note(self):
-        outcome, _, _, _ = self._run(depth=2, debate_verdict=None)
+        outcome, _, _, _ = self._run(depth=2, debate_outlook=None)
         self.assertEqual(outcome.llm_usage["total"]["calls"], 0)  # all fakes
         self.assertIn("tier-1", outcome.llm_usage["scope"])
 
@@ -441,26 +404,22 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
 class TestDeriveAction(unittest.TestCase):
     """The pure action table, including the buy-now/buy-later split."""
 
-    def test_bullish_without_shares_splits_on_the_reward_goal(self):
+    def test_bullish_splits_on_the_reward_goal(self):
         self.assertEqual(
-            derive_action(Outlook.BULLISH, 0, plan_meets_goal=True),
+            derive_action(Outlook.BULLISH, plan_meets_goal=True),
             Action.ENTER)
         self.assertEqual(
-            derive_action(Outlook.BULLISH, 0, plan_meets_goal=False),
+            derive_action(Outlook.BULLISH, plan_meets_goal=False),
             Action.ENTER_LATER)
 
     def test_a_goal_miss_never_changes_the_other_cells(self):
-        for outlook, ownership, expected in [
-            (Outlook.BULLISH, 300, Action.KEEP_HOLDING),
-            (Outlook.NEUTRAL, 0, Action.NO_TRADE),
-            (Outlook.NEUTRAL, 300, Action.KEEP_HOLDING),
-            (Outlook.BEARISH, 0, Action.NO_TRADE),
-            (Outlook.BEARISH, 300, Action.SELL_ALL),
-            (Outlook.UNKNOWN, 0, Action.UNKNOWN),
+        for outlook, expected in [
+            (Outlook.NEUTRAL, Action.NO_TRADE),
+            (Outlook.BEARISH, Action.NO_TRADE),
+            (Outlook.UNKNOWN, Action.UNKNOWN),
         ]:
             self.assertEqual(
-                derive_action(outlook, ownership, plan_meets_goal=False),
-                expected)
+                derive_action(outlook, plan_meets_goal=False), expected)
 
 
 class TestPlanReviewAdjustments(unittest.TestCase):
@@ -488,8 +447,6 @@ class TestPlanReviewAdjustments(unittest.TestCase):
             "AAPL", market=Market.US,
             providers=[_StubProvider("technicals", dim)],
             quick_judge=_FakeQuickJudge(),
-            signal_logger=lambda report, trace_id=None: None,
-            log_signal=False,
             sizing_settings=SizingSettings(capital=100000.0,
                                            risk_fraction=0.01),
             earnings_lookup=_no_earnings,
@@ -498,7 +455,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         return outcome, prompts
 
     def test_ai_share_trim_with_cited_reason(self):
-        # 166 shares are 16.6% of the 1000-share ADV → liquidity flags →
+        # 166.666 shares are 16.7% of the 1000-share ADV → liquidity flags →
         # the fake AI trims to 50 with a verified link.
         reply = json.dumps({"adjustments": [{
             "target": "shares", "value": 50,
@@ -514,7 +471,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         self.assertIn("liquidity", prompts[0])
         self.assertEqual(outcome.sizing["shares"], 50)
         detail = outcome.report.levels_detail["levels"]["shares"]
-        self.assertEqual(detail["base"], 166)
+        self.assertEqual(detail["base"], 166.666)
         self.assertEqual(detail["adjusted"], 50)
         self.assertEqual(detail["reasons"][0]["check"], "liquidity")
         self.assertIn("liquidity limit", detail["reasons"][0]["text"])
@@ -522,12 +479,12 @@ class TestPlanReviewAdjustments(unittest.TestCase):
                          "technicals.volume.avg_vol_60d")
         # Receipt data always rides with an adjusted count (2026-07-22):
         # the mechanical recompute and the inputs it used.
-        self.assertEqual(detail["mechanical"], 166)
+        self.assertEqual(detail["mechanical"], 166.666)
         self.assertEqual(detail["adjusted_inputs"]["entry"], 96.0)
         # gap warning recomputes off the trimmed count: 50 × (96−87) = 450
         gap = outcome.plan_warnings["stop_loss"][0]
         self.assertAlmostEqual(gap["values"]["atr_loss"], 450.0)
-        self.assertEqual(outcome.llm_usage["stages"].get("plan_adjust", {})
+        self.assertEqual(outcome.llm_usage["stages"].get("trade_plan", {})
                          .get("calls", 0), 0)  # fake summarizer records none
 
     def test_uncited_number_in_reason_drops_adjustment(self):
@@ -545,7 +502,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         }]})
         outcome, prompts = self._run_with_reply(reply)
         self.assertEqual(len(prompts), 2)  # one call + one fix round
-        self.assertEqual(outcome.sizing["shares"], 166)
+        self.assertEqual(outcome.sizing["shares"], 166.666)
         self.assertTrue(any("has no citation" in w
                             for w in outcome.report.warnings))
 
@@ -578,7 +535,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         }]})
         outcome, prompts = self._run_with_reply(reply)
         self.assertEqual(len(prompts), 3)  # one call per round, no fix rounds
-        self.assertEqual(outcome.sizing["shares"], 166)
+        self.assertEqual(outcome.sizing["shares"], 166.666)
         detail = outcome.report.levels_detail["levels"]["shares"]
         self.assertIsNone(detail["adjusted"])
         failures = outcome.report.levels_detail["review_failures"]
@@ -618,7 +575,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
     def test_unparseable_reply_keeps_computed_plan(self):
         outcome, prompts = self._run_with_reply("not json at all")
         self.assertEqual(len(prompts), 2)  # one call + one fix round
-        self.assertEqual(outcome.sizing["shares"], 166)
+        self.assertEqual(outcome.sizing["shares"], 166.666)
         self.assertTrue(any("plan-review reply problem" in w
                             for w in outcome.report.warnings))
         # An empty answer while liquidity fires is a round-1 failure: the
@@ -752,8 +709,6 @@ class TestEarningsGateWarning(unittest.TestCase):
                 _StubProvider("fundamentals", fundamentals),
             ],
             quick_judge=_FakeQuickJudge(),
-            signal_logger=lambda report, trace_id=None: None,
-            log_signal=False,
             sizing_settings=SizingSettings(),
         )
         entry_warnings = outcome.plan_warnings["entry"]
@@ -775,7 +730,7 @@ class TestMacroEventGateWarning(unittest.TestCase):
         from src.tiered_analysis.providers.technicals import make_metric
 
         return DimensionResult(
-            dimension="macro_econ", kind=SourceKind.NUMERIC,
+            dimension="macro_economy", kind=SourceKind.NUMERIC,
             payload={"events": {
                 key: make_metric(key, "x", value)
                 for key, value in events.items()
@@ -852,12 +807,8 @@ class TestStalenessGate(unittest.TestCase):
     LLM stage when the bars predate the newest completed session."""
 
     def _run(self, stop_reason, staleness_gate=True, depth=1):
-        calls = {"judge": 0, "logger": 0}
+        calls = {"judge": 0}
         judge = _FakeQuickJudge()
-
-        def logger(report, trace_id=None):
-            calls["logger"] += 1
-            return "log-result"
 
         with patch(
             "src.tiered_analysis.integration.staleness_stop_reason",
@@ -868,7 +819,6 @@ class TestStalenessGate(unittest.TestCase):
                 market=Market.US,
                 providers=[_StubProvider("technicals", _dim("technicals"))],
                 quick_judge=judge,
-                signal_logger=logger,
                 earnings_lookup=_no_earnings,
                 staleness_gate=staleness_gate,
                 depth=depth,
@@ -876,28 +826,21 @@ class TestStalenessGate(unittest.TestCase):
         calls["judge"] = len(judge.calls)
         return outcome, calls
 
-    def test_stale_bars_stop_before_any_llm(self):
-        outcome, calls = self._run("stale bars: 2026-08-04 < 2026-08-05")
-        self.assertEqual(outcome.outlook, Outlook.STOPPED)
-        self.assertEqual(outcome.action, Action.UNKNOWN)
-        self.assertIsNone(outcome.signal)
-        self.assertEqual(calls, {"judge": 0, "logger": 0})
-        # The data cards survive; no verdict, no tier-2 section.
-        self.assertTrue(outcome.report.dimensions)
-        self.assertEqual(outcome.report.direction, Direction.UNKNOWN)
-        self.assertNotIn(2, outcome.state.reports)
+    def test_stale_bars_fail_the_run_before_any_llm(self):
+        # Owner decision 2026-09-17: a stale-data stop is a failure with
+        # a plain message (it used to finish with a "stopped" outlook).
+        from src.tiered_analysis.run_gate import StaleDataError
 
-    def test_stopped_run_reports_no_stop_text_in_warnings(self):
-        # The outlook says everything (owner decision): the reason lives
-        # in logs only, never in the user-facing report warnings.
-        outcome, _ = self._run("stale bars: vendor lagging")
-        self.assertEqual(outcome.report.warnings, [])
+        with self.assertRaises(StaleDataError) as caught:
+            self._run("stale bars: 2026-08-04 < 2026-08-05")
+        self.assertEqual(caught.exception.reason, "stale bars: 2026-08-04 < 2026-08-05")
+        self.assertIn("not up to date yet", str(caught.exception))
+        self.assertIn("try again later", str(caught.exception))
 
     def test_fresh_bars_run_normally(self):
         outcome, calls = self._run(None)
         self.assertEqual(outcome.outlook, Outlook.BULLISH)
         self.assertEqual(calls["judge"], 1)
-        self.assertEqual(calls["logger"], 1)
 
     def test_gate_defaults_off_for_injected_providers(self):
         # Same convention as cross-field enrichment: canned payloads mean
@@ -934,7 +877,6 @@ class TestStalenessGateReadsTheBarDate(unittest.TestCase):
             market=Market.US,
             providers=[_StubProvider("technicals", self._dim_dated(as_of))],
             quick_judge=judge,
-            signal_logger=lambda report, trace_id=None: "log-result",
             earnings_lookup=_no_earnings,
             staleness_gate=True,
         )
@@ -954,15 +896,21 @@ class TestStalenessGateReadsTheBarDate(unittest.TestCase):
         self.assertEqual(calls["judge"], 1)
 
     def test_genuinely_stale_bars_still_stop(self):
+        from src.tiered_analysis.run_gate import StaleDataError
+
         stale = expected_bar_date("us") - timedelta(days=30)
-        outcome, calls = self._run(stale.isoformat())
-        self.assertEqual(outcome.outlook, Outlook.STOPPED)
-        self.assertEqual(calls["judge"], 0)
+        with self.assertRaises(StaleDataError) as caught:
+            self._run(stale.isoformat())
+        # The message names both dates so the user can see the lag.
+        self.assertIn(stale.isoformat(), str(caught.exception))
+        self.assertIn(expected_bar_date("us").isoformat(), str(caught.exception))
 
     def test_missing_date_stops(self):
-        outcome, calls = self._run(None)
-        self.assertEqual(outcome.outlook, Outlook.STOPPED)
-        self.assertEqual(calls["judge"], 0)
+        from src.tiered_analysis.run_gate import StaleDataError
+
+        with self.assertRaises(StaleDataError) as caught:
+            self._run(None)
+        self.assertIn("newest daily bar is missing", str(caught.exception))
 
 
 class TestHoldWeeks(unittest.TestCase):
@@ -974,8 +922,6 @@ class TestHoldWeeks(unittest.TestCase):
             market=Market.US,
             providers=[_StubProvider("technicals", _dim("technicals"))],
             quick_judge=_FakeQuickJudge(),
-            signal_logger=lambda report, trace_id=None: None,
-            log_signal=False,
             earnings_lookup=_no_earnings,
             **kwargs,
         )

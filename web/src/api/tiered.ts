@@ -51,7 +51,6 @@ export type TieredDimension = {
 
 export type TieredLevels = {
   entry: number | null;
-  secondary_entry: number | null;
   stop_loss: number | null;
   take_profit: number | null;
 };
@@ -59,8 +58,7 @@ export type TieredLevels = {
 // v2 slice 3 audit trail: per-level formula base + validated AI adjustment.
 // The plan-review redesign (2026-07-22) adds a "shares" entry in the same
 // shape (base = count from the computed levels; adjusted_inputs = the
-// final levels a mechanical recompute used) and `links` — inline
-// citations for the adjustment reason, in the debate-link shape.
+// final levels a mechanical recompute used).
 // One adjustment reason: the flagged check it fixes (a fixed keyword id
 // the UI translates) plus one cited sentence.
 export type TieredLevelReason = {
@@ -74,11 +72,8 @@ export type TieredLevelDetail = {
   formula: string | null;
   inputs: Record<string, number> | null;
   adjusted: number | null;
-  /** Old stored runs: one paragraph. New runs carry `reasons` instead. */
-  reason?: string | null;
   reasons?: TieredLevelReason[] | null;
   evidence: string[];
-  links?: TieredDebateLink[];
   adjusted_inputs?: Record<string, number> | null;
   /** Shares only: the mechanical recompute from the adjusted levels,
    *  before any AI trim — the receipt's result line. */
@@ -110,31 +105,12 @@ export type TieredPlanWarning = {
 // Per-column warning lists for the plan table's Warnings row.
 export type TieredPlanWarnings = Record<string, TieredPlanWarning[]>;
 
-export type TieredAnchoredReason = {
-  claim: string;
-  evidence: string[];
-};
-
 // v4 judge grade for one validity axis: the 0-5 score plus, below 5, the
 // exact offending sentence and why it is wrong (both null at 5/5 → N/A).
 export type TieredAxisGrade = {
   score: number;
   quote?: string | null;
   why?: string | null;
-};
-
-// One debater's numbers — its own 0-10 position score plus the judge's
-// three 0-5 validity grades; weight = (sum of grades) / 15. v3 runs store
-// the position score as `bullishness` and the axes as bare numbers; v4
-// runs store `position_score` and axis objects with quote/why comments.
-export type TieredDebaterScore = {
-  position_score?: number;
-  bullishness?: number;
-  citation_validity: number | TieredAxisGrade;
-  knowledge_validity: number | TieredAxisGrade;
-  logical_validity: number | TieredAxisGrade;
-  weight: number;
-  notes?: string | null;
 };
 
 // --- v5/v6/v7 debate tree (defender/attacker/judge) ---
@@ -151,40 +127,6 @@ export type TieredDebateLink = {
   mismatch?: boolean;
 };
 
-// One citation-or-logic check; 'invalid' carries the reason + citations.
-export type TieredDebateCheck = {
-  verdict: 'valid' | 'invalid';
-  reason: string | null;
-  citations: string[];
-};
-
-// The defender's response to one challenge: its own checks ON the
-// attack/addition. v6 stores the citation/logic pair (both valid →
-// accepted); v7 stores the single `check` (valid → accepted). All three
-// fields optional so both generations type-check.
-export type TieredDebateResponse = {
-  accepted: boolean;
-  citation_check?: TieredDebateCheck;
-  logic_check?: TieredDebateCheck;
-  check?: TieredDebateCheck;
-};
-
-// The judge's word on one axis of a defender item: its own check when the
-// axis was unattacked, a ruling on the attack when it was.
-export type TieredDebateJudgeAxis = {
-  kind: 'reason_check' | 'attack_ruling';
-  verdict: 'valid' | 'invalid' | 'attack_right' | 'attack_wrong';
-  reason: string | null;
-  citations: string[];
-};
-
-export type TieredDebateJudgeAddition = {
-  kind: 'addition_ruling';
-  verdict: 'real' | 'bogus';
-  reason: string | null;
-  citations: string[];
-};
-
 // One v8 vote on a bullet: the check round's second vote or the
 // deciding round's tiebreaker. Reasons carry the same code-verified
 // links the bullets use. v10 votes carry the voter's own importance
@@ -192,7 +134,7 @@ export type TieredDebateJudgeAddition = {
 // sentence saying why (weight_reason).
 export type TieredDebateVote = {
   role: 'checker' | 'decider';
-  verdict: 'valid' | 'invalid';
+  validity: 'valid' | 'invalid';
   reason: string | null;
   links: TieredDebateLink[];
   weight?: number;
@@ -207,21 +149,13 @@ export type TieredDebateAuthorVote = {
   weight_reason?: string | null;
 };
 
-// One evidence item of the tree with everything that happened to it.
-// v5 runs store citations + the count/outcome ledger; v6 runs store
-// links + value_check + the per-axis checks; v7 runs store single-axis
-// fields (attacker_check, one response, one judge line) plus struck +
-// problems for bullets whose citations code could not fix; v8 runs
-// store authors (how many analysts listed it independently) + votes —
-// all optional so every generation renders.
+// One evidence item of the vote tree with everything that happened to it.
 export type TieredDebateItem = {
   id: string;
   dimension: string;
   direction: 'bullish' | 'bearish';
   claim: string;
-  citations?: string[];
   links?: TieredDebateLink[];
-  value_check?: { verdict: 'valid' | 'invalid'; problems: string[] } | null;
   struck?: boolean;
   problems?: string[];
   authors?: number;
@@ -233,21 +167,6 @@ export type TieredDebateItem = {
   author_weights?: number[];
   author_votes?: TieredDebateAuthorVote[];
   weight?: number | null;
-  added_by_attacker?: boolean;
-  attacker_checks?: { citation: TieredDebateCheck; logic: TieredDebateCheck } | null;
-  attacker_check?: TieredDebateCheck | null;
-  responses?: {
-    citation: TieredDebateResponse | null;
-    logic: TieredDebateResponse | null;
-  };
-  response: TieredDebateResponse | null;
-  judge:
-    | { citation: TieredDebateJudgeAxis; logic: TieredDebateJudgeAxis }
-    | TieredDebateJudgeAddition
-    | TieredDebateJudgeAxis
-    | null;
-  count?: { numerator: number; denominator: number } | null;
-  outcome?: 'valid' | 'invalid' | 'neutral' | null;
   final_status?: 'counted' | 'excluded' | null;
   exclusion_reason?: string | null;
 };
@@ -302,14 +221,14 @@ export type TieredSummaryStructure = {
   technicals?: TieredSummaryBullet[] | null;
   fundamentals?: TieredSummaryBullet[] | null;
   positioning?: TieredSummaryBullet[] | null;
-  macro_econ?: TieredSummaryBullet[] | null;
+  macro_economy?: TieredSummaryBullet[] | null;
   // Opinion (analyst + crowd) joined 2026-08-18; absent on older runs.
   opinion?: TieredSummaryBullet[] | null;
   // Company news joined the debate 2026-08-16; absent on older runs.
-  company_events?: TieredSummaryBullet[] | null;
+  company_news?: TieredSummaryBullet[] | null;
   // World news (macro backdrop card) joined the same day; absent on
   // older runs.
-  world_events?: TieredSummaryBullet[] | null;
+  world_news?: TieredSummaryBullet[] | null;
 };
 
 // mind), the v3 scored shape (final_score, scoring, corrected bull/bear
@@ -320,41 +239,14 @@ export type TieredDebateDetail = {
   // 5/6/7 on tree-format runs; absent on everything stored before.
   format?: number;
   items?: TieredDebateItem[];
-  turns: {
-    role: string;
-    // v2/v3 runs number their rounds; v4 turns carry a kind instead.
-    round?: number;
-    kind?: string;
-    argument: string;
-    bullishness?: number | null;
-    position_score?: number | null;
-    citations?: string[];
-  }[];
-  verdict: {
+  outlook: {
     direction: string;
     summary: string;
-    // v11+ structured report: the fixed five-group outline the summary
-    // stage fills (summary + one group per dimension); `summary` above
-    // is its flat-text rendering for older readers.
+    // The fixed-outline report the summary stage fills (summary + one
+    // group per dimension); `summary` above is its flat-text rendering.
     summary_structure?: TieredSummaryStructure | null;
-    // v2 judged shape
-    confidence?: number | null;
-    reasons_for?: TieredAnchoredReason[];
-    reasons_against?: TieredAnchoredReason[];
-    would_change_mind?: string | null;
-    // v3 scored shape
     final_score?: number | null;
-    final_score_rounded?: number | null;
-    bull_summary?: string | null;
-    bear_summary?: string | null;
-    scoring?: { bull: TieredDebaterScore; bear: TieredDebaterScore } | null;
-    // v5/v6 tree shape (v5 scores are whole numbers + weight; v6 scores
-    // are 2-decimal pool counts + pools)
     initial_score?: number | null;
-    adjusted_score?: number | null;
-    adjusted_kept?: boolean | null;
-    weight?: { numerator: number; denominator: number; value: number } | null;
-    // v8 pools drop the adjusted snapshot (no concede/adopt step).
     pools?: {
       initial: TieredDebatePool;
       adjusted?: TieredDebatePool;
@@ -364,69 +256,8 @@ export type TieredDebateDetail = {
   warnings: string[];
 };
 
-// One tier-3 risk bullet (risk_detail format 2): the tier-2 vote-item
-// shape minus the direction tag — every bullet is a risk, and code maps
-// the confirmed count to the size multiplier.
-export type TieredRiskItem = {
-  id: string;
-  dimension: string;
-  claim: string;
-  links?: TieredDebateLink[];
-  struck?: boolean;
-  problems?: string[];
-  authors?: number;
-  votes?: TieredDebateVote[];
-  final_status?: 'counted' | 'excluded' | null;
-  exclusion_reason?: string | null;
-};
-
-// Per-group and total risk counts for one pool snapshot.
-export type TieredRiskCounts = {
-  groups: Record<string, number>;
-  total: number;
-};
-
-// Risk stress audit trail (tier-3 section). Two generations coexist in
-// stored runs: the persona/judge shape (takes + stance/stop advice) and
-// the format-2 risk vote (items + count-derived multiplier) — every
-// generation-specific field is optional.
-export type TieredRiskDetail = {
-  // 2 on risk-vote runs; absent on the stored persona/judge runs.
-  format?: number;
-  takes: { persona: string; assessment: string }[];
-  items?: TieredRiskItem[];
-  verdict: {
-    stance: string;
-    size_multiplier: number;
-    // Absent on runs stored before the risk judge reported its own 0-1
-    // sureness; the UI hides the score for those.
-    confidence?: number | null;
-    stop_advice: string;
-    tightened_stop: number | null;
-    summary: string;
-    key_risks: TieredAnchoredReason[];
-    // format 2: the code-owned count → multiplier arithmetic.
-    confirmed_risks?: number;
-    total_risks?: number;
-    counts?: { initial: TieredRiskCounts; final: TieredRiskCounts } | null;
-  } | null;
-  warnings: string[];
-};
-
-// Outlook redesign (2026-07): the impersonal judgment on the stock.
-// 'stopped' (2026-08-08): the staleness gate halted the run before any
-// LLM stage — the data cards exist, but no analysis or plan does.
-export type TieredOutlook = 'bullish' | 'neutral' | 'bearish' | 'unknown' | 'stopped';
-// …and the personal instruction code derives from outlook × ownership.
-export type TieredAction =
-  | 'enter'
-  | 'enter_later'
-  | 'keep_holding'
-  | 'no_trade'
-  | 'sell_all'
-  | 'unknown';
-
-// Warning-only earnings info: never gates anything, never moves numbers.
+export type TieredOutlook = 'bullish' | 'neutral' | 'bearish' | 'unknown';
+export type TieredAction = 'enter' | 'enter_later' | 'no_trade' | 'unknown';
 export type TieredEarnings = {
   next_date: string | null;
   days_until: number | null;
@@ -435,15 +266,7 @@ export type TieredEarnings = {
   note: string | null;
 };
 
-// One display-only risk-card entry. The 13 ids and their value keys are
-// fixed by the backend (risk_card.py); wording lives in the i18n layer.
-export type TieredRiskCardEntry = {
-  id: string;
-  status: 'ok' | 'flag' | 'na';
-  values: Record<string, unknown>;
-};
-
-// The deepest tier's verdict in summary form — what the run ends on.
+// The deepest tier's outlook in summary form — what the run ends on.
 export type TieredFinal = {
   tier: number;
   direction: 'buy' | 'hold' | 'sell' | 'unknown';
@@ -462,21 +285,12 @@ export type TieredTierSection = {
   narrative: string | null;
   warnings: string[];
   debate_detail?: TieredDebateDetail;
-  risk_detail?: TieredRiskDetail;
 };
 
 // v2 slice 6: deterministic sizing block (share count or explicit refusal).
 export type TieredSizing = {
   enabled: boolean;
   shares: number | null;
-  // Multiplier keys died with tier 3 — absent on outlook-redesign runs.
-  shares_before_multiplier?: number | null;
-  risk_multiplier?: number | null;
-  // Ownership block (absent on runs stored before the ownership input):
-  // held shares, and the exit size a sell verdict prints from them.
-  ownership?: number | null;
-  sell_shares?: number | null;
-  sell_shares_before_multiplier?: number | null;
   position_value: number | null;
   risk_amount: number | null;
   loss_per_share: number | null;
@@ -500,6 +314,25 @@ export type TieredLlmUsage = {
   stages: Record<string, { calls: number; prompt_tokens: number; completion_tokens: number }>;
   total: { calls: number; prompt_tokens: number; completion_tokens: number };
   scope: string;
+  // How many LLM exchanges the run's stored transcript holds (absent on
+  // runs that made no call, and on runs stored before transcripts).
+  transcript_entries?: number | null;
+};
+
+// One LLM exchange of a run, from GET /runs/{task_id}/transcript.
+export type TieredTranscriptEntry = {
+  seq: number;
+  created_at: string | null;
+  stage: string | null;
+  model: string | null;
+  temperature: number | null;
+  duration_ms: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  structured: string | null;
+  error: string | null;
+  prompt: string | null;
+  reply: string | null;
 };
 
 export type TieredResult = {
@@ -514,33 +347,39 @@ export type TieredResult = {
   narrative: string | null;
   warnings: string[];
   dimensions: TieredDimension[];
-  signal: {
-    logged: boolean;
-    signal_id: number | null;
-    created: boolean | null;
-    reason: string | null;
-  } | null;
   // v2 slice 6 additions — absent on old stored runs, so all optional.
   depth?: number;
   final?: TieredFinal | null;
   tier2?: TieredTierSection | null;
-  tier3?: TieredTierSection | null;
   sizing?: TieredSizing | null;
   llm_usage?: TieredLlmUsage | null;
   // Outlook redesign additions — absent on old stored runs.
   outlook?: TieredOutlook;
   action?: TieredAction;
   earnings?: TieredEarnings | null;
-  // Retired 2026-07-22 (kept so old stored runs still type-check).
-  risk_card?: TieredRiskCardEntry[] | null;
   // Plan review (2026-07-22): per-column trade-plan warnings.
   plan_warnings?: TieredPlanWarnings | null;
   // Max hold time in weeks the run was judged against (2026-08-08);
   // absent on old stored runs.
   hold_weeks?: number | null;
+  // Run reuse (2026-09-17): set when the outlook came from another run.
+  reused?: TieredReused | null;
 };
 
-export type TieredRunStatus = 'running' | 'done' | 'failed';
+// queued (2026-09-15): waiting for a free slot in the server's global run
+// queue; it becomes running by itself. A run that will borrow its outlook
+// from a matching run still in flight (2026-09-17) reports that run's
+// status and place in line, so it reads exactly as the source does.
+export type TieredRunStatus = 'queued' | 'running' | 'done' | 'failed';
+
+// Run reuse (2026-09-17): the outlook came from a shared run at this tier
+// by this model; only the trade plan was computed with the user's own
+// settings. Absent on a run that did its own analysis.
+export type TieredReused = {
+  tier: number;
+  model: string | null;
+  model_label: string | null;
+};
 
 export type TieredRunSummary = {
   task_id: string;
@@ -549,6 +388,13 @@ export type TieredRunSummary = {
   error: string | null;
   created_at: string | null;
   updated_at: string | null;
+  // Queued rows only: how many runs (anyone's) are ahead in the line.
+  queue_ahead?: number | null;
+  // The main model behind the outlook (on a reused run, the source's) and
+  // whether the outlook was borrowed from another run.
+  model?: string | null;
+  model_label?: string | null;
+  reused?: boolean;
   // Digest of the stored report for the history rows. Null while running,
   // after a failure, or on rows stored before the backend sent these.
   // shares mirrors the report card: 0 = sizing ran but bought nothing,
@@ -584,8 +430,6 @@ export type TieredDepth = 1 | 2 | 3;
 export type TieredSizingRequest = {
   capital?: number;
   risk_fraction?: number;
-  // Kept for API compatibility; the alt form no longer collects it.
-  ownership?: number;
   // Reward-to-risk ratio the plan aims for (target = entry + R × risk).
   reward_risk?: number;
 };
@@ -606,14 +450,22 @@ export type TieredMarketOpenGate = {
   sessionClose: string | null;
 };
 
+// The 409 duplicate-run rejection body (2026-09-15): the caller's own
+// unfinished run with the same ticker and inputs — the Start popup names
+// it and the history expands it.
+export type TieredDuplicateRun = {
+  taskId: string;
+  status: 'queued' | 'running';
+};
+
 export const tieredApi = {
   start: async (
     stockCode: string,
     depth: TieredDepth = 1,
     sizing?: TieredSizingRequest,
     options?: TieredStartOptions,
-  ): Promise<{ task_id: string }> => {
-    const response = await apiClient.post<{ task_id: string }>('/api/v1/tiered/analyze', {
+  ): Promise<{ task_id: string; status: TieredRunStatus }> => {
+    const response = await apiClient.post<{ task_id: string; status: TieredRunStatus }>('/api/v1/tiered/analyze', {
       stock_code: stockCode,
       depth,
       ...(sizing && Object.keys(sizing).length > 0 ? { sizing } : {}),
@@ -634,6 +486,14 @@ export const tieredApi = {
   getRun: async (taskId: string): Promise<TieredRun> => {
     const response = await apiClient.get<TieredRun>(`/api/v1/tiered/runs/${taskId}`);
     return response.data;
+  },
+
+  // The run's LLM exchanges, served apart from the report (they're big).
+  getTranscript: async (taskId: string): Promise<TieredTranscriptEntry[]> => {
+    const response = await apiClient.get<{ items: TieredTranscriptEntry[] }>(
+      `/api/v1/tiered/runs/${taskId}/transcript`,
+    );
+    return response.data.items;
   },
 
   // Saved sizing settings (.env-backed) — what a run uses when the form

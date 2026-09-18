@@ -13,6 +13,7 @@ function makeRun(id: string, overrides: Partial<TieredRunSummary> = {}): TieredR
     created_at: '2026-07-10T04:00:00',
     updated_at: null,
     direction: 'buy',
+    outlook: 'bullish',
     shares: 41,
     tier: 1,
     capital: 100000,
@@ -43,15 +44,38 @@ function renderHistory(overrides: Partial<AltRunHistoryProps> = {}) {
 const minBoxes = () => screen.getAllByPlaceholderText(/^下限$|^Min$/);
 const DATE_MIN = 3;
 
+// A filter's title: the bold span above its control (the table has
+// column headers with the same words).
+const titleOf = (text: RegExp) =>
+  screen.getAllByText(text).find((el) => el.classList.contains('font-semibold')) as HTMLElement;
+
 describe('AltRunHistory', () => {
-  it('shows ticker, capital, risk, tier, outlook and date per row', () => {
+  it('shows a queued row with its place in line and explains it when expanded', () => {
+    renderHistory({
+      runs: [makeRun('q1', { status: 'queued', queue_ahead: 2, direction: null, shares: null })],
+      expandedTaskId: 'q1',
+    });
+
+    // two runs ahead → this one is 3rd in line
+    expect(screen.getByText(/排队中（第 3 位）|Queued \(3rd\)/)).toBeInTheDocument();
+    expect(screen.getByText(/轮到时会自动开始|starts by itself/)).toBeInTheDocument();
+  });
+
+  it('shows a queued row without a count when the backend sends none', () => {
+    renderHistory({ runs: [makeRun('q1', { status: 'queued', direction: null })] });
+
+    expect(screen.getByText(/^排队中$|^Queued$/)).toBeInTheDocument();
+  });
+
+  it('shows ticker, capital, risk, tier, status, outlook and date per row', () => {
     renderHistory({
       runs: [
-        makeRun('t1', { stock_code: 'MSFT', tier: 3 }),
+        makeRun('t1', { stock_code: 'MSFT', tier: 2 }),
         makeRun('t2', {
           stock_code: 'NVDA',
           status: 'running',
           direction: null,
+          outlook: null,
           shares: null,
           tier: null,
           capital: null,
@@ -64,19 +88,69 @@ describe('AltRunHistory', () => {
     expect(screen.getByText('100000')).toBeInTheDocument();
     expect(screen.getByText('1%')).toBeInTheDocument();
     expect(screen.getAllByText(/^\d{4}\/\d{2}\/\d{2}, \d{2}:\d{2}$/)).toHaveLength(2);
-    expect(screen.getByText(/层级 3|Tier 3/)).toBeInTheDocument();
-    // an old row without a stored outlook maps its buy verdict to bullish
+    expect(screen.getByText(/层级 2|Tier 2/)).toBeInTheDocument();
+    // status and outlook are separate columns (owner request 2026-09-17)
+    expect(screen.getByText(/^(已完成|Done)$/)).toBeInTheDocument();
     expect(screen.getByText(/看多|Bullish/)).toBeInTheDocument();
     // the shares column was dropped (owner request 2026-08-16)
     expect(screen.queryByText(/41/)).toBeNull();
     expect(screen.getByText('NVDA')).toBeInTheDocument();
     expect(screen.getByText(/分析中|Running/)).toBeInTheDocument();
-    // the running row has no capital/risk/reward/hold/tier yet — five
-    // dashes, plus the done row's reward and hold dashes (stored
+    // the running row has no capital/risk/reward/hold/tier/outlook yet —
+    // six dashes, plus the done row's reward and hold dashes (stored
     // before those inputs were recorded).
-    expect(screen.getAllByText('—')).toHaveLength(7);
+    expect(screen.getAllByText('—')).toHaveLength(8);
     // the pager is always there, even when everything fits on one page
     expect(screen.getByRole('button', { name: '1' })).toBeInTheDocument();
+  });
+
+  it('offers a dash in the outlook filter that keeps only rows without an outlook', () => {
+    renderHistory({
+      runs: [
+        makeRun('t1', { stock_code: 'MSFT', outlook: 'bullish' }),
+        makeRun('t2', { stock_code: 'NVDA', status: 'failed', direction: null, outlook: null }),
+        makeRun('t3', { stock_code: 'AMD', direction: 'unknown', outlook: 'unknown' }),
+      ],
+    });
+    fireEvent.focus(screen.getByPlaceholderText(/输入展望|Enter outlook/));
+    // the dropdown's dash option (the rows' own dashes are not buttons)
+    fireEvent.click(screen.getAllByText('—').find((el) => el.closest('button'))!);
+    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
+    expect(screen.getByText('NVDA')).toBeInTheDocument();
+    expect(screen.getByText('AMD')).toBeInTheDocument();
+  });
+
+  it('shows no status dot before the ticker', () => {
+    renderHistory({ runs: [makeRun('t1')] });
+    expect(document.querySelector('.rounded-full')).toBeNull();
+  });
+
+  it('colors a previous-day report date amber and explains it on click', () => {
+    // created_at is 2026-07-10, long before today
+    renderHistory({ runs: [makeRun('t1')] });
+    const date = screen.getByTestId('alt-run-date-stale');
+    expect(date).toHaveClass('text-amber-300');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.click(date);
+    expect(screen.getByRole('dialog')).toHaveTextContent(/重跑|re-run/);
+  });
+
+  it('colors a same-day report date green, and an unfinished run gray', () => {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const todayUtc =
+      `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}` +
+      `T${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:00`;
+    renderHistory({
+      runs: [
+        makeRun('t1', { created_at: todayUtc }),
+        makeRun('t2', { status: 'running', created_at: todayUtc, direction: null, outlook: null }),
+      ],
+    });
+    expect(screen.queryByTestId('alt-run-date-stale')).not.toBeInTheDocument();
+    const dates = screen.getAllByText(/^\d{4}\/\d{2}\/\d{2}, \d{2}:\d{2}$/);
+    expect(dates[0]).toHaveClass('text-emerald-300');
+    expect(dates[1]).toHaveClass('text-gray-400');
   });
 
   it('filters by capital and risk ranges', () => {
@@ -107,7 +181,7 @@ describe('AltRunHistory', () => {
       runs: [makeRun('t1', { stock_code: 'MSFT' }), makeRun('t2', { stock_code: 'NVDA' })],
     });
 
-    const tickerBox = screen.getByPlaceholderText(/筛选代码|Filter ticker/);
+    const tickerBox = screen.getByPlaceholderText(/输入代码|Enter ticker/);
     fireEvent.focus(tickerBox);
     fireEvent.click(screen.getByRole('button', { name: 'NVDA' }));
     // close the still-open multi-pick dropdown so only rows remain
@@ -131,11 +205,11 @@ describe('AltRunHistory', () => {
       runs: [
         // a new run stores its outlook; an old run maps hold → neutral
         makeRun('t1', { stock_code: 'MSFT', direction: 'buy', outlook: 'bullish' }),
-        makeRun('t2', { stock_code: 'NVDA', direction: 'hold' }),
+        makeRun('t2', { stock_code: 'NVDA', direction: 'hold', outlook: 'neutral' }),
       ],
     });
 
-    fireEvent.focus(screen.getByPlaceholderText(/筛选展望|Filter outlook/));
+    fireEvent.focus(screen.getByPlaceholderText(/输入展望|Enter outlook/));
     fireEvent.click(screen.getAllByText(/中性|Neutral/)[0]);
     expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
     expect(screen.getByText('NVDA')).toBeInTheDocument();
@@ -145,20 +219,54 @@ describe('AltRunHistory', () => {
     expect(screen.getByText('MSFT')).toBeInTheDocument();
   });
 
+  it('filters by status from the dropdown and shows a dash outlook for a failed run', () => {
+    renderHistory({
+      runs: [
+        makeRun('t1', { stock_code: 'MSFT' }),
+        makeRun('t2', { stock_code: 'NVDA', status: 'failed', direction: null, outlook: null }),
+      ],
+    });
+
+    fireEvent.focus(screen.getByPlaceholderText(/输入状态|Enter status/));
+    fireEvent.click(screen.getByRole('button', { name: /^(失败|Failed)$/ }));
+    fireEvent.mouseDown(document.body);
+
+    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
+    expect(screen.getByText('NVDA')).toBeInTheDocument();
+    // the failed row's outlook cell is a dash (plus its reward and hold
+    // dashes); its status cell says Failed
+    expect(screen.getAllByText('—')).toHaveLength(3);
+    expect(screen.getByText(/^(失败|Failed)$/)).toBeInTheDocument();
+    expect(screen.queryByText(/看多|Bullish/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /(Status|状态): (Failed|失败)/ }));
+    expect(screen.getByText('MSFT')).toBeInTheDocument();
+  });
+
+  it('shows a dash outlook for a finished run whose judge produced nothing', () => {
+    renderHistory({
+      runs: [makeRun('t1', { stock_code: 'MSFT', direction: 'unknown', outlook: 'unknown' })],
+    });
+
+    expect(screen.getByText(/^(已完成|Done)$/)).toBeInTheDocument();
+    // outlook dash plus the reward and hold dashes
+    expect(screen.getAllByText('—')).toHaveLength(3);
+  });
+
   it('filters by tier from the dropdown', () => {
     renderHistory({
       runs: [
         makeRun('t1', { stock_code: 'MSFT', tier: 1 }),
-        makeRun('t2', { stock_code: 'NVDA', tier: 3 }),
+        makeRun('t2', { stock_code: 'NVDA', tier: 2 }),
       ],
     });
 
-    fireEvent.focus(screen.getByPlaceholderText(/筛选层级|Filter tier/));
-    fireEvent.click(screen.getByRole('button', { name: '3' }));
+    fireEvent.focus(screen.getByPlaceholderText(/输入层级|Enter tier/));
+    fireEvent.click(screen.getByRole('button', { name: /^2[:：]/ }));
 
     expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
     expect(screen.getByText('NVDA')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /(Tier|层级): 3/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /(Tier|层级): 2/ })).toBeInTheDocument();
   });
 
   it('shows the max hold column and filters by it from the dropdown', () => {
@@ -172,7 +280,7 @@ describe('AltRunHistory', () => {
 
     expect(screen.getByText(/^(2w|2 周)$/)).toBeInTheDocument();
 
-    fireEvent.focus(screen.getByPlaceholderText(/筛选最长持有|Filter max hold/));
+    fireEvent.focus(screen.getByPlaceholderText(/输入最长持有|Enter max hold/));
     fireEvent.click(screen.getByRole('button', { name: '2' }));
 
     expect(screen.getByText('MSFT')).toBeInTheDocument();
@@ -264,5 +372,23 @@ describe('AltRunHistory', () => {
     fireEvent.click(screen.getByRole('button', { name: /MSFT/ }));
     expect(props.onToggle).toHaveBeenCalledWith('t1');
     expect(screen.getByText('LLM quota exhausted')).toBeInTheDocument();
+  });
+
+  it("colors a set filter's title like its pill and leaves the others gray", () => {
+    renderHistory({ runs: [makeRun('t1', { stock_code: 'MSFT' })] });
+    expect(titleOf(/^Capital$|^本金$/)).toHaveClass('text-gray-300');
+
+    // one end of a range is enough to count as set
+    fireEvent.change(minBoxes()[0], { target: { value: '50000' } });
+    fireEvent.keyDown(minBoxes()[0], { key: 'Enter' });
+    expect(titleOf(/^Capital$|^本金$/)).toHaveClass('text-orange-300');
+
+    fireEvent.focus(screen.getByLabelText(/^Status$|^状态$/));
+    fireEvent.click(screen.getByRole('button', { name: /^Done$|^已完成$/ }));
+    expect(titleOf(/^Status$|^状态$/)).toHaveClass('text-blue-300');
+    // removing the pill grays the title again
+    fireEvent.click(screen.getByRole('button', { name: /(Status|状态): (Done|已完成)/ }));
+    expect(titleOf(/^Status$|^状态$/)).toHaveClass('text-gray-300');
+    expect(titleOf(/^Ticker$|^代码$/)).toHaveClass('text-gray-300');
   });
 });

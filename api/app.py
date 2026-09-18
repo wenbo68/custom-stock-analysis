@@ -6,21 +6,32 @@ Compared with the parent project this serves exactly three things:
 - a health probe at ``/api/health``
 - the built frontend (``web/`` -> ``static/``) as a single-page app
 
-There is no auth layer: the app is meant to run open on a trusted
-machine (owner decision, 2026-08-24).
+Public-server work (2026-09-14):
+- sign-in: Google/Discord OAuth under /api/auth and a signed session
+  cookie; CORS is narrowed to CORS_ALLOW_ORIGINS (none by default — the
+  frontend is served from the same origin, and the Vite dev server
+  proxies /api).
+- startup housekeeping: runs execute as in-process threads, so any run
+  still "running" when the process starts belongs to a process that
+  died — it is marked failed. Runs still "queued" are resumed through
+  the global run queue. Old transcript and cache rows are pruned.
 """
 from __future__ import annotations
 
 import logging
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
+from api.auth import session as auth_session
 from api.middlewares.error_handler import add_error_handlers
-from api.v1.endpoints import tiered
+from api.v1.endpoints import auth, settings, tiered
 
 logger = logging.getLogger(__name__)
 
@@ -32,22 +43,77 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 ROOT_FILE_ALLOWLIST = frozenset({"favicon.ico", "favicon.svg", "vite.svg", "robots.txt"})
 
 
+def _cors_allow_origins() -> list:
+    """Origins allowed to call the API from another site (comma list in
+    CORS_ALLOW_ORIGINS). Empty by default: same-origin needs no CORS."""
+    raw = os.getenv("CORS_ALLOW_ORIGINS") or ""
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def startup_housekeeping() -> None:
+    """Mark orphaned runs failed, resume queued ones, and prune expired
+    rows. Never fails startup: a housekeeping error is logged and the
+    app serves anyway."""
+    from src.tiered_analysis import history
+    from src.tiered_analysis.cache_store import prune_cache
+
+    try:
+        orphaned = history.fail_stale_running_runs()
+        if orphaned:
+            logger.warning("marked %d orphaned run(s) failed at startup", orphaned)
+        # A run waiting on a source the old process was running (now
+        # failed) or already settled goes back in the line as its own run.
+        requeued = history.requeue_orphaned_waiters()
+        if requeued:
+            logger.warning("requeued %d run(s) whose source run is gone", requeued)
+    except Exception as exc:
+        logger.warning("startup run cleanup skipped: %s", exc)
+    try:
+        tiered.run_queue.resume()
+    except Exception as exc:
+        logger.warning("startup run queue resume skipped: %s", exc)
+    try:
+        history.prune_transcripts()
+        prune_cache()
+    except Exception as exc:
+        logger.warning("startup pruning skipped: %s", exc)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    startup_housekeeping()
+    yield
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Custom Stock Analysis",
         description="Standalone tiered stock analysis (the tiered alt page)",
         version="0.1.0",
+        lifespan=_lifespan,
     )
 
+    cors_origins = _cors_allow_origins()
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        SessionMiddleware,
+        secret_key=auth_session.session_secret(),
+        session_cookie=auth_session.SESSION_COOKIE,
+        max_age=auth_session.SESSION_MAX_AGE_SECONDS,
+        same_site="lax",
+        https_only=auth_session.cookie_is_https_only(),
     )
     add_error_handlers(app)
 
+    app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+    app.include_router(settings.router, prefix="/api/v1/settings", tags=["Settings"])
     app.include_router(tiered.router, prefix="/api/v1/tiered", tags=["TieredAnalysis"])
 
     @app.get("/api/health", include_in_schema=False)

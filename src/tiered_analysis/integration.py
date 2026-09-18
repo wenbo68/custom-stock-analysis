@@ -12,9 +12,8 @@ import into or modify the decision path itself):
   formula levels, run the chosen judge (depth 1 =
   the tiered package's own one-call quick judge since 2026-08-10; depth
   2 = the evidence-vote debate), compute the position size when the
-  user's sizing settings are present, track the run's own LLM
-  call/token usage, and log the deepest tier's recommendation into the
-  existing decision-signal system. (The legacy tier-1 delegate to DSA's
+  user's sizing settings are present, and track the run's own LLM
+  call/token usage. (The legacy tier-1 delegate to DSA's
   ``StockAnalysisPipeline`` is retired — the quick judge reads the same
   four dimensions the debate reads and sees the max hold time.)
 
@@ -37,6 +36,7 @@ from .levels import (
     decisions_to_sniper,
 )
 from .llm_support import LlmTranscript, LlmUsageTracker, active_tracker
+from .run_context import RunSettings
 from .plan_review import review_plan, sizing_detail_dict
 from .quick_judge import QuickJudge
 from .providers.base import (
@@ -47,8 +47,10 @@ from .providers.base import (
 from .providers.registry import detect_market, get_providers
 from .providers.technicals import Bar, read_metric, technicals_as_of
 from .run_gate import (
+    StaleDataError,
     expected_bar_date,
     market_for_symbol,
+    stale_data_message,
     staleness_stop_reason,
     trim_incomplete_bars,
 )
@@ -70,7 +72,6 @@ from .settings import (
     merge_overrides,
     with_fallback_defaults,
 )
-from .signal_log import SignalLogResult, log_tier_report
 from .sizing import SizingInputs, size_position
 from .tiers import Tier2Stage, TierState
 
@@ -129,7 +130,6 @@ class TieredRunOutcome:
 
     report: TierReport
     state: TierState
-    signal: Optional[SignalLogResult]
     depth: int = 1
     final_report: Optional[TierReport] = None
     #: Sizing block (v2 slice 6): share count or explicit refusal reason.
@@ -139,15 +139,12 @@ class TieredRunOutcome:
     #: blob ran inside the DSA pipeline and was billed there).
     llm_usage: Optional[Dict[str, Any]] = None
     #: Outlook redesign: the impersonal judgment + the personal action
-    #: (outlook × ownership code table).
+    #: (code table over the outlook and the plan's reward-to-risk).
     outlook: Outlook = Outlook.UNKNOWN
     action: Action = Action.UNKNOWN
     #: Next earnings date, read from the fundamentals payload (display
     #: lives on the fundamentals card; the debate weighs the event risk).
     earnings: Optional[EarningsInfo] = None
-    #: Retired display-only risk card (2026-07-22) — always None on new
-    #: runs; the field survives so old consumers keep a stable shape.
-    risk_card: Optional[list] = None
     #: Plan review (2026-07-22): structured per-column warnings for the
     #: trade-plan card — {"entry"|"stop_loss"|"take_profit"|"shares":
     #: [{"id", "values"}]}. None when the run produced no buy plan.
@@ -166,7 +163,7 @@ def _collect_dimensions(
 ) -> List[DimensionResult]:
     # Stage-label each provider's collection so its LLM calls (the news
     # screens) show under the dimension's name in llm_usage and the run
-    # transcript instead of pooling as "unattributed".
+    # transcript instead of pooling as "unknown".
     tracker = active_tracker()
     results: List[DimensionResult] = []
     for provider in providers:
@@ -237,46 +234,6 @@ def _technicals_atr(dimensions: Sequence[DimensionResult]) -> Optional[float]:
     return None
 
 
-def _stopped_outcome(
-    symbol: str,
-    market: Market,
-    dimensions: List[DimensionResult],
-    depth: int,
-    hold_weeks: int,
-    tracker: LlmUsageTracker,
-) -> TieredRunOutcome:
-    """A run halted by the staleness gate: data cards only, no verdict.
-
-    The outlook IS the whole user-facing story (owner decision
-    2026-08-08): no analysis or plan sections exist, no message is shown,
-    no signal is logged (direction stays UNKNOWN), and the stop reason
-    lives in the server log only.
-    """
-    report = TierReport(
-        tier=1,
-        symbol=symbol,
-        market=market,
-        direction=Direction.UNKNOWN,
-        dimensions=dimensions,
-        hold_weeks=hold_weeks,
-    )
-    state = TierState(symbol=symbol, market=market, hold_weeks=hold_weeks)
-    state.reports[1] = report
-    state.dimensions = list(dimensions)
-    return TieredRunOutcome(
-        report=report,
-        state=state,
-        signal=None,
-        depth=depth,
-        final_report=report,
-        sizing=None,
-        llm_usage=tracker.to_detail(),
-        outlook=Outlook.STOPPED,
-        action=Action.UNKNOWN,
-        hold_weeks=hold_weeks,
-    )
-
-
 #: The run-detail earnings block reads the same shared helper the plan
 #: review's earnings gate uses (moved to earnings.py, 2026-07-27).
 _earnings_from_dimensions = earnings_from_dimensions
@@ -291,9 +248,8 @@ def _sizing_block(
 
     The engine runs even when settings are absent so the UI gets an
     explicit ``sizing_off`` refusal instead of a missing section.
-    Outlook redesign: the tier-3 multiplier is gone — a bearish outlook
-    on a held stock exits the FULL holding (reducing risk needs no
-    permission), and the buy size comes from the formula + caps alone.
+    Outlook redesign: the tier-3 multiplier is gone — the buy size
+    comes from the formula + caps alone.
     """
     inputs = SizingInputs(
         capital=settings.capital,
@@ -304,18 +260,7 @@ def _sizing_block(
         market=market,
     )
     result = size_position(inputs)
-
-    # A bearish outlook on a stock the user holds gets a concrete exit
-    # size: the full holding. This needs no capital/risk settings — the
-    # count IS the holding.
-    ownership = settings.ownership
-    sell_shares = None
-    if final.direction is Direction.SELL and ownership > 0:
-        sell_shares = ownership
-
-    detail = sizing_detail_dict(
-        settings, result, final.levels, ownership, sell_shares
-    )
+    detail = sizing_detail_dict(settings, result, final.levels)
 
     if not result.is_sized:
         return detail, SizingSlots()
@@ -331,9 +276,6 @@ def run_tiered_analysis(
     market: Optional[Market] = None,
     providers: Optional[Sequence[DimensionProvider]] = None,
     quick_judge: Optional[QuickJudge] = None,
-    signal_logger: Callable[..., Any] = log_tier_report,
-    log_signal: bool = True,
-    trace_id: Optional[str] = None,
     depth: int = 1,
     sizing_settings: Optional[SizingSettings] = None,
     sizing_overrides: Optional[Mapping[str, Any]] = None,
@@ -343,6 +285,8 @@ def run_tiered_analysis(
     cross_bars_loader: Optional[Callable[[str], List[Bar]]] = None,
     hold_weeks: int = DEFAULT_HOLD_WEEKS,
     staleness_gate: Optional[bool] = None,
+    transcript: Optional[LlmTranscript] = None,
+    settings: Optional[RunSettings] = None,
 ) -> TieredRunOutcome:
     """Run one symbol at ``depth`` with full production wiring.
 
@@ -350,18 +294,21 @@ def run_tiered_analysis(
     dimensions; fundamentals carries the next earnings date) → formula
     levels → the chosen judge (depth 1 = the tiered package's one-call
     quick judge; depth 2 = the evidence vote) → on a BUY
-    verdict, the AI plan review (deterministic checks may trim shares /
+    outlook, the AI plan review (deterministic checks may trim shares /
     move stop / move target, with cited reasons, and produce the
     trade-plan card's structured warnings) → outlook + action (code
-    table over ownership) → sizing. Unless ``log_signal`` is False, the
-    deepest tier's recommendation lands in the decision-signal system.
+    table over the outlook and the plan's reward-to-risk) → sizing.
 
     ``sizing_overrides`` may carry per-run ``capital`` / ``risk_fraction``
-    / ``ownership`` values (the API's per-run override) on top of the
+    / ``reward_risk`` values (the API's per-run override) on top of the
     saved settings. ``earnings_lookup`` is a test seam; production reads
     the date the fundamentals provider already fetched.
     ``cross_bars_loader`` is a test/demo seam: injected providers skip
     the cross-provider enrichment unless a loader is passed explicitly.
+    ``transcript`` receives every LLM exchange of the run (the API passes
+    the run's stored transcript); None counts calls and stores nothing.
+    ``settings`` is the run's own model and keys (a signed-in user's);
+    None falls back to the environment.
     """
     if depth not in SUPPORTED_DEPTHS:
         raise ValueError(f"depth must be one of {SUPPORTED_DEPTHS}, got {depth}")
@@ -392,7 +339,6 @@ def run_tiered_analysis(
             sizing_settings,
             capital=sizing_overrides.get("capital"),
             risk_fraction=sizing_overrides.get("risk_fraction"),
-            ownership=sizing_overrides.get("ownership"),
             reward_risk=sizing_overrides.get("reward_risk"),
         )
     # Every run sizes (owner decision 2026-07-24): missing capital/risk
@@ -400,8 +346,11 @@ def run_tiered_analysis(
     sizing_settings = with_fallback_defaults(sizing_settings)
     # Every run keeps a transcript of its LLM exchanges (prompt, raw
     # reply, error) so a "no usable JSON" warning is diagnosable later —
-    # the file is named in llm_usage.transcript_file on the stored run.
-    tracker = LlmUsageTracker(transcript=LlmTranscript.for_run(symbol))
+    # llm_usage.transcript_entries on the stored run says how many.
+    tracker = LlmUsageTracker(
+        transcript=transcript if transcript is not None else LlmTranscript.discard(),
+        settings=settings,
+    )
     with tracker.activate():
         dimensions = _collect_dimensions(providers, symbol)
         dimensions = enrich_cross_fields(dimensions, cross_bars_loader)
@@ -412,18 +361,21 @@ def run_tiered_analysis(
         # A clock-gate "run anyway" during the trading day expects the
         # PREVIOUS session's bar and passes here; only a lagging vendor
         # stops a run, and there is deliberately no override for that.
+        # Stale bars FAIL the run (owner decision 2026-09-17; it used to
+        # finish with a "stopped" outlook) — the user asked for an
+        # analysis and gets none, so the row says so, with the dates.
         if staleness_gate:
-            stop_reason = staleness_stop_reason(
-                technicals_as_of(dimensions), market_for_symbol(symbol)
-            )
+            bars_up_to = technicals_as_of(dimensions)
+            stop_reason = staleness_stop_reason(bars_up_to, market_for_symbol(symbol))
             if stop_reason is not None:
                 logger.warning(
                     "tiered run stopped for %s before LLM stages: %s",
                     symbol,
                     stop_reason,
                 )
-                return _stopped_outcome(
-                    symbol, market, dimensions, depth, hold_weeks, tracker
+                raise StaleDataError(
+                    stale_data_message(bars_up_to, market_for_symbol(symbol)),
+                    stop_reason,
                 )
 
         # Formula-only levels: deterministic bases from the technicals
@@ -451,27 +403,27 @@ def run_tiered_analysis(
         state = TierState(symbol=symbol, market=market, hold_weeks=hold_weeks)
         if depth == 1:
             # The quick judge (2026-08-10): the tiered package's own
-            # one-call verdict over the same dimensions the debate
+            # one-call outlook over the same dimensions the debate
             # reads (all six since 2026-08-16, both news cards included),
-            # judged against the same max hold time. No verdict
+            # judged against the same max hold time. No outlook
             # (LLM down, bad replies) → UNKNOWN direction, fail-loud
             # warnings, no fallback — same contract as the debate.
-            with tracker.stage("tier1_quick"):
+            with tracker.stage("tier1_analysis"):
                 quick = (quick_judge or QuickJudge()).run(
-                    symbol, dimensions, levels, hold_weeks=hold_weeks
+                    symbol, dimensions, hold_weeks=hold_weeks
                 )
-            verdict = quick.verdict
+            outlook = quick.outlook
             report = TierReport(
                 tier=1,
                 symbol=symbol,
                 market=market,
-                direction=verdict.direction if verdict else Direction.UNKNOWN,
-                # The verdict is the 0-10 score in debate_detail; the
+                direction=outlook.direction if outlook else Direction.UNKNOWN,
+                # The outlook is the 0-10 score in debate_detail; the
                 # legacy sentiment-score/confidence columns stay empty
                 # (same shape as tier-2 reports).
                 confidence=None,
                 score=None,
-                narrative=verdict.summary if verdict else None,
+                narrative=outlook.summary if outlook else None,
                 levels=levels,
                 levels_detail=levels_detail,
                 dimensions=dimensions,
@@ -481,7 +433,7 @@ def run_tiered_analysis(
         else:
             # Depth 2 skips the one-blob call entirely: the debate is the
             # judge, so the foundation report is the data layer + levels
-            # with no verdict of its own. That is the documented depth-2
+            # with no outlook of its own. That is the documented depth-2
             # contract, not a data problem — so no warning for it.
             report = TierReport(
                 tier=1,
@@ -495,23 +447,22 @@ def run_tiered_analysis(
             )
         state.reports[1] = report
         state.dimensions = list(dimensions)
-        state.ownership = sizing_settings.ownership
 
         final = report
         if depth >= 2:
-            with tracker.stage("tier2_debate"):
+            with tracker.stage("tier2_analysis"):
                 final = (tier2_stage or Tier2Stage()).run(state)
             state.reports[2] = final
 
-        # AI plan review (BUY verdicts only): the deterministic checks
+        # AI plan review (BUY outlooks only): the deterministic checks
         # may trim the share count or move stop/target with cited
         # reasons, and produce the plan card's structured warnings.
         review = None
         if final.direction is Direction.BUY and bases.get("entry") is not None:
-            with tracker.stage("plan_adjust"):
+            with tracker.stage("trade_plan"):
                 review = review_plan(
                     symbol, dimensions, bases, final.direction, market,
-                    sizing_settings, ownership=sizing_settings.ownership,
+                    sizing_settings,
                     summarizer=plan_summarizer, hold_weeks=hold_weeks,
                 )
 
@@ -537,7 +488,7 @@ def run_tiered_analysis(
     final = replace(final, sizing=sizing_slots, hold_weeks=hold_weeks)
     if not final.dimensions:
         # Tier-2 reports are built lean; the deepest report carries the
-        # evidence so the signal ledger and consumers see it.
+        # evidence so consumers see it.
         final = replace(final, dimensions=list(dimensions))
     state.reports[final.tier] = final
     if final.tier == 1:
@@ -551,18 +502,11 @@ def run_tiered_analysis(
     plan_meets_goal = (
         ratio is None or ratio >= sizing_settings.reward_risk - REWARD_GOAL_EPS
     )
-    action = derive_action(
-        outlook, sizing_settings.ownership, plan_meets_goal=plan_meets_goal
-    )
-
-    signal: Optional[SignalLogResult] = None
-    if log_signal:
-        signal = signal_logger(final, trace_id=trace_id)
+    action = derive_action(outlook, plan_meets_goal=plan_meets_goal)
 
     return TieredRunOutcome(
         report=report,
         state=state,
-        signal=signal,
         depth=depth,
         final_report=final,
         sizing=sizing_detail,

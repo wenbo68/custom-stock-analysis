@@ -12,41 +12,26 @@ A股自选股智能分析系统 - 存储层
 """
 
 import atexit
-from contextlib import contextmanager
-import hashlib
-import json
 import logging
+import re
 import threading
-import time
-from datetime import datetime, date, timedelta, timezone
-from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple, Callable, TypeVar, Union
+from datetime import datetime, timezone
+from typing import Dict, Optional, TypeVar
 
-import pandas as pd
 from sqlalchemy import (
     create_engine,
     Column,
     String,
     Float,
-    Boolean,
-    Date,
     DateTime,
     Integer,
-    ForeignKey,
-    Index,
     UniqueConstraint,
     Text,
     text,
-    select,
-    and_,
-    or_,
-    delete,
-    desc,
     event,
-    func,
     inspect,
-    MetaData,
-    Table,
 )
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import (
     declarative_base,
@@ -56,18 +41,56 @@ from sqlalchemy.orm import (
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from src.config import get_config
-from src.utils.sniper_points import extract_sniper_points, parse_sniper_value
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 CURRENT_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
-INTELLIGENCE_ITEM_NULL_SCOPE_VALUE = "__dsa_null_scope__"
+
+#: Stored-name rewrite (owner decision 2026-09-17): the identifiers the
+#: code uses for data reports and run steps now read like their UI
+#: labels (macro_economy, company_news, world_news; tier1_analysis,
+#: tier2_analysis, trade_plan, unknown). Runs stored under the old
+#: names are rewritten once at startup so the page keeps recognising
+#: them; this version string in schema_migrations marks that it ran.
+RENAME_MIGRATION_VERSION = "2026-09-18-rename-dimensions-and-stages"
+RENAMED_DIMENSIONS: Dict[str, str] = {
+    "macro_econ": "macro_economy",
+    "company_events": "company_news",
+    "world_events": "world_news",
+}
+RENAMED_STAGES: Dict[str, str] = {
+    "tier1_quick": "tier1_analysis",
+    "tier2_debate": "tier2_analysis",
+    "plan_adjust": "trade_plan",
+    "unattributed": "unknown",
+    # One-day intermediate names (2026-09-17) a database may have been
+    # rewritten to before the final choice.
+    "conclusion_tier1": "tier1_analysis",
+    "conclusion_tier2": "tier2_analysis",
+}
+# A dimension name appears in stored JSON as a quoted key/value
+# ("macro_econ") or as the head of a dotted evidence ref
+# ("macro_econ.cpi", "company_events.news_coverage.items.3.text").
+_DIMENSION_NAME_RE = re.compile(
+    '"(' + "|".join(map(re.escape, RENAMED_DIMENSIONS)) + ')(?=["."])'
+)
+_STAGE_NAME_RE = re.compile(
+    '"(' + "|".join(map(re.escape, RENAMED_STAGES)) + ')"'
+)
+
+
+def rename_stored_identifiers(result_json: str) -> str:
+    """Rewrite a stored run's JSON text from the pre-2026-09-17 names to
+    the current ones. Idempotent: the new names match nothing here."""
+    renamed = _DIMENSION_NAME_RE.sub(
+        lambda m: '"' + RENAMED_DIMENSIONS[m.group(1)], result_json
+    )
+    return _STAGE_NAME_RE.sub(
+        lambda m: '"' + RENAMED_STAGES[m.group(1)] + '"', renamed
+    )
 
 # SQLAlchemy ORM 基类
 Base = declarative_base()
-
-if TYPE_CHECKING:
-    from src.search_service import SearchResponse
 
 
 def utc_naive_now() -> datetime:
@@ -94,261 +117,6 @@ class DatabaseSchemaMigration(Base):
     applied_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
 
 
-class StockDaily(Base):
-    """
-    股票日线数据模型
-    
-    存储每日行情数据和计算的技术指标
-    支持多股票、多日期的唯一约束
-    """
-    __tablename__ = 'stock_daily'
-    
-    # 主键
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    
-    # 股票代码（如 600519, 000001）
-    code = Column(String(10), nullable=False, index=True)
-    
-    # 交易日期
-    date = Column(Date, nullable=False, index=True)
-    
-    # OHLC 数据
-    open = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    
-    # 成交数据
-    volume = Column(Float)  # 成交量（股）
-    amount = Column(Float)  # 成交额（元）
-    pct_chg = Column(Float)  # 涨跌幅（%）
-    
-    # 技术指标
-    ma5 = Column(Float)
-    ma10 = Column(Float)
-    ma20 = Column(Float)
-    volume_ratio = Column(Float)  # 量比
-    
-    # 数据来源
-    data_source = Column(String(50))  # 记录数据来源（如 AkshareFetcher）
-    
-    # 更新时间
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-    
-    # 唯一约束：同一股票同一日期只能有一条数据
-    __table_args__ = (
-        UniqueConstraint('code', 'date', name='uix_code_date'),
-        Index('ix_code_date', 'code', 'date'),
-    )
-    
-    def __repr__(self):
-        return f"<StockDaily(code={self.code}, date={self.date}, close={self.close})>"
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return {
-            'code': self.code,
-            'date': self.date,
-            'open': self.open,
-            'high': self.high,
-            'low': self.low,
-            'close': self.close,
-            'volume': self.volume,
-            'amount': self.amount,
-            'pct_chg': self.pct_chg,
-            'ma5': self.ma5,
-            'ma10': self.ma10,
-            'ma20': self.ma20,
-            'volume_ratio': self.volume_ratio,
-            'data_source': self.data_source,
-        }
-
-
-class AnalysisHistory(Base):
-    """
-    分析结果历史记录模型
-
-    保存每次分析结果，支持按 query_id/股票代码检索
-    """
-    __tablename__ = 'analysis_history'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-
-    # 关联查询链路
-    query_id = Column(String(64), index=True)
-
-    # 股票信息
-    code = Column(String(10), nullable=False, index=True)
-    name = Column(String(50))
-    report_type = Column(String(16), index=True)
-
-    # 核心结论
-    sentiment_score = Column(Integer)
-    operation_advice = Column(String(20))
-    trend_prediction = Column(String(50))
-    analysis_summary = Column(Text)
-
-    # 详细数据
-    raw_result = Column(Text)
-    news_content = Column(Text)
-    context_snapshot = Column(Text)
-
-    # 狙击点位（用于回测）
-    ideal_buy = Column(Float)
-    secondary_buy = Column(Float)
-    stop_loss = Column(Float)
-    take_profit = Column(Float)
-
-    created_at = Column(DateTime, default=datetime.now, index=True)
-
-    __table_args__ = (
-        Index('ix_analysis_code_time', 'code', 'created_at'),
-    )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return {
-            'id': self.id,
-            'query_id': self.query_id,
-            'code': self.code,
-            'name': self.name,
-            'report_type': self.report_type,
-            'sentiment_score': self.sentiment_score,
-            'operation_advice': self.operation_advice,
-            'trend_prediction': self.trend_prediction,
-            'analysis_summary': self.analysis_summary,
-            'raw_result': self.raw_result,
-            'news_content': self.news_content,
-            'context_snapshot': self.context_snapshot,
-            'ideal_buy': self.ideal_buy,
-            'secondary_buy': self.secondary_buy,
-            'stop_loss': self.stop_loss,
-            'take_profit': self.take_profit,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-        }
-
-
-class DecisionSignalRecord(Base):
-    """Persisted AI decision signal asset for Issue #1390 P1."""
-
-    __tablename__ = 'decision_signals'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    stock_code = Column(String(16), nullable=False, index=True)
-    stock_name = Column(String(64))
-    market = Column(String(8), nullable=False, index=True)
-    source_type = Column(String(32), nullable=False, index=True)
-    source_agent = Column(String(64))
-    source_report_id = Column(Integer, index=True)
-    trace_id = Column(String(64), index=True)
-    market_phase = Column(String(24), index=True)
-    trigger_source = Column(String(64), nullable=False, index=True)
-    action = Column(String(16), nullable=False, index=True)
-    action_label = Column(String(32))
-    confidence = Column(Float)
-    score = Column(Integer)
-    horizon = Column(String(16), index=True)
-    entry_low = Column(Float)
-    entry_high = Column(Float)
-    stop_loss = Column(Float)
-    target_price = Column(Float)
-    invalidation = Column(Text)
-    watch_conditions = Column(Text)
-    reason = Column(Text)
-    risk_summary = Column(Text)
-    catalyst_summary = Column(Text)
-    evidence_json = Column(Text)
-    data_quality_summary_json = Column(Text)
-    plan_quality = Column(String(16), nullable=False, default='unknown', index=True)
-    status = Column(String(16), nullable=False, default='active', index=True)
-    expires_at = Column(DateTime, index=True)
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
-    metadata_json = Column(Text)
-
-    __table_args__ = (
-        Index('ix_decision_signal_stock_status_time', 'stock_code', 'status', 'created_at'),
-        Index('ix_decision_signal_market_status_time', 'market', 'status', 'created_at'),
-        Index(
-            'ix_decision_signal_report_type_market_stock_action_horizon_phase',
-            'source_report_id',
-            'source_type',
-            'market',
-            'stock_code',
-            'action',
-            'horizon',
-            'market_phase',
-        ),
-        Index(
-            'ix_decision_signal_trace_type_market_stock_action_horizon_phase',
-            'trace_id',
-            'source_type',
-            'market',
-            'stock_code',
-            'action',
-            'horizon',
-            'market_phase',
-        ),
-    )
-
-
-class DecisionSignalOutcomeRecord(Base):
-    """Signal-level forward outcome for Issue #1390 P5."""
-
-    __tablename__ = 'decision_signal_outcomes'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    signal_id = Column(Integer, nullable=False, index=True)
-    horizon = Column(String(16), nullable=False, index=True)
-    engine_version = Column(String(32), nullable=False, index=True)
-    eval_status = Column(String(24), nullable=False, default='unable', index=True)
-    outcome = Column(String(16), index=True)
-    direction_expected = Column(String(16), index=True)
-    direction_correct = Column(Boolean)
-    unable_reason = Column(String(64), index=True)
-    anchor_date = Column(Date, index=True)
-    eval_window_days = Column(Integer)
-    start_price = Column(Float)
-    end_close = Column(Float)
-    max_high = Column(Float)
-    min_low = Column(Float)
-    stock_return_pct = Column(Float)
-
-    action = Column(String(16), index=True)
-    market = Column(String(8), index=True)
-    market_phase = Column(String(24), index=True)
-    source_type = Column(String(32), index=True)
-    source_agent = Column(String(64), index=True)
-    plan_quality = Column(String(16), index=True)
-    data_quality_level = Column(String(24), index=True)
-    holding_state = Column(String(16), nullable=False, default='unknown', index=True)
-
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
-
-    __table_args__ = (
-        UniqueConstraint('signal_id', 'horizon', 'engine_version', name='uix_decision_signal_outcome_key'),
-        Index('ix_decision_signal_outcome_stats_action', 'engine_version', 'action', 'horizon'),
-        Index('ix_decision_signal_outcome_stats_market', 'engine_version', 'market', 'horizon'),
-    )
-
-
-class DecisionSignalFeedbackRecord(Base):
-    """Latest user feedback for a decision signal."""
-
-    __tablename__ = 'decision_signal_feedback'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    signal_id = Column(Integer, nullable=False, unique=True, index=True)
-    feedback_value = Column(String(16), nullable=False, index=True)
-    reason_code = Column(String(64), index=True)
-    note = Column(Text)
-    source = Column(String(16), nullable=False, default='api', index=True)
-    created_at = Column(DateTime, default=utc_naive_now, index=True)
-    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
-
-
 class TieredRunRecord(Base):
     """One tiered-analysis run (src/tiered_analysis): status + full report.
 
@@ -368,8 +136,95 @@ class TieredRunRecord(Base):
     #: JSON, recorded at creation so history rows can show them while the
     #: run is still in flight (owner decision 2026-07-24).
     inputs_json = Column(Text)
+    #: The signed-in user who started the run (hosted app); NULL on
+    #: rows from before accounts existed, which no one can see.
+    owner_user_id = Column(Integer, index=True)
+    #: Run reuse (2026-09-17): the trading day the run analyses — the
+    #: most recent completed session at creation, ISO "YYYY-MM-DD" — the
+    #: main model that produced (or will produce) its outlook, and, on a
+    #: run that borrowed another run's outlook, that run's task id.
+    bar_date = Column(String(10), index=True)
+    model = Column(String(128))
+    source_task_id = Column(String(64), index=True)
     error = Column(Text)
     created_at = Column(DateTime, default=utc_naive_now, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+
+
+class TieredRunTranscriptRecord(Base):
+    """One LLM exchange of one tiered run (src/tiered_analysis/llm_support).
+
+    A run's transcript is the list of its rows ordered by ``seq``: the
+    pipeline stage, model, full prompt, raw reply, token counts, and the
+    error when the call itself failed. Kept in its own table (not on the
+    run row) so the history list stays light; rows older than
+    ``history.TRANSCRIPT_MAX_AGE_DAYS`` are pruned at startup.
+    """
+
+    __tablename__ = 'tiered_run_transcripts'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(String(64), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    stage = Column(String(64))
+    model = Column(String(128))
+    temperature = Column(Float)
+    duration_ms = Column(Integer)
+    prompt_tokens = Column(Integer)
+    completion_tokens = Column(Integer)
+    #: Which reply enforcement was requested: "schema", "json", or None.
+    structured = Column(String(16))
+    error = Column(Text)
+    prompt = Column(Text)
+    reply = Column(Text)
+
+
+class UserRecord(Base):
+    """A signed-in person (src/users.py): one row per provider account."""
+
+    __tablename__ = 'users'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider = Column(String(32), nullable=False)
+    #: The provider's stable account id (never the email, which can change).
+    provider_subject = Column(String(255), nullable=False)
+    email = Column(String(255), index=True)
+    display_name = Column(String(255))
+    avatar_url = Column(Text)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    last_login_at = Column(DateTime, default=utc_naive_now)
+
+    __table_args__ = (
+        UniqueConstraint('provider', 'provider_subject', name='uix_user_provider_subject'),
+    )
+
+
+class UserSettingsRecord(Base):
+    """A user's model choice and encrypted keys (src/user_settings.py)."""
+
+    __tablename__ = 'user_settings'
+
+    user_id = Column(Integer, primary_key=True)
+    llm_model = Column(String(128))
+    # The cheaper model for screening chores (news relevance); empty =
+    # the main model does that work too.
+    llm_sub_model = Column(String(128))
+    llm_api_key_enc = Column(Text)
+    finnhub_key_enc = Column(Text)
+    alphavantage_key_enc = Column(Text)
+    fred_key_enc = Column(Text)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now)
+
+
+class TieredCacheRecord(Base):
+    """Fetched-data cache (src/tiered_analysis/cache_store): a JSON value
+    per key. Safe to wipe — every row can be refetched from its vendor."""
+
+    __tablename__ = 'tiered_cache'
+
+    key = Column(String(255), primary_key=True)
+    value_json = Column(Text, nullable=False)
     updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
 
 
@@ -422,8 +277,6 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._db_url = db_url
             self._sqlite_wal_enabled = config.sqlite_wal_enabled
             self._sqlite_busy_timeout_ms = config.sqlite_busy_timeout_ms
-            self._sqlite_write_retry_max = config.sqlite_write_retry_max
-            self._sqlite_write_retry_base_delay = config.sqlite_write_retry_base_delay
 
             engine_kwargs = {
                 "echo": False,
@@ -453,8 +306,14 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
 
             # 创建所有表
             Base.metadata.create_all(self._engine)
-            self._ensure_tiered_run_inputs_column()
+            self._ensure_column(TieredRunRecord.__tablename__, "inputs_json", "TEXT")
+            self._ensure_column(TieredRunRecord.__tablename__, "owner_user_id", "INTEGER")
+            self._ensure_column(TieredRunRecord.__tablename__, "bar_date", "VARCHAR(10)")
+            self._ensure_column(TieredRunRecord.__tablename__, "model", "VARCHAR(128)")
+            self._ensure_column(TieredRunRecord.__tablename__, "source_task_id", "VARCHAR(64)")
+            self._ensure_column(UserSettingsRecord.__tablename__, "llm_sub_model", "VARCHAR(128)")
             self._ensure_schema_migration_record()
+            self._apply_rename_migration()
 
             self._initialized = True
             logger.info(f"数据库初始化完成: {db_url}")
@@ -499,29 +358,73 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         finally:
             session.close()
 
-    def _ensure_tiered_run_inputs_column(self) -> None:
-        """Best-effort backfill of tiered_runs.inputs_json on databases
-        created before the column existed (create_all never alters
-        existing tables). A failure only degrades the history rows'
-        while-running inputs display, never startup."""
+    def _apply_rename_migration(self) -> None:
+        """One-time rewrite of stored runs and transcript rows to the
+        current dimension/stage names (see RENAME_MIGRATION_VERSION).
+        Best-effort like _ensure_column: a failure only leaves old runs
+        showing under their old names, never blocks startup. Two servers
+        starting together may both rewrite — the rewrite is idempotent
+        and the second one's marker insert is simply ignored."""
+        session = self._SessionLocal()
+        try:
+            if session.get(DatabaseSchemaMigration, RENAME_MIGRATION_VERSION) is not None:
+                return
+            runs = 0
+            for row in session.query(TieredRunRecord).filter(
+                TieredRunRecord.result_json.isnot(None)
+            ):
+                renamed = rename_stored_identifiers(row.result_json)
+                if renamed != row.result_json:
+                    runs += 1
+                    session.execute(
+                        TieredRunRecord.__table__.update()
+                        .where(TieredRunRecord.id == row.id)
+                        # Explicit updated_at: the onupdate default must
+                        # not re-stamp a run nobody touched.
+                        .values(result_json=renamed, updated_at=row.updated_at)
+                    )
+            stages = 0
+            # News-screen calls are staged under their dimension's name.
+            for old_name, new_name in {**RENAMED_STAGES, **RENAMED_DIMENSIONS}.items():
+                stages += session.execute(
+                    TieredRunTranscriptRecord.__table__.update()
+                    .where(TieredRunTranscriptRecord.stage == old_name)
+                    .values(stage=new_name)
+                ).rowcount
+            session.add(DatabaseSchemaMigration(
+                version=RENAME_MIGRATION_VERSION,
+                description="Stored dimension and run-stage names rewritten to the UI-aligned identifiers",
+            ))
+            session.commit()
+            if runs or stages:
+                logger.info(
+                    "renamed stored identifiers in %d run(s) and %d transcript row(s)",
+                    runs, stages,
+                )
+        except IntegrityError:
+            session.rollback()  # another instance recorded the marker first
+        except Exception as exc:
+            session.rollback()
+            logger.warning("stored-name rename migration skipped: %s", exc)
+        finally:
+            session.close()
+
+    def _ensure_column(self, table: str, column: str, ddl_type: str) -> None:
+        """Best-effort backfill of a column on databases created before it
+        existed (create_all never alters existing tables). A failure only
+        degrades the feature that reads the column, never startup."""
         try:
             existing = {
-                column["name"]
-                for column in inspect(self._engine).get_columns(
-                    TieredRunRecord.__tablename__
-                )
+                col["name"] for col in inspect(self._engine).get_columns(table)
             }
-            if "inputs_json" in existing:
+            if column in existing:
                 return
             with self._engine.begin() as connection:
                 connection.exec_driver_sql(
-                    f"ALTER TABLE {TieredRunRecord.__tablename__} "
-                    "ADD COLUMN inputs_json TEXT"
+                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"
                 )
         except Exception as exc:
-            logger.warning(
-                "tiered_runs.inputs_json backfill skipped: %s", exc
-            )
+            logger.warning("%s.%s backfill skipped: %s", table, column, exc)
 
     @classmethod
     def get_instance(cls) -> 'DatabaseManager':
@@ -575,84 +478,20 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             finally:
                 cursor.close()
 
+    def _upsert_insert(self, model):
+        """An INSERT that supports ``on_conflict_do_update`` on the
+        engine in use — sqlite locally, Postgres on the public host."""
+        return sqlite_insert(model) if self._is_sqlite_engine else pg_insert(model)
+
     def _is_file_sqlite_database(self) -> bool:
         database = (self._engine.url.database or "").strip()
         return bool(database) and database.lower() != ":memory:"
-
-    def _run_write_transaction(
-        self,
-        operation_name: str,
-        write_operation: Callable[[Session], T],
-    ) -> T:
-        max_retries = self._sqlite_write_retry_max if self._is_sqlite_engine else 0
-
-        for attempt in range(max_retries + 1):
-            session = self.get_session()
-            try:
-                if self._is_sqlite_engine:
-                    # Acquire the SQLite writer lock before any reads inside
-                    # `write_operation()` so pre-write existence checks and the
-                    # later upsert share one consistent write window.
-                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-                result = write_operation(session)
-                session.commit()
-                return result
-            except OperationalError as exc:
-                session.rollback()
-                if (
-                    self._is_sqlite_engine
-                    and self._is_sqlite_locked_error(exc)
-                    and attempt < max_retries
-                ):
-                    delay = self._sqlite_write_retry_base_delay * (2 ** attempt)
-                    logger.warning(
-                        "SQLite 写入锁冲突，准备重试: %s (%s/%s, %.2fs)",
-                        operation_name,
-                        attempt + 1,
-                        max_retries,
-                        delay,
-                    )
-                    if delay > 0:
-                        time.sleep(delay)
-                    continue
-                raise
-            except Exception:
-                session.rollback()
-                raise
-            finally:
-                session.close()
-
-    @staticmethod
-    def _is_sqlite_locked_error(exc: OperationalError) -> bool:
-        err_text = str(getattr(exc, "orig", exc)).lower()
-        return any(
-            token in err_text
-            for token in (
-                "database is locked",
-                "database schema is locked",
-                "database table is locked",
-            )
-        )
 
     @staticmethod
     def _is_sqlite_duplicate_column_error(exc: OperationalError, column: str) -> bool:
         err_text = str(getattr(exc, "orig", exc)).lower()
         return "duplicate column name" in err_text and column.lower() in err_text
 
-    @staticmethod
-    def _normalize_daily_date(value: Any) -> Any:
-        if isinstance(value, str):
-            return datetime.strptime(value, '%Y-%m-%d').date()
-        if isinstance(value, pd.Timestamp):
-            return value.date()
-        if isinstance(value, datetime):
-            return value.date()
-        return value
-
-    @staticmethod
-    def _normalize_sql_value(value: Any) -> Any:
-        return None if pd.isna(value) else value
-    
     def get_session(self) -> Session:
         """
         获取数据库 Session
@@ -673,457 +512,3 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         except Exception:
             session.close()
             raise
-
-    @contextmanager
-    def session_scope(self):
-        """Provide a transactional scope around a series of operations."""
-        session = self.get_session()
-        try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-    
-    def has_today_data(self, code: str, target_date: Optional[date] = None) -> bool:
-        """
-        检查是否已有指定日期的数据
-        
-        用于断点续传逻辑：如果已有数据则跳过网络请求
-        
-        Args:
-            code: 股票代码
-            target_date: 目标日期（默认今天）
-            
-        Returns:
-            是否存在数据
-        """
-        if target_date is None:
-            target_date = date.today()
-        # 注意：这里的 target_date 语义是“自然日”，而不是“最新交易日”。
-        # 在周末/节假日/非交易日运行时，即使数据库已有最新交易日数据，这里也会返回 False。
-        # 该行为目前保留（按需求不改逻辑）。
-        
-        with self.get_session() as session:
-            result = session.execute(
-                select(StockDaily).where(
-                    and_(
-                        StockDaily.code == code,
-                        StockDaily.date == target_date
-                    )
-                )
-            ).scalar_one_or_none()
-            
-            return result is not None
-    
-    def get_latest_data(
-        self, 
-        code: str, 
-        days: int = 2
-    ) -> List[StockDaily]:
-        """
-        获取最近 N 天的数据
-        
-        用于计算"相比昨日"的变化
-        
-        Args:
-            code: 股票代码
-            days: 获取天数
-            
-        Returns:
-            StockDaily 对象列表（按日期降序）
-        """
-        with self.get_session() as session:
-            results = session.execute(
-                select(StockDaily)
-                .where(StockDaily.code == code)
-                .order_by(desc(StockDaily.date))
-                .limit(days)
-            ).scalars().all()
-            
-            return list(results)
-
-    def save_analysis_history(
-        self,
-        result: Any,
-        query_id: str,
-        report_type: str,
-        news_content: Optional[str],
-        context_snapshot: Optional[Dict[str, Any]] = None,
-        save_snapshot: bool = True
-    ) -> int:
-        """
-        保存分析结果历史记录。
-
-        Returns:
-            新保存的 AnalysisHistory.id；保存失败返回 0。
-        """
-        if result is None:
-            return 0
-
-        sniper_points = self._extract_sniper_points(result)
-        raw_result = self._build_raw_result(result)
-        context_text = None
-        if save_snapshot and context_snapshot is not None:
-            context_text = self._safe_json_dumps(context_snapshot)
-
-        try:
-            def _write(session: Session) -> int:
-                history = AnalysisHistory(
-                    query_id=query_id,
-                    code=result.code,
-                    name=result.name,
-                    report_type=report_type,
-                    sentiment_score=result.sentiment_score,
-                    operation_advice=result.operation_advice,
-                    trend_prediction=result.trend_prediction,
-                    analysis_summary=result.analysis_summary,
-                    raw_result=self._safe_json_dumps(raw_result),
-                    news_content=news_content,
-                    context_snapshot=context_text,
-                    ideal_buy=sniper_points.get("ideal_buy"),
-                    secondary_buy=sniper_points.get("secondary_buy"),
-                    stop_loss=sniper_points.get("stop_loss"),
-                    take_profit=sniper_points.get("take_profit"),
-                    created_at=datetime.now(),
-                )
-                session.add(history)
-                session.flush()
-                return int(history.id or 0)
-            return self._run_write_transaction(
-                f"save_analysis_history[{result.code}]",
-                _write,
-            )
-        except Exception as e:
-            logger.error(f"保存分析历史失败: {e}")
-            return 0
-
-    def get_analysis_history_by_id(self, record_id: int) -> Optional[AnalysisHistory]:
-        """
-        根据数据库主键 ID 查询单条分析历史记录
-        
-        由于 query_id 可能重复（批量分析时多条记录共享同一 query_id），
-        使用主键 ID 确保精确查询唯一记录。
-        
-        Args:
-            record_id: 分析历史记录的主键 ID
-            
-        Returns:
-            AnalysisHistory 对象，不存在返回 None
-        """
-        with self.get_session() as session:
-            result = session.execute(
-                select(AnalysisHistory).where(AnalysisHistory.id == record_id)
-            ).scalars().first()
-            return result
-
-    def get_data_range(
-        self, 
-        code: str, 
-        start_date: date, 
-        end_date: date
-    ) -> List[StockDaily]:
-        """
-        获取指定日期范围的数据
-        
-        Args:
-            code: 股票代码
-            start_date: 开始日期
-            end_date: 结束日期
-            
-        Returns:
-            StockDaily 对象列表
-        """
-        with self.get_session() as session:
-            results = session.execute(
-                select(StockDaily)
-                .where(
-                    and_(
-                        StockDaily.code == code,
-                        StockDaily.date >= start_date,
-                        StockDaily.date <= end_date
-                    )
-                )
-                .order_by(StockDaily.date)
-            ).scalars().all()
-            
-            return list(results)
-    
-    def save_daily_data(
-        self, 
-        df: pd.DataFrame, 
-        code: str,
-        data_source: str = "Unknown"
-    ) -> int:
-        """
-        保存日线数据到数据库
-        
-        策略：
-        - 按 `(code, date)` 做批量 UPSERT，已存在记录会覆盖更新
-        - 同一批次内若存在重复日期，以最后一条记录为准
-        - SQLite 分支按 chunk 写入以避免绑定参数上限
-        
-        Args:
-            df: 包含日线数据的 DataFrame
-            code: 股票代码
-            data_source: 数据来源名称
-            
-        Returns:
-            本次实际新增的记录数（不含更新）
-        """
-        if df is None or df.empty:
-            logger.warning(f"保存数据为空，跳过 {code}")
-            return 0
-
-        now = datetime.now()
-        records_by_date: Dict[date, Dict[str, Any]] = {}
-        for row in df.to_dict(orient='records'):
-            row_date = self._normalize_daily_date(row.get('date'))
-            records_by_date[row_date] = {
-                'code': code,
-                'date': row_date,
-                'open': self._normalize_sql_value(row.get('open')),
-                'high': self._normalize_sql_value(row.get('high')),
-                'low': self._normalize_sql_value(row.get('low')),
-                'close': self._normalize_sql_value(row.get('close')),
-                'volume': self._normalize_sql_value(row.get('volume')),
-                'amount': self._normalize_sql_value(row.get('amount')),
-                'pct_chg': self._normalize_sql_value(row.get('pct_chg')),
-                'ma5': self._normalize_sql_value(row.get('ma5')),
-                'ma10': self._normalize_sql_value(row.get('ma10')),
-                'ma20': self._normalize_sql_value(row.get('ma20')),
-                'volume_ratio': self._normalize_sql_value(row.get('volume_ratio')),
-                'data_source': data_source,
-                'created_at': now,
-                'updated_at': now,
-            }
-
-        if not records_by_date:
-            return 0
-
-        records = list(records_by_date.values())
-        batch_dates = list(records_by_date.keys())
-
-        def _write(session: Session) -> int:
-            if self._is_sqlite_engine:
-                # SQLite has a per-statement bind-parameter limit (commonly 999).
-                # Each record has ~15 columns, so chunk upserts to stay within bounds.
-                _SQLITE_CHUNK = 50
-                # `_run_write_transaction()` opens SQLite writes with
-                # `BEGIN IMMEDIATE`, so existence checks and upsert execute
-                # within one stable write window.
-                existing_dates = set()
-                _COUNT_CHUNK = 500
-                for j in range(0, len(batch_dates), _COUNT_CHUNK):
-                    chunk_dates = batch_dates[j : j + _COUNT_CHUNK]
-                    if not chunk_dates:
-                        continue
-                    existing_dates.update(
-                        session.execute(
-                            select(StockDaily.date).where(
-                                and_(
-                                    StockDaily.code == code,
-                                    StockDaily.date.in_(chunk_dates),
-                                )
-                            )
-                        ).scalars().all()
-                    )
-                new_records = [
-                    record for record in records if record['date'] not in existing_dates
-                ]
-                for i in range(0, len(records), _SQLITE_CHUNK):
-                    chunk = records[i : i + _SQLITE_CHUNK]
-                    stmt = sqlite_insert(StockDaily).values(chunk)
-                    excluded = stmt.excluded
-                    session.execute(
-                        stmt.on_conflict_do_update(
-                            index_elements=['code', 'date'],
-                            set_={
-                                'open': excluded.open,
-                                'high': excluded.high,
-                                'low': excluded.low,
-                                'close': excluded.close,
-                                'volume': excluded.volume,
-                                'amount': excluded.amount,
-                                'pct_chg': excluded.pct_chg,
-                                'ma5': excluded.ma5,
-                                'ma10': excluded.ma10,
-                                'ma20': excluded.ma20,
-                                'volume_ratio': excluded.volume_ratio,
-                                'data_source': excluded.data_source,
-                                'updated_at': excluded.updated_at,
-                            },
-                        )
-                    )
-                return len(new_records)
-            else:
-                existing_rows = {
-                    row.date: row
-                    for row in session.execute(
-                        select(StockDaily).where(
-                            and_(
-                                StockDaily.code == code,
-                                StockDaily.date.in_(batch_dates),
-                            )
-                        )
-                    ).scalars().all()
-                }
-                new_count = 0
-                for record in records:
-                    existing = existing_rows.get(record['date'])
-                    if existing is None:
-                        session.add(StockDaily(**record))
-                        new_count += 1
-                        continue
-                    existing.open = record['open']
-                    existing.high = record['high']
-                    existing.low = record['low']
-                    existing.close = record['close']
-                    existing.volume = record['volume']
-                    existing.amount = record['amount']
-                    existing.pct_chg = record['pct_chg']
-                    existing.ma5 = record['ma5']
-                    existing.ma10 = record['ma10']
-                    existing.ma20 = record['ma20']
-                    existing.volume_ratio = record['volume_ratio']
-                    existing.data_source = record['data_source']
-                    existing.updated_at = record['updated_at']
-                return new_count
-
-        try:
-            saved_count = self._run_write_transaction(
-                f"save_daily_data[{code}]",
-                _write,
-            )
-            logger.info(f"保存 {code} 数据成功，新增 {saved_count} 条")
-            return saved_count
-        except Exception as e:
-            logger.error(f"保存 {code} 数据失败: {e}")
-            raise
-    
-    def get_analysis_context(
-        self, 
-        code: str,
-        target_date: Optional[date] = None
-    ) -> Optional[Dict[str, Any]]:
-        """
-        获取分析所需的上下文数据
-        
-        返回今日数据 + 昨日数据的对比信息
-        
-        Args:
-            code: 股票代码
-            target_date: 目标日期（默认今天）
-            
-        Returns:
-            包含今日数据、昨日对比等信息的字典
-        """
-        if target_date is None:
-            target_date = date.today()
-        # 注意：尽管入参提供了 target_date，但当前实现实际使用的是“最新两天数据”（get_latest_data），
-        # 并不会按 target_date 精确取当日/前一交易日的上下文。
-        # 因此若未来需要支持“按历史某天复盘/重算”的可解释性，这里需要调整。
-        # 该行为目前保留（按需求不改逻辑）。
-        
-        # 获取最近2天数据
-        recent_data = self.get_latest_data(code, days=2)
-        
-        if not recent_data:
-            logger.warning(f"未找到 {code} 的数据")
-            return None
-        
-        today_data = recent_data[0]
-        yesterday_data = recent_data[1] if len(recent_data) > 1 else None
-        
-        context = {
-            'code': code,
-            'date': today_data.date.isoformat(),
-            'today': today_data.to_dict(),
-        }
-        
-        if yesterday_data:
-            context['yesterday'] = yesterday_data.to_dict()
-            
-            # 计算相比昨日的变化
-            if yesterday_data.volume and yesterday_data.volume > 0:
-                context['volume_change_ratio'] = round(
-                    today_data.volume / yesterday_data.volume, 2
-                )
-            
-            if yesterday_data.close and yesterday_data.close > 0:
-                context['price_change_ratio'] = round(
-                    (today_data.close - yesterday_data.close) / yesterday_data.close * 100, 2
-                )
-            
-            # 均线形态判断
-            context['ma_status'] = self._analyze_ma_status(today_data)
-        
-        return context
-    
-    def _analyze_ma_status(self, data: StockDaily) -> str:
-        """
-        分析均线形态
-        
-        判断条件：
-        - 多头排列：close > ma5 > ma10 > ma20
-        - 空头排列：close < ma5 < ma10 < ma20
-        - 震荡整理：其他情况
-        """
-        # 注意：这里的均线形态判断基于“close/ma5/ma10/ma20”静态比较，
-        # 未考虑均线拐点、斜率、或不同数据源复权口径差异。
-        # 该行为目前保留（按需求不改逻辑）。
-        close = data.close or 0
-        ma5 = data.ma5 or 0
-        ma10 = data.ma10 or 0
-        ma20 = data.ma20 or 0
-        
-        if close > ma5 > ma10 > ma20 > 0:
-            return "多头排列 📈"
-        elif close < ma5 < ma10 < ma20 and ma20 > 0:
-            return "空头排列 📉"
-        elif close > ma5 and ma5 > ma10:
-            return "短期向好 🔼"
-        elif close < ma5 and ma5 < ma10:
-            return "短期走弱 🔽"
-        else:
-            return "震荡整理 ↔️"
-
-    @staticmethod
-    def _safe_json_dumps(data: Any) -> str:
-        """
-        安全序列化为 JSON 字符串
-        """
-        try:
-            return json.dumps(data, ensure_ascii=False, default=str)
-        except Exception:
-            return json.dumps(str(data), ensure_ascii=False)
-
-    @staticmethod
-    def _build_raw_result(result: Any) -> Dict[str, Any]:
-        """
-        生成完整分析结果字典
-        """
-        data = result.to_dict() if hasattr(result, "to_dict") else {}
-        data.update({
-            'data_sources': getattr(result, 'data_sources', ''),
-            'raw_response': getattr(result, 'raw_response', None),
-        })
-        return data
-
-    @staticmethod
-    def _parse_sniper_value(value: Any) -> Optional[float]:
-        return parse_sniper_value(value)
-
-    def _extract_sniper_points(self, result: Any) -> Dict[str, Optional[float]]:
-        """Extract normalized sniper point values from an AnalysisResult."""
-
-        return extract_sniper_points(result)
-
-# 便捷函数
-def get_db() -> DatabaseManager:
-    """获取数据库管理器实例的快捷方式"""
-    return DatabaseManager.get_instance()
-
-

@@ -13,6 +13,13 @@ get_config()
 if __name__ == "__main__":
     import uvicorn
 
-    host = os.getenv("SERVER_HOST", "127.0.0.1")
-    port = int(os.getenv("SERVER_PORT", "8000"))
-    uvicorn.run(app, host=host, port=port)
+    # Hosting platforms (Render, Railway, ...) hand the port over as PORT
+    # and expect the server to listen on every interface; a plain local
+    # start keeps the loopback-only default.
+    hosted_port = os.getenv("PORT")
+    port = int(hosted_port or os.getenv("SERVER_PORT") or "8000")
+    host = os.getenv("SERVER_HOST") or ("0.0.0.0" if hosted_port else "127.0.0.1")
+    # Behind a host's proxy the real scheme/host arrive in forwarded
+    # headers; trusting them keeps OAuth callback URLs https.
+    uvicorn.run(app, host=host, port=port, proxy_headers=True,
+                forwarded_allow_ips="*" if hosted_port else None)

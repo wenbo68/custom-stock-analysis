@@ -58,66 +58,41 @@ def _env_str(name: str, default: str = '') -> Optional[str]:
     return value or None
 
 
-def _resolve_realtime_source_priority() -> str:
-    """Same rule as the parent project: prepend tushare when a token is
-    configured but no explicit priority was set."""
-    explicit = os.getenv('REALTIME_SOURCE_PRIORITY')
-    default_priority = 'tencent,akshare_sina,efinance,akshare_em'
-    if explicit:
-        return explicit
-    if (os.getenv('TUSHARE_TOKEN') or '').strip():
-        return f'tushare,{default_priority}'
-    return default_priority
+def _normalize_database_url(url: str) -> str:
+    """Hosted Postgres (Neon, Railway, ...) hands out ``postgres://`` or
+    ``postgresql://`` URLs; SQLAlchemy needs the driver spelled out."""
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
 
 
 @dataclass
 class Config:
     # --- database (read by src/storage.py DatabaseManager) ---
+    #: Full connection URL (Postgres on the public host). When set it wins
+    #: over DATABASE_PATH, which stays the local sqlite default.
+    database_url: Optional[str] = field(
+        default_factory=lambda: _env_str('DATABASE_URL'))
     database_path: str = field(
         default_factory=lambda: os.getenv('DATABASE_PATH', './data/stock_analysis.db'))
     sqlite_wal_enabled: bool = field(
         default_factory=lambda: _env_bool('SQLITE_WAL_ENABLED', True))
     sqlite_busy_timeout_ms: int = field(
         default_factory=lambda: _env_int('SQLITE_BUSY_TIMEOUT_MS', 5000, minimum=0))
-    sqlite_write_retry_max: int = field(
-        default_factory=lambda: _env_int('SQLITE_WRITE_RETRY_MAX', 3, minimum=0))
-    sqlite_write_retry_base_delay: float = field(
-        default_factory=lambda: _env_float('SQLITE_WRITE_RETRY_BASE_DELAY', 0.1))
 
-    # --- data_provider feature flags / tuning ---
-    enable_realtime_quote: bool = field(
-        default_factory=lambda: _env_bool('ENABLE_REALTIME_QUOTE', True))
-    enable_chip_distribution: bool = field(
-        default_factory=lambda: _env_bool('ENABLE_CHIP_DISTRIBUTION', True))
-    enable_eastmoney_patch: bool = field(
-        default_factory=lambda: _env_bool('ENABLE_EASTMONEY_PATCH', False))
-    realtime_source_priority: str = field(
-        default_factory=_resolve_realtime_source_priority)
-    realtime_cache_ttl: int = field(
-        default_factory=lambda: _env_int('REALTIME_CACHE_TTL', 600, minimum=0))
-    enable_fundamental_pipeline: bool = field(
-        default_factory=lambda: _env_bool('ENABLE_FUNDAMENTAL_PIPELINE', True))
-    fundamental_stage_timeout_seconds: float = field(
-        default_factory=lambda: _env_float('FUNDAMENTAL_STAGE_TIMEOUT_SECONDS', 8.0))
-    fundamental_fetch_timeout_seconds: float = field(
-        default_factory=lambda: _env_float('FUNDAMENTAL_FETCH_TIMEOUT_SECONDS', 3.0))
-    fundamental_retry_max: int = field(
-        default_factory=lambda: _env_int('FUNDAMENTAL_RETRY_MAX', 1, minimum=0))
-    fundamental_cache_ttl_seconds: int = field(
-        default_factory=lambda: _env_int('FUNDAMENTAL_CACHE_TTL_SECONDS', 120, minimum=0))
-
-    # --- optional vendor keys (missing key = that fallback source is skipped) ---
-    tushare_token: Optional[str] = field(
-        default_factory=lambda: _env_str('TUSHARE_TOKEN'))
-    tickflow_api_key: Optional[str] = field(
-        default_factory=lambda: _env_str('TICKFLOW_API_KEY'))
+    # --- data vendor keys (missing key = that source is skipped) ---
     finnhub_api_key: Optional[str] = field(
         default_factory=lambda: _env_str('FINNHUB_API_KEY'))
     alphavantage_api_key: Optional[str] = field(
         default_factory=lambda: _env_str('ALPHAVANTAGE_API_KEY'))
 
     def get_db_url(self) -> str:
-        """SQLAlchemy sqlite URL; creates the data directory if missing."""
+        """SQLAlchemy URL: DATABASE_URL when set (Postgres), else the
+        sqlite file at DATABASE_PATH (its directory is created)."""
+        if self.database_url:
+            return _normalize_database_url(self.database_url)
         db_path = Path(self.database_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return f'sqlite:///{db_path.absolute()}'

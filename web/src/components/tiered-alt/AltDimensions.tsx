@@ -19,13 +19,10 @@ import { AltCard, AltNarrative, AltNotesButton } from './AltUi';
 const DIMENSION_LABEL_KEYS: Record<string, UiTextKey> = {
   technicals: 'tiered.dimension.technicals',
   fundamentals: 'tiered.dimension.fundamentals',
-  macro_econ: 'tiered.dimension.macro_econ',
+  macro_economy: 'tiered.dimension.macro_economy',
   positioning: 'tiered.dimension.positioning',
-  company_events: 'tiered.dimension.company_events',
-  world_events: 'tiered.dimension.world_events',
-  opinion: 'tiered.dimension.opinion',
-  // Old stored runs still carry the retired news-sentiment dimension.
-  sentiment: 'tiered.dimension.sentiment',
+  company_news: 'tiered.dimension.company_news',
+  world_news: 'tiered.dimension.world_news',
 };
 
 // Named sections for payloads the backend sends (partly) flat, so every
@@ -43,13 +40,7 @@ const DIMENSION_SECTIONS: Record<string, { titleKey: UiTextKey; keys: string[] }
     { titleKey: 'tiered.group.momentum', keys: ['rsi_14', 'macd'] },
     {
       titleKey: 'tiered.group.volatility',
-      // worst_day_5pct and worst_day_1y: retired statistics old stored
-      // runs still carry (worst_day_1y was a raw fraction; new runs
-      // publish worst_day_pct_1y as a plain percent).
-      keys: [
-        'atr_14', 'volatility_pct', 'worst_day_pct_1y',
-        'worst_day_1y', 'worst_day_5pct',
-      ],
+      keys: ['atr_14', 'volatility_pct', 'worst_day_pct_1y'],
     },
     {
       titleKey: 'tiered.group.structure',
@@ -59,12 +50,9 @@ const DIMENSION_SECTIONS: Record<string, { titleKey: UiTextKey; keys: string[] }
       ],
     },
     { titleKey: 'tiered.group.volume', keys: ['avg_volume_20'] },
-    // 'score' is retired from new runs (a code-computed verdict in the
-    // payload pre-answered the judgment the AI stages exist to make) —
-    // kept here so stored runs still render theirs.
-    { titleKey: 'tiered.group.meta', keys: ['bars_count', 'score'] },
+    { titleKey: 'tiered.group.meta', keys: ['bars_count'] },
   ],
-  macro_econ: [{ titleKey: 'tiered.group.reportInfo', keys: ['region', 'as_of'] }],
+  macro_economy: [{ titleKey: 'tiered.group.reportInfo', keys: ['region', 'as_of'] }],
   // The next earnings date rides in the fundamentals payload (plan-review
   // redesign) — give it a named section instead of the Other bucket.
   fundamentals: [
@@ -147,7 +135,7 @@ interface MetricRowProps {
   /** The value's observation date, shown dimmed after it (macro rows). */
   date?: unknown;
   /** The date's own payload path — it stays a citable evidence target
-      (macro_econ.observation_dates.*), so it keeps its anchor id even
+      (macro_economy.observation_dates.*), so it keeps its anchor id even
       though it no longer has a row of its own. */
   dateAnchorPath?: string;
 }

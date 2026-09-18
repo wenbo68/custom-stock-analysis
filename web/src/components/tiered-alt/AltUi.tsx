@@ -49,7 +49,7 @@ export const AltSectionLabel = ({ children }: { children: ReactNode }) => (
 
 // Every popup title on the alt page names two things: WHAT the popup is
 // about (a metric, a plan level, a check) and WHICH KIND of popup it is
-// (formula / adjustment / warnings / why blank / a verdict). They used to
+// (formula / adjustment / warnings / why blank / an outlook). They used to
 // run together as one "subject: kind" sentence, which read as a single
 // long label. Owner request 2026-08-08: split them, and always onto TWO
 // LINES — subject first, kind under it — so the shape of the header is
@@ -66,9 +66,19 @@ export const AltModalTitle = ({ subject, kind }: { subject: ReactNode; kind: Rea
   </span>
 );
 
-// A quiet inline fold (debate transcript, scoring breakdown).
-export const AltFold = ({ title, children }: { title: string; children: ReactNode }) => (
-  <details className="mt-4 rounded bg-gray-900/60 px-4 py-3">
+// A quiet inline fold (debate transcript, scoring breakdown, LLM
+// prompt/reply). `className` replaces the default top margin for hosts
+// that space their children with a flex gap.
+export const AltFold = ({
+  title,
+  children,
+  className = 'mt-4',
+}: {
+  title: string;
+  children: ReactNode;
+  className?: string;
+}) => (
+  <details className={`${className} rounded bg-gray-900/60 px-4 py-3`.trim()}>
     <summary className="cursor-pointer text-xs font-semibold text-gray-300">{title}</summary>
     <div className="mt-3 flex flex-col gap-3">{children}</div>
   </details>
@@ -213,55 +223,27 @@ export const AltNarrative = ({ text, citations }: AltNarrativeProps) => (
   </p>
 );
 
-const CITATION_REF_RE = /^citation:(\d+)$/;
-
 interface AltEvidenceRefsProps {
   refs: string[];
-  citations: TieredCitation[];
   onNavigate?: () => void;
 }
 
-// Evidence references as links: "citation:N" opens the news source (shown
-// as "sentiment.citation:N" — the same dimension.path grammar as every
-// other reference), a payload path scrolls to that metric row.
-// Unresolvable refs stay text.
-export const AltEvidenceRefs = ({ refs, citations, onNavigate }: AltEvidenceRefsProps) => (
+// Evidence references as links: each payload path scrolls to that metric row.
+export const AltEvidenceRefs = ({ refs, onNavigate }: AltEvidenceRefsProps) => (
   <span className="inline-flex flex-wrap gap-x-2 text-[11px]">
-    {refs.map((refPath, index) => {
-      const citationMatch = CITATION_REF_RE.exec(refPath);
-      if (citationMatch) {
-        const citation = citations[Number(citationMatch[1]) - 1];
-        const shown = `sentiment.${refPath}`;
-        if (citation?.url) {
-          return (
-            <a
-              key={index}
-              href={citation.url}
-              target="_blank"
-              rel="noreferrer"
-              aria-label={citation.title ?? citation.url}
-              className={ALT_LINK}
-            >
-              {shown}
-            </a>
-          );
-        }
-        return <span key={index}>{shown}</span>;
-      }
-      return (
-        <button
-          key={index}
-          type="button"
-          className={cn('cursor-pointer', ALT_LINK)}
-          onClick={() => {
-            onNavigate?.();
-            // Let any open modal unmount before scrolling to the row behind it.
-            window.setTimeout(() => jumpToMetric(refPath), 50);
-          }}
-        >
-          {refPath}
-        </button>
-      );
-    })}
+    {refs.map((refPath, index) => (
+      <button
+        key={index}
+        type="button"
+        className={cn('cursor-pointer', ALT_LINK)}
+        onClick={() => {
+          onNavigate?.();
+          // Let any open modal unmount before scrolling to the row behind it.
+          window.setTimeout(() => jumpToMetric(refPath), 50);
+        }}
+      >
+        {refPath}
+      </button>
+    ))}
   </span>
 );

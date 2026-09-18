@@ -40,7 +40,7 @@ importance 1-5 (v11 owner spec, 2026-07-20: 1 = very minor, 3 = normal
 evidence, 5 = very important — thesis-changing) and gives one short
 plain sentence saying why (``weight_reason``, shown in the UI's check
 modals). Listers rate their own bullets in the same call; check/decider
-votes carry a weight alongside the verdict. A bullet's final weight is
+votes carry a weight alongside the validity. A bullet's final weight is
 the MEDIAN of its voters' weights (two voters → their mean, so halves
 happen). The outlook score is computed by code from the direction tags
 and the weights:
@@ -49,16 +49,16 @@ and the weights:
 headers). Two snapshots: initial (the merged list before voting,
 weighted by the authors' own ratings, stored for the audit trail only)
 and final (the bullets the votes left standing, weighted by the full
-voter median — the displayed score). Verdict on the 2-decimal final:
+voter median — the displayed score). Outlook on the 2-decimal final:
 < 4 sell, 4-6 hold, > 6 buy. Empty final pool → 5.00, hold, warning.
 
 4-5 base LLM calls (two grade sheets parallel with their fix loops →
 code merge → check round → deciding round only when there are ties →
 summary), all temperature 0. Every stage fills a strict Pydantic form;
 an invalid reply gets ONE retry with the errors shown, then: both
-sheets failing voids the tier-2 verdict — the run has no outlook and
+sheets failing voids the tier-2 outlook — the run has no outlook and
 says re-run (no fallback: depth 2 never runs the tier-1 one-blob
-verdict, so there is nothing to fall back to); one
+outlook, so there is nothing to fall back to); one
 sheet failing proceeds with the other; a failed check round counts
 bullets on their author's vote alone; a failed deciding round excludes
 the tied bullets as unresolved; the summary's failure never voids
@@ -66,8 +66,8 @@ anything.
 
 2026-08-16 (owner decision): the news cards joined the sheet — every
 card news event is one gradable row
-(``company_events.news_coverage.items.{i}.text``, id prefix N;
-``world_events.…``, id prefix W — both keyed by TEXTUAL kind, not by
+(``company_news.news_coverage.items.{i}.text``, id prefix N;
+``world_news.…``, id prefix W — both keyed by TEXTUAL kind, not by
 name). News rows relax the value-copy rule only (the ref anchors the
 claim to the event; a 40-word summary has no short display value to
 copy) — everything else (votes, weights, pools, the summary group)
@@ -116,7 +116,7 @@ from .schema import (
     hold_weeks_text,
 )
 
-#: Verdict bands on the 2-decimal final score (owner spec).
+#: Outlook bands on the 2-decimal final score (owner spec).
 SELL_BELOW = 4.0
 HOLD_MAX = 6.0
 
@@ -140,7 +140,7 @@ _NUMERIC_REASON_RE = re.compile(r"\d+\.\d+|\d+(?:\.\d+)?\s?%")
 
 
 def direction_from_final(final: float) -> Direction:
-    """The fixed mapping from the 0-10 final score to a verdict."""
+    """The fixed mapping from the 0-10 final score to an outlook."""
     if final < SELL_BELOW:
         return Direction.SELL
     if final <= HOLD_MAX:
@@ -157,7 +157,7 @@ class AnchoredReason:
 
 
 @dataclass(frozen=True)
-class DebateVerdict:
+class DebateOutlook:
     direction: Direction
     #: The final pool's weighted score: 10 × Σweight(bullish) / Σweight(all).
     final_score: float
@@ -168,9 +168,9 @@ class DebateVerdict:
     #: Per-pool audit: {initial|final: {dimensions, bullish, bearish,
     #: total, score}}.
     pools: Dict[str, Any] = field(default_factory=dict)
-    #: The report as the fixed five-group outline (StructuredSummaryModel
-    #: dump); ``summary`` above is its flat-text rendering for legacy
-    #: consumers. None when the summary stage failed.
+    #: The report as the fixed outline (StructuredSummaryModel dump);
+    #: ``summary`` above is its flat-text rendering (the tier-2 report's
+    #: narrative). None when the summary stage failed.
     summary_structure: Optional[Dict[str, Any]] = None
 
 
@@ -178,40 +178,26 @@ class DebateVerdict:
 class DebateResult:
     #: The evidence list, one dict per bullet (see _base_item for the shape).
     items: List[Dict[str, Any]] = field(default_factory=list)
-    verdict: Optional[DebateVerdict] = None
+    outlook: Optional[DebateOutlook] = None
     warnings: List[str] = field(default_factory=list)
 
     def to_detail(self) -> Dict[str, Any]:
         """JSON-ready audit trail for storage and the debate-tree UI."""
-        verdict: Optional[Dict[str, Any]] = None
-        if self.verdict is not None:
-            v = self.verdict
-            verdict = {
+        outlook: Optional[Dict[str, Any]] = None
+        if self.outlook is not None:
+            v = self.outlook
+            outlook = {
                 "direction": v.direction.value,
                 "final_score": v.final_score,
-                # Legacy header field: the nearest whole number.
-                "final_score_rounded": int(v.final_score + 0.5),
                 "summary": v.summary,
                 "summary_structure": v.summary_structure,
                 "initial_score": v.initial_score,
                 "pools": v.pools,
-                # Legacy keys kept so pre-v8 readers never crash.
-                "adjusted_score": None,
-                "confidence": None,
-                "reasons_for": [],
-                "reasons_against": [],
-                "would_change_mind": None,
-                "bull_summary": None,
-                "bear_summary": None,
-                "scoring": None,
-                "weight": None,
             }
         return {
             "format": DETAIL_FORMAT,
-            # Legacy key: pre-v5 readers iterate turns; v5+ has none.
-            "turns": [],
             "items": [dict(item) for item in self.items],
-            "verdict": verdict,
+            "outlook": outlook,
             "warnings": list(self.warnings),
         }
 
@@ -266,7 +252,7 @@ def gradable_field_refs(
     value} is ONE gradable fact (its prose keys are documentation);
     blank fields (value null) carry no evidence and get no row — code
     already knows why they are blank. News cards are textual (kind, not
-    name — company_events and world_events alike): their rows are the
+    name — company_news and world_news alike): their rows are the
     news EVENTS (one per bullet, ``_news_item_refs``), never their
     bookkeeping counters."""
     refs: Dict[str, List[str]] = {}
@@ -290,7 +276,7 @@ def blank_field_refs(dimensions: Sequence[DimensionResult]) -> set:
     them, and the AIs keep grading them anyway — so a grade landing on
     one is DROPPED (it would have been an invisible neutral at best),
     never a reason to fail the whole sheet (owner decision 2026-08-05:
-    a voided verdict over meaningless grades is the worse outcome)."""
+    a voided outlook over meaningless grades is the worse outcome)."""
     refs: set = set()
     for dim in dimensions:
         if dim.dimension not in DIMENSIONS or not dim.payload:
@@ -416,7 +402,6 @@ This is a SWING TRADE held for up to {hold_text} (the user's chosen max
 hold time). Judge every piece of evidence against that horizon — use
 your own judgment about what matters at this timescale (owner decision
 2026-08-08: the same number drives the report and the forward test).
-Formula-computed plan levels: entry={entry}, backup={secondary_entry}, stop={stop_loss}, target={take_profit}
 
 Collected evidence (the ONLY facts you may use — no outside knowledge):
 {evidence_block}
@@ -439,20 +424,20 @@ _LINK_RULES = """Link rules (all checked mechanically by code):
   value automatically.
 - Code verifies every link and sends failures back to you to fix;
   bullets that cannot be fixed are struck from the list.
-- Exception: a ref into a textual card (company_events or
-  world_events) points at an item's summary sentence — cite the item's
-  text field (like "company_events.news_coverage.items.3.text" or
-  "world_events.news_coverage.items.1.text") and you do NOT copy that
+- Exception: a ref into a textual card (company_news or
+  world_news) points at an item's summary sentence — cite the item's
+  text field (like "company_news.news_coverage.items.3.text" or
+  "world_news.news_coverage.items.1.text") and you do NOT copy that
   sentence into your own; the ref itself is the anchor.
 - Use only the evidence above; never invent facts or numbers."""
 
 _VOTE_RULES = """Vote rules (checked mechanically by code):
-- Every vote: "verdict" is "valid" or "invalid", plus a short plain
+- Every vote: "validity" is "valid" or "invalid", plus a short plain
   "reason" — REQUIRED either way; a vote without a reason is rejected.
 - Every vote also carries "weight": your own importance rating of the
   bullet for the trade decision, 1 to 5 — 1 (very minor), 2 (minor),
   3 (normal evidence), 4 (important), 5 (very important — could change
-  the whole thesis alone). Rate it regardless of your verdict; code
+  the whole thesis alone). Rate it regardless of your validity call; code
   takes the median of all voters' weights.
 - Every vote also carries "weight_reason": ONE short plain sentence
   saying why you rated it that important. Plain words only — report
@@ -493,11 +478,11 @@ _GRADE_RULES = """Grade-sheet rules (all checked mechanically by code):
   within roughly a week of the report's as-of date, grade that field
   bearish — an imminent earnings report can gap the price past any
   plan level, which argues for waiting.
-- company_events and world_events rows are NEWS EVENTS, not numbers:
+- company_news and world_news rows are NEWS EVENTS, not numbers:
   each ref points at one news summary in the report. Grade the event's
   likely effect on THIS stock over the hold time — bullish, bearish, or
   neutral when it has no clear lean (routine coverage, already-priced-in
-  noise). world_events items are market-wide backdrop news: judge what
+  noise). world_news items are market-wide backdrop news: judge what
   the event means for this particular stock (a rate story hits a bank
   and a miner differently); when it has no read-through to this name,
   grade it neutral. The claim states the event and why it leans that
@@ -505,15 +490,6 @@ _GRADE_RULES = """Grade-sheet rules (all checked mechanically by code):
   rows (code attaches the event citation itself); any NUMBER your claim
   quotes from the news text still appears exactly as the report shows
   it.
-- opinion fields are MEASURES OF OPINION, not facts about the
-  business (they follow the normal numeric value-copy rules):
-  opinion.analyst fields are professional sentiment — rising buy
-  share, targets above the price, fresh upgrades lean bullish; drift
-  down or downgrades lean bearish. opinion.crowd fields measure
-  retail-forum chatter volume and mood — the least reliable evidence
-  in the report: weigh them lightly (1-2 unless the reading is
-  extreme), read mention spikes as attention and crowding rather than
-  direction, and never treat forum mood as a verified fact.
 - The direction tags ARE the score — code counts them; nobody writes
   a score."""
 
@@ -525,7 +501,7 @@ _GRADE_SHAPE = """{"grades": {
     "links": [],
     "weight": 3, "weight_reason": "Momentum backs the trend but rarely drives it alone."},
   "technicals.meta.as_of": {"direction": "neutral"},
-  "company_events.news_coverage.items.0.text": {"direction": "bearish",
+  "company_news.news_coverage.items.0.text": {"direction": "bearish",
     "claim": "The new antitrust lawsuit adds legal risk that could weigh on the stock during the hold.",
     "links": [],
     "weight": 4, "weight_reason": "Litigation news can move the price on its own."},
@@ -594,7 +570,7 @@ _VOTE_FIX_TEMPLATE = """Collected evidence (the ONLY facts you may use — no ou
 Some of your votes failed the code's citation check. Fix each vote
 listed below: cite every number your reason states, copying the value
 exactly as the report above displays it. Keep the same keys; you may
-rewrite the reason and links, and reconsider the verdict with the
+rewrite the reason and links, and reconsider the validity with the
 correct numbers in hand.
 
 {vote_rules}
@@ -623,7 +599,7 @@ Vote on the bullet in front of you, not on the stock.
 {vote_rules}
 
 Reply with JSON only:
-{{"votes": {{"T2": {{"verdict": "invalid", "reason": "why it is flawed", "links": [{{"ref": "technicals.price.close", "value": "100"}}], "weight": 3, "weight_reason": "why it matters this much"}}}}}}
+{{"votes": {{"T2": {{"validity": "invalid", "reason": "why it is flawed", "links": [{{"ref": "technicals.price.close", "value": "100"}}], "weight": 3, "weight_reason": "why it matters this much"}}}}}}
 "votes" must cover exactly these bullet ids: {check_ids}."""
 
 _DECIDER_TEMPLATE = """{context}
@@ -641,7 +617,7 @@ see the claim and the objection; weigh both and rule:
 {vote_rules}
 
 Reply with JSON only:
-{{"votes": {{"T2": {{"verdict": "valid", "reason": "why the bullet stands", "links": [], "weight": 3, "weight_reason": "why it matters this much"}}}}}}
+{{"votes": {{"T2": {{"validity": "valid", "reason": "why the bullet stands", "links": [], "weight": 3, "weight_reason": "why it matters this much"}}}}}}
 "votes" must cover exactly these bullet ids: {tied_ids}."""
 
 # The summary speaks in outlook words (user-facing tier-2 prose) — the
@@ -666,14 +642,14 @@ bullet's weight is the median of its voters' 1-5 ratings):
 - outlook: {outlook} (below 4 bearish, 4-6 neutral, above 6 bullish)
 
 Write the user-facing report as a fixed bullet outline. Reply with JSON
-only. Never use the words "verdict", "buy", "hold" or "sell" — describe
-the outlook as bullish, neutral or bearish:
+only. Never write the words "outlook", "buy", "hold" or "sell" — say
+bullish, neutral or bearish:
 {{"summary": [{{"text": "one short plain sentence", "links": [], "children": []}}],
  "technicals": [{{"text": "The 14-day RSI (56.28) is above 50.",
    "links": [{{"ref": "technicals.daily.rsi_14", "value": "56.28"}}],
    "children": [{{"text": "optional supporting detail", "links": []}}]}}],
- "fundamentals": [], "positioning": [], "macro_econ": [], "opinion": [],
- "company_events": [], "world_events": []}}
+ "fundamentals": [], "positioning": [], "macro_economy": [],
+ "company_news": [], "world_news": []}}
 
 Rules:
 - "summary": 2-4 bullets stating the outlook and the decisive reasons.
@@ -688,14 +664,11 @@ Rules:
   same link rules as the evidence list, checked mechanically by code.
   Code sends failures back to you to fix; links that cannot be fixed
   are dropped from the report.
-- "company_events" and "world_events" bullets talk about the news
+- "company_news" and "world_news" bullets talk about the news
   events; cite each item by its ref
-  ("company_events.news_coverage.items.3.text",
-  "world_events.news_coverage.items.1.text") — for these refs there
+  ("company_news.news_coverage.items.3.text",
+  "world_news.news_coverage.items.1.text") — for these refs there
   is no value to copy into the sentence.
-- "opinion" bullets follow the normal number rules, and must present
-  analyst consensus and crowd chatter as opinions and attention
-  measures, never as facts about the company.
 - Support the computed outlook; if little evidence survived, say plainly
   that the case is weak.
 - Use only the evidence above; do not invent facts."""
@@ -706,10 +679,9 @@ _SUMMARY_GROUP_TITLES = {
     "technicals": "Technicals",
     "fundamentals": "Fundamentals",
     "positioning": "Positioning",
-    "macro_econ": "Macro economy",
-    "opinion": "Opinion",
-    "company_events": "Company news",
-    "world_events": "World news",
+    "macro_economy": "Macro economy",
+    "company_news": "Company news",
+    "world_news": "World news",
 }
 
 
@@ -768,10 +740,9 @@ class DebateEngine:
         context = _CONTEXT_TEMPLATE.format(
             symbol=symbol,
             hold_text=hold_weeks_text(hold_weeks),
-            entry=tier1.levels.entry,
-            secondary_entry=tier1.levels.secondary_entry,
-            stop_loss=tier1.levels.stop_loss,
-            take_profit=tier1.levels.take_profit,
+            # The plan levels are deliberately NOT in the context (owner
+            # decision 2026-09-16): the debate judges the outlook from
+            # citable evidence, and the levels are neither.
             # Display-formatted numbers: the model must cite what the
             # report pages show, so it only ever sees those strings.
             evidence_block=evidence_block(dimensions, display=True),
@@ -806,7 +777,7 @@ class DebateEngine:
         refs = gradable_field_refs(dimensions)
         if not refs:
             warnings.append(
-                "no gradable report fields collected — tier-2 verdict voided"
+                "no gradable report fields collected — tier-2 outlook voided"
             )
             return DebateResult(items=items, warnings=warnings)
 
@@ -816,7 +787,7 @@ class DebateEngine:
         if first is None and second is None:
             warnings.append(
                 "both analyst grade sheets invalid after retry — tier-2 "
-                "verdict voided"
+                "outlook voided"
             )
             return DebateResult(items=items, warnings=warnings)
         if first is None or second is None:
@@ -937,7 +908,7 @@ class DebateEngine:
             dimensions, warnings,
         )
 
-        verdict = DebateVerdict(
+        outlook = DebateOutlook(
             direction=direction,
             final_score=final,
             summary=summary,
@@ -945,7 +916,7 @@ class DebateEngine:
             pools=pools,
             summary_structure=summary_structure,
         )
-        return DebateResult(items=items, verdict=verdict, warnings=warnings)
+        return DebateResult(items=items, outlook=outlook, warnings=warnings)
 
     # -- step 1: the two lists ---------------------------------------------
 
@@ -1364,7 +1335,7 @@ class DebateEngine:
             by_id[key]["votes"].append(
                 {
                     "role": role,
-                    "verdict": vote.verdict,
+                    "validity": vote.validity,
                     "reason": reason or None,
                     "weight": vote.weight,
                     "weight_reason": vote.weight_reason,
@@ -1383,7 +1354,7 @@ class DebateEngine:
         if item["struck"] or item["authors"] >= 2:
             return False
         checker = self._vote_by_role(item, "checker")
-        return checker is not None and checker["verdict"] == "invalid"
+        return checker is not None and checker["validity"] == "invalid"
 
     def _apply_outcomes(
         self, items: List[Dict[str, Any]], warnings: List[str]
@@ -1396,7 +1367,7 @@ class DebateEngine:
                 item["final_status"] = "counted"  # 2-0 at birth
                 continue
             checker = self._vote_by_role(item, "checker")
-            if checker is None or checker["verdict"] == "valid":
+            if checker is None or checker["validity"] == "valid":
                 # No second vote cast (degraded/discarded) → the author's
                 # vote stands unopposed; a valid check vote → 2-0.
                 item["final_status"] = "counted"
@@ -1408,7 +1379,7 @@ class DebateEngine:
                 warnings.append(
                     f"no deciding vote for {item['id']} — excluded as unresolved"
                 )
-            elif decider["verdict"] == "valid":
+            elif decider["validity"] == "valid":
                 item["final_status"] = "counted"  # 2-1
             else:
                 item["final_status"] = "excluded"  # 1-2
@@ -1481,7 +1452,7 @@ class DebateEngine:
         warnings: List[str],
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
         """(flat text for legacy consumers, fixed-outline dump) — both
-        empty/None when the stage failed; the computed verdict stands."""
+        empty/None when the stage failed; the computed outlook stands."""
         prompt = _SUMMARY_TEMPLATE.format(
             context=context,
             tree=_tree_text(items),
@@ -1498,7 +1469,10 @@ class DebateEngine:
         )
 
         def parse(parsed: dict) -> StructuredSummaryModel:
-            model = StructuredSummaryModel.model_validate(parsed)
+            # A group the model left out counts as empty; whether it was
+            # allowed to be empty is check_summary_groups' call.
+            filled = {**{group: [] for group in DIMENSIONS}, **parsed}
+            model = StructuredSummaryModel.model_validate(filled)
             check_summary_groups(model, data_dimensions)
             return model
 
@@ -1510,8 +1484,8 @@ class DebateEngine:
             if model is None:
                 # Keep the long-standing wording (and its friendly gloss)
                 # instead of the stage's voided-sounding warnings — a
-                # summary failure never voids the computed verdict.
-                warnings.append("judge summary unparseable — computed verdict stands")
+                # summary failure never voids the computed outlook.
+                warnings.append("judge summary unparseable — computed outlook stands")
                 return "", None
             warnings.extend(stage_warnings)
 
@@ -1562,7 +1536,7 @@ class DebateEngine:
                     "without links"
                 )
         except Exception as exc:
-            warnings.append(f"summary LLM call failed: {exc} — computed verdict stands")
+            warnings.append(f"summary LLM call failed: {exc} — computed outlook stands")
             return "", None
         return _flatten_summary(model), model.model_dump()
 
@@ -1773,7 +1747,7 @@ def _links_text(links: Sequence[Dict[str, Any]]) -> str:
 
 
 def _vote_text(vote: Dict[str, Any]) -> str:
-    text = vote["verdict"]
+    text = vote["validity"]
     if vote["reason"]:
         text += f" — {vote['reason']}"
     if vote["links"]:
