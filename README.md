@@ -9,6 +9,13 @@ analysis and a max hold time, and get a structured report — technicals,
 fundamentals, news, macro, an AI debate, a trade plan with sizing — plus a
 run history.
 
+This is the self-host version: one person, one machine, no sign-in. The
+model and its API key come from `.env`. A hosted, many-user version with
+sign-in and per-user keys lives in the separate
+[custom-stock-analysis-hosted](https://github.com/wenbo68/custom-stock-analysis-hosted)
+repo (split 2026-09-18); engine and UI improvements flow between the two
+by merging.
+
 ## Layout
 
 - `server.py` / `api/` — FastAPI backend (the tiered API + static frontend)
@@ -18,39 +25,6 @@ run history.
 - `web/` — React frontend (builds into `static/`)
 - `tests/` — offline test suite
 
-## Hosted version
-
-This repo is the hosted, many-user version of the app (split from the self-host repo on 2026-09-18):
-
-- **Sign-in** with Google or Discord (`GOOGLE_*` / `DISCORD_*` client
-  credentials, `SESSION_SECRET` for the login cookie). Every run route
-  requires a signed-in user.
-- **Your own keys.** The user block above New Run holds each user's
-  model choice (a curated list) and their LLM key, plus optional
-  Finnhub / AlphaVantage / FRED keys that override the server's
-  defaults. A fresh account starts on the forward-tested Gemini pair
-  (3.8 Flash for the analysis, 3.5 Flash-Lite for the news screen);
-  picking a provider puts both models on that provider's default pair
-  (`PROVIDER_DEFAULTS` in `src/user_settings.py`). Keys are encrypted
-  at rest (`APP_ENCRYPTION_KEY`) and only ever shown back masked. A
-  run refuses to start until a model and key are on file.
-- **Private history.** Runs belong to the user who started them; the
-  list, detail and transcript routes only show your own.
-- **Postgres.** Set `DATABASE_URL` (Neon, Railway, ...) — hosts wipe
-  their disk on restart, so nothing durable lives in files: run
-  history, transcripts and the fetched-data caches are all tables.
-- **Hosting.** The server listens on every interface when the host
-  passes `PORT`, and trusts forwarded headers so OAuth callbacks stay
-  https. Set `PUBLIC_BASE_URL` to the site's address. A restart marks
-  any run still in flight as failed (runs are in-process threads).
-- **Run queue.** At most `TIERED_MAX_CONCURRENT_RUNS` analyses (default
-  2) run at once across all users; the rest wait in line and start by
-  themselves, and a restart resumes whatever was still waiting. Your
-  own unfinished run with the same ticker and inputs cannot be started
-  twice — the Start popup names the existing one.
-
-See `.env.example` for every variable and where to get each credential.
-
 ## Quick start
 
 ```bash
@@ -58,7 +32,7 @@ See `.env.example` for every variable and where to get each credential.
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 
-# 2. Configure (sign-in credentials + secrets; see .env.example)
+# 2. Configure (at minimum the LLM model + its provider key)
 cp .env.example .env   # then edit
 
 # 3. Frontend
@@ -73,6 +47,22 @@ Frontend development mode (hot reload, proxies /api to :8000):
 ```bash
 cd web && npm run dev
 ```
+
+## Run queue
+
+At most `TIERED_MAX_CONCURRENT_RUNS` analyses (default 4) run at once;
+the rest wait in line and start by themselves, and a restart resumes
+whatever was still waiting. An unfinished run with the same ticker and
+inputs cannot be started twice — the Start popup names the existing one.
+A restart marks any run still in flight as failed (runs are in-process
+threads).
+
+## Database
+
+Everything durable — run history, LLM transcripts and the fetched-data
+caches — lives in one database. By default that is a sqlite file at
+`./data/stock_analysis.db`; set `DATABASE_URL` to a Postgres address to
+use Postgres instead, with no other change.
 
 ## Structured LLM replies
 
@@ -97,11 +87,10 @@ days are pruned at server startup.
 
 ## Fetched-data caches
 
-The macro and world-news fetches and the per-article news
-judgments are cached in the database (the `tiered_cache` table), not on
-disk, so a host that wipes its disk on restart does not burn the vendors'
-daily call budgets. Every row can be refetched; rows untouched for 60
-days are pruned at startup.
+The macro and world-news fetches and the per-article news judgments are
+cached in the database (the `tiered_cache` table), so a restart does not
+burn the vendors' daily call budgets. Every row can be refetched; rows
+untouched for 60 days are pruned at startup.
 
 ## Tests
 
