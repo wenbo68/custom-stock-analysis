@@ -28,7 +28,6 @@ from src.tiered_analysis.providers.base import (
 from src.tiered_analysis.earnings import EarningsInfo
 from src.tiered_analysis.schema import (
     Action,
-    Direction,
     Outlook,
     SniperLevels,
     TierReport,
@@ -97,7 +96,7 @@ def _outcome(symbol="AAPL"):
         tier=1,
         symbol=symbol,
         market=Market.US,
-        direction=Direction.HOLD,
+        outlook=Outlook.NEUTRAL,
         score=56,
         levels=SniperLevels(entry=303.8,
                             stop_loss=290.0, take_profit=325.0),
@@ -119,7 +118,8 @@ def _outcome(symbol="AAPL"):
         warnings=[],
     )
     state = TierState(symbol=symbol, market=Market.US, reports={1: report})
-    return TieredRunOutcome(report=report, state=state)
+    # The pipeline copies the final report's outlook onto the outcome.
+    return TieredRunOutcome(report=report, state=state, outlook=report.outlook)
 
 
 def _deep_outcome(symbol="AAPL"):
@@ -127,10 +127,10 @@ def _deep_outcome(symbol="AAPL"):
     base = _outcome(symbol)
     tier2 = TierReport(
         tier=2, symbol=symbol, market=Market.US,
-        direction=Direction.BUY,
+        outlook=Outlook.BULLISH,
         confidence="0.70", levels=base.report.levels,
         narrative="bull case holds",
-        debate_detail={"outlook": {"direction": "buy", "confidence": 0.7}},
+        debate_detail={"outlook": {"outlook": "bullish", "confidence": 0.7}},
     )
     state = TierState(
         symbol=symbol, market=Market.US,
@@ -176,7 +176,7 @@ class TestTieredAnalyzeEndpoint:
         assert body["status"] == "done"
         result = body["result"]
         assert result["symbol"] == "AAPL"
-        assert result["direction"] == "hold"
+        assert result["outlook"] == "neutral"
         assert result["score"] == 56
         # Coverage grades are retired (2026-08-19): the serialized run
         # carries no "coverage" key anywhere — degradation shows as
@@ -319,18 +319,18 @@ class TestTieredDepthAndSizingApi:
 
         result = body["result"]
         assert result["depth"] == 2
-        # tier-1 fields keep their v1 shape for the existing UI
-        assert result["direction"] == "hold"
+        # tier-1 fields keep their v1 shape for the existing UI; the
+        # one outlook on the report is the deepest tier's
+        assert "direction" not in result
         assert result["tier"] == 1
         # the deepest tier is what the user should act on
         assert result["final"]["tier"] == 2
-        assert result["final"]["direction"] == "buy"
         assert result["final"]["outlook"] == "bullish"
         assert result["final"]["action"] == "enter"
         # No coverage grades anywhere in the serialized run (2026-08-19).
         assert "coverage" not in result["final"]
         assert "coverage" not in result["tier2"]
-        assert result["tier2"]["debate_detail"]["outlook"]["direction"] == "buy"
+        assert result["tier2"]["debate_detail"]["outlook"]["outlook"] == "bullish"
         assert result["sizing"]["shares"] == 83
         assert result["llm_usage"]["total"]["calls"] == 3
         # outlook redesign additions
@@ -355,7 +355,9 @@ class TestTieredDepthAndSizingApi:
         assert result["tier2"] is None
         assert result["sizing"] is None
         assert result["llm_usage"] is None
-        assert result["outlook"] == "unknown"
+        # The one outlook on the report is the final report's own.
+        assert result["outlook"] == "neutral"
+        assert result["final"]["outlook"] == "neutral"
         assert result["action"] == "unknown"
         assert result["earnings"] is None
 

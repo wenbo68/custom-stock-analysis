@@ -1,14 +1,4 @@
-import type { TieredCitation, TieredResult } from '../../api/tiered';
-
-export const DIRECTION_BADGE: Record<
-  TieredResult['direction'],
-  'success' | 'warning' | 'danger' | 'default'
-> = {
-  buy: 'success',
-  hold: 'warning',
-  sell: 'danger',
-  unknown: 'default',
-};
+import type { TieredCitation } from '../../api/tiered';
 
 export function formatValue(value: unknown): string {
   if (value === null || value === undefined) {

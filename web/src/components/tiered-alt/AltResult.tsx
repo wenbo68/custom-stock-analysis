@@ -6,7 +6,7 @@ import { cn } from '../../utils/cn';
 import { flashElement } from '../tiered/termHelpers';
 import { isPlanNote } from './altWarningText';
 import { HelpTerm as BaseHelpTerm } from '../tiered/terms';
-import { adjustedCellId, computedCellId, directionOutlook } from './altFormat';
+import { adjustedCellId, computedCellId } from './altFormat';
 import { RewardRatioValue, type PlanColumn, type RewardRatioValues } from './AltPlanWarnings';
 import { fillTemplate } from './altTemplate';
 import { ALT_LINK, OUTLOOK_TEXT } from './altStyles';
@@ -64,7 +64,7 @@ const AltFact = ({
 );
 
 interface TierHeaderProps {
-  section: Pick<TieredTierSection, 'direction'>;
+  section: Pick<TieredTierSection, 'outlook'>;
   notes?: string[];
   side?: ReactNode;
 }
@@ -72,12 +72,10 @@ interface TierHeaderProps {
 // The card's title lives above the card (AltBlock); inside, the header is
 // one row of `Label: value` facts — Outlook first, then any side facts
 // (the deep-analysis score) — and the data-notes mark pinned top-right:
-// nothing when there is nothing to report, ⚠ when there is. The stored
-// outlook is still buy/hold/sell; the outlook rename maps it to
-// bullish/neutral/bearish for display.
+// nothing when there is nothing to report, ⚠ when there is.
 const TierHeader = ({ section, notes, side }: TierHeaderProps) => {
   const { t } = useUiLanguage();
-  const outlook = directionOutlook(section.direction);
+  const outlook = section.outlook ?? 'unknown';
   return (
     <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-1">
       <AltFact label={t('tiered.alt.outlook')}>

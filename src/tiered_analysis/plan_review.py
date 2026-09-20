@@ -78,7 +78,7 @@ from .providers.technicals import read_label, read_metric
 from .schema import (
     DEFAULT_HOLD_WEEKS,
     REWARD_GOAL_EPS,
-    Direction,
+    Outlook,
     SizingSlots,
     SniperLevels,
     hold_weeks_text,
@@ -137,7 +137,7 @@ def _tech_payload(dimensions: Sequence[DimensionResult]) -> Dict[str, Any]:
 
 def _size(
     levels: SniperLevels,
-    direction: Direction,
+    outlook: Outlook,
     market: Market,
     settings: SizingSettings,
 ) -> Tuple[SizingInputs, SizingResult]:
@@ -146,7 +146,7 @@ def _size(
         risk_fraction=settings.risk_fraction,
         entry=levels.entry,
         stop_loss=levels.stop_loss,
-        direction=direction,
+        outlook=outlook,
         market=market,
     )
     return inputs, size_position(inputs)
@@ -870,7 +870,7 @@ def review_plan(
     symbol: str,
     dimensions: Sequence[DimensionResult],
     bases: BaseLevels,
-    direction: Direction,
+    outlook: Outlook,
     market: Market,
     settings: SizingSettings,
     summarizer: Optional[Callable[[str], str]] = None,
@@ -897,7 +897,7 @@ def review_plan(
     base_decisions, base_adj_warnings = apply_adjustments(bases, [], atr=atr)
     warnings.extend(base_adj_warnings)
     base_levels = decisions_to_sniper(base_decisions)
-    base_inputs, base_result = _size(base_levels, direction, market, settings)
+    base_inputs, base_result = _size(base_levels, outlook, market, settings)
 
     def evaluate(merged: Dict[str, Dict[str, Any]]) -> _RoundPlan:
         """Apply the cumulative proposals to the bases and size the result."""
@@ -912,7 +912,7 @@ def review_plan(
             bases, price_proposals, atr=atr
         )
         levels = decisions_to_sniper(decisions)
-        inputs, result = _size(levels, direction, market, settings)
+        inputs, result = _size(levels, outlook, market, settings)
 
         # The AI's share trim: reductions only (vs this round's mechanical
         # recompute), floored to what can be ordered (board lot or

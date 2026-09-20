@@ -15,7 +15,7 @@ from __future__ import annotations
 import unittest
 
 from src.tiered_analysis.providers.base import Market
-from src.tiered_analysis.schema import Direction
+from src.tiered_analysis.schema import Outlook
 from src.tiered_analysis.sizing import (
     FRACTIONAL_SHARE_STEP,
     RefusalReason,
@@ -33,7 +33,7 @@ def _inputs(**overrides) -> SizingInputs:
         risk_fraction=0.005,
         entry=210.0,
         stop_loss=202.0,
-        direction=Direction.BUY,
+        outlook=Outlook.BULLISH,
         market=Market.US,
     )
     base.update(overrides)
@@ -154,9 +154,9 @@ class TestRefusals(unittest.TestCase):
         self.assertTrue(result.refusal_reason)
 
     def test_hold_and_sell_and_unknown_are_not_sized(self):
-        for direction in (Direction.HOLD, Direction.SELL, Direction.UNKNOWN):
+        for outlook in (Outlook.NEUTRAL, Outlook.BEARISH, Outlook.UNKNOWN):
             self._assert_refused(
-                size_position(_inputs(direction=direction)), RefusalReason.NOT_A_BUY
+                size_position(_inputs(outlook=outlook)), RefusalReason.NOT_BULLISH
             )
 
     def test_missing_capital_or_risk_means_sizing_off(self):

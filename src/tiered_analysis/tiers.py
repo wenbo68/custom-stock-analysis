@@ -2,7 +2,7 @@
 """Tier stages (docs/tiered-analysis-design.md §4).
 
 Deterministic orchestration: every failure surfaces as an explicit
-UNKNOWN-direction report with warnings (fail-loud), never an exception
+UNKNOWN-outlook report with warnings (fail-loud), never an exception
 swallowed mid-pipeline.
 
 Tier 1 (the one-call quick judge) lives in ``quick_judge.py`` since
@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .providers.base import DimensionResult, Market
-from .schema import Direction, SniperLevels, TierReport
+from .schema import Outlook, SniperLevels, TierReport
 
 
 @dataclass
@@ -46,7 +46,7 @@ class TierStage(ABC):
 
     @abstractmethod
     def run(self, state: TierState) -> TierReport:
-        """Produce this tier's report; failures return UNKNOWN-direction
+        """Produce this tier's report; failures return UNKNOWN-outlook
         reports with explicit warnings."""
 
 
@@ -56,7 +56,7 @@ class Tier2Stage(TierStage):
     The engine is injected for tests; the default is a lazy DebateEngine
     (the tiered package's own LLM calls). Any failure — no foundation
     report, no evidence, LLM down — is a report with an UNKNOWN
-    direction and explicit warnings. There is deliberately no
+    outlook and explicit warnings. There is deliberately no
     fallback to the tier-1 one-blob outlook: substituting the weakest
     judge when the best one fails would present a downgrade as a result.
     """
@@ -73,7 +73,7 @@ class Tier2Stage(TierStage):
             tier=self.tier,
             symbol=state.symbol,
             market=state.market,
-            direction=Direction.UNKNOWN,
+            outlook=Outlook.UNKNOWN,
             levels=levels,
             warnings=warnings,
             debate_detail=detail,
@@ -116,7 +116,7 @@ class Tier2Stage(TierStage):
             tier=self.tier,
             symbol=state.symbol,
             market=state.market,
-            direction=outlook.direction,
+            outlook=outlook.outlook,
             # The outlook is computed by formula from the vote outcomes,
             # so there is no judge confidence — the score lives in
             # debate_detail.outlook.final_score.

@@ -68,10 +68,10 @@ function makeDimension(name: string): TieredResult['dimensions'][number] {
   };
 }
 
-function makeSection(tier: number, direction: TieredTierSection['direction']): TieredTierSection {
+function makeSection(tier: number, outlook: TieredTierSection['outlook']): TieredTierSection {
   return {
     tier,
-    direction,
+    outlook,
     confidence: null,
     score: null,
     levels: LEVELS,
@@ -87,7 +87,6 @@ function makeResult(): TieredResult {
     symbol: 'AAPL',
     market: 'us',
     tier: 2,
-    direction: 'buy',
     score: 72,
     confidence: null,
     levels: LEVELS,
@@ -99,7 +98,7 @@ function makeResult(): TieredResult {
     outlook: 'bullish',
     action: 'enter',
     earnings: null,
-    tier2: { ...makeSection(2, 'buy'), debate_detail: makeTreeDebateV9() },
+    tier2: { ...makeSection(2, 'bullish'), debate_detail: makeTreeDebateV9() },
     sizing: {
       enabled: true,
       shares: 166,
@@ -132,7 +131,7 @@ function makeTreeDebateV9(): TieredDebateDetail {
       {
         id: 'T1',
         dimension: 'technicals',
-        direction: 'bullish',
+        bullet_outlook: 'bullish',
         claim: 'The 14-day RSI (71.20) is above 70.',
         links: [{ ref: 'technicals.rsi_14', value: '71.20' }],
         struck: false,
@@ -145,7 +144,7 @@ function makeTreeDebateV9(): TieredDebateDetail {
       {
         id: 'T2',
         dimension: 'technicals',
-        direction: 'bearish',
+        bullet_outlook: 'bearish',
         claim: 'The closing price (100) is below the 105 resistance.',
         links: [{ ref: 'technicals.close', value: '100' }],
         struck: false,
@@ -171,7 +170,7 @@ function makeTreeDebateV9(): TieredDebateDetail {
       {
         id: 'T3',
         dimension: 'technicals',
-        direction: 'bullish',
+        bullet_outlook: 'bullish',
         claim: 'The technical score (999) is strong.',
         links: [{ ref: 'technicals.score', value: '999' }],
         struck: true,
@@ -184,7 +183,7 @@ function makeTreeDebateV9(): TieredDebateDetail {
       {
         id: 'S1',
         dimension: 'positioning',
-        direction: 'bearish',
+        bullet_outlook: 'bearish',
         claim: 'The deal is not closed yet.',
         links: [{ ref: 'citation:2', value: null }],
         struck: false,
@@ -203,7 +202,7 @@ function makeTreeDebateV9(): TieredDebateDetail {
       },
     ],
     outlook: {
-      direction: 'hold',
+      outlook: 'neutral',
       summary: 'Only balanced evidence survived.',
       final_score: 5.0,
       initial_score: 3.33,
@@ -486,7 +485,7 @@ describe('AltResult', () => {
     };
     renderResult(result);
     // Nothing inline — the notes only exist behind the mark.
-    expect(screen.queryByText(/summary/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/judge summary unparseable/)).not.toBeInTheDocument();
     fireEvent.click(within(screen.getByTestId('alt-tier2')).getByTestId('alt-notes-button'));
     // Known shape → fixed keyword + friendly sentence; the raw backend
     // text is no longer shown (owner decision 2026-07-24).
@@ -517,7 +516,7 @@ describe('AltResult evidence vote tree', () => {
     expect(explain).toHaveTextContent(/deciding vote|决胜票/);
   });
 
-  it('shows colored direction words and counts them in the section headers', () => {
+  it('shows colored bullet-outlook words and counts them in the section headers', () => {
     renderTreeV9();
     const t1 = screen.getByTestId('alt-tree-item-T1');
     expect(within(t1).getByText(/bullish|看多/)).toHaveClass('text-emerald-300');

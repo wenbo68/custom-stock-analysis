@@ -57,7 +57,6 @@ from .schema import (
     DEFAULT_HOLD_WEEKS,
     HOLD_WEEKS_CHOICES,
     Action,
-    Direction,
     Outlook,
     REWARD_GOAL_EPS,
     SizingSlots,
@@ -255,7 +254,7 @@ def _sizing_block(
         risk_fraction=settings.risk_fraction,
         entry=final.levels.entry,
         stop_loss=final.levels.stop_loss,
-        direction=final.direction,
+        outlook=final.outlook,
         market=market,
     )
     result = size_position(inputs)
@@ -401,7 +400,7 @@ def run_tiered_analysis(
             # one-call outlook over the same dimensions the debate
             # reads (all six since 2026-08-16, both news cards included),
             # judged against the same max hold time. No outlook
-            # (LLM down, bad replies) → UNKNOWN direction, fail-loud
+            # (LLM down, bad replies) → UNKNOWN outlook, fail-loud
             # warnings, no fallback — same contract as the debate.
             with tracker.stage("tier1_analysis"):
                 quick = (quick_judge or QuickJudge()).run(
@@ -412,7 +411,7 @@ def run_tiered_analysis(
                 tier=1,
                 symbol=symbol,
                 market=market,
-                direction=outlook.direction if outlook else Direction.UNKNOWN,
+                outlook=outlook.outlook if outlook else Outlook.UNKNOWN,
                 # The outlook is the 0-10 score in debate_detail; the
                 # legacy sentiment-score/confidence columns stay empty
                 # (same shape as tier-2 reports).
@@ -434,7 +433,7 @@ def run_tiered_analysis(
                 tier=1,
                 symbol=symbol,
                 market=market,
-                        direction=Direction.UNKNOWN,
+                outlook=Outlook.UNKNOWN,
                 levels=levels,
                 levels_detail=levels_detail,
                 dimensions=dimensions,
@@ -449,14 +448,14 @@ def run_tiered_analysis(
                 final = (tier2_stage or Tier2Stage()).run(state)
             state.reports[2] = final
 
-        # AI plan review (BUY outlooks only): the deterministic checks
+        # AI plan review (bullish outlooks only): the deterministic checks
         # may trim the share count or move stop/target with cited
         # reasons, and produce the plan card's structured warnings.
         review = None
-        if final.direction is Direction.BUY and bases.get("entry") is not None:
+        if final.outlook is Outlook.BULLISH and bases.get("entry") is not None:
             with tracker.stage("trade_plan"):
                 review = review_plan(
-                    symbol, dimensions, bases, final.direction, market,
+                    symbol, dimensions, bases, final.outlook, market,
                     sizing_settings,
                     summarizer=plan_summarizer, hold_weeks=hold_weeks,
                 )
@@ -489,7 +488,7 @@ def run_tiered_analysis(
     if final.tier == 1:
         report = final
 
-    outlook = Outlook.from_direction(final.direction)
+    outlook = final.outlook
     # Buy now vs buy later (owner decision 2026-08-23): the final plan's
     # actual reward-to-risk against the user's goal — the same comparison
     # the plan card's reward-below-goal warning makes.

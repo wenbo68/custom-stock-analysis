@@ -11,7 +11,7 @@ import type { UiTextKey } from '../../i18n/uiText';
 import { cn } from '../../utils/cn';
 import { flashElement, jumpToMetric } from '../tiered/termHelpers';
 import { stripInlineRefs } from './altFormat';
-import { FORMULA_LINE, FORMULA_RESULT } from './altStyles';
+import { FORMULA_LINE, FORMULA_RESULT, OUTLOOK_TEXT } from './altStyles';
 import {
   AltFold,
   AltModal,
@@ -27,11 +27,6 @@ import {
 // the 1-5 significance median, and the final weighted score. Bullets
 // struck by the code's citation check or outvoted are crossed out.
 // Display order of the dimensions is the owner's (2026-08-19).
-const DIRECTION_TEXT: Record<string, string> = {
-  bullish: 'text-emerald-300',
-  bearish: 'text-red-300',
-};
-
 const DIMENSION_ORDER = [
   'technicals',
   'fundamentals',
@@ -356,8 +351,8 @@ const VoteItem = ({
     >
       <span className="flex items-baseline gap-1.5 whitespace-nowrap">
         <span className="font-mono text-gray-500">{item.id}</span>
-        <span className={cn('font-semibold', DIRECTION_TEXT[item.direction])}>
-          {t(item.direction === 'bullish' ? 'tiered.tree.bullish' : 'tiered.tree.bearish')}
+        <span className={cn('font-semibold', OUTLOOK_TEXT[item.bullet_outlook])}>
+          {t(item.bullet_outlook === 'bullish' ? 'tiered.tree.bullish' : 'tiered.tree.bearish')}
         </span>
         {item.weight != null ? (
           // The median badge — the bare number; the modal lists every score.
@@ -419,6 +414,8 @@ const EXPLAIN_KEYS = [
   'tiered.tree.explain5',
   'tiered.tree.explain6',
   'tiered.tree.explain7',
+  'tiered.tree.explain8',
+  'tiered.tree.explain9',
 ] as const;
 
 // The final-score arithmetic (10 × bullish weight ÷ total weight) —
@@ -486,13 +483,12 @@ const VoteTree = ({ detail }: { detail: TieredDebateDetail }) => {
               {EXPLAIN_KEYS.map((key) => (
                 <li key={key}>{t(key)}</li>
               ))}
-              <li>{t('tiered.tree.explainWeights5')}</li>
             </ol>
           </div>
 
           {groups.map((group) => {
             const counted = group.items.filter((item) => item.final_status === 'counted');
-            const up = counted.filter((item) => item.direction === 'bullish').length;
+            const up = counted.filter((item) => item.bullet_outlook === 'bullish').length;
             const down = counted.length - up;
             return (
               <div key={group.dimension}>

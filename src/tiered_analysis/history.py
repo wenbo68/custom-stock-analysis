@@ -233,7 +233,7 @@ def _row_summary(row: Any) -> Dict[str, Any]:
 
 
 def _result_digest(row: Any) -> Dict[str, Any]:
-    """The report facts the run list shows per row — final direction,
+    """The report facts the run list shows per row — final outlook,
     computed share count, and the tier the run went to — without shipping
     the full report. ``shares`` mirrors the report card: 0 when sizing ran
     but bought nothing, None (shown as a dash) when the run has no sizing
@@ -242,7 +242,6 @@ def _result_digest(row: Any) -> Dict[str, Any]:
     run used, for the row's capital and risk columns. Anything unreadable
     degrades to None rather than breaking the list."""
     digest: Dict[str, Any] = {
-        "direction": None,
         "outlook": None,
         "shares": None,
         "tier": None,
@@ -263,9 +262,6 @@ def _result_digest(row: Any) -> Dict[str, Any]:
         return digest
     if not isinstance(result, dict):
         return digest
-    final = result.get("final")
-    direction = final.get("direction") if isinstance(final, dict) else None
-    digest["direction"] = direction or result.get("direction")
     digest["outlook"] = result.get("outlook")
     sizing = result.get("sizing")
     if isinstance(sizing, dict):

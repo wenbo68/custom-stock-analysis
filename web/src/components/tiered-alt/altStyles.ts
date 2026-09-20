@@ -1,19 +1,10 @@
-import type { TieredResult } from '../../api/tiered';
-
 // showplayer badge recipe: soft tinted fill + matching inset ring, no border.
 export const TAG_BASE =
   'inline-flex items-center rounded px-[9px] py-0.5 text-xs font-semibold ring-1 ring-inset';
 
-// Outlooks render as plain colored text, not pills.
-export const DIRECTION_TEXT: Record<TieredResult['direction'], string> = {
-  buy: 'text-emerald-300',
-  hold: 'text-amber-300',
-  sell: 'text-red-300',
-  unknown: 'text-gray-400',
-};
-
-// Outlooks share the outlook palette: bullish = buy green, neutral =
-// hold amber, bearish = sell red.
+// Outlooks render as plain colored text, not pills: bullish green,
+// neutral amber, bearish red. The debate tree's per-bullet outlooks
+// share the same palette.
 export const OUTLOOK_TEXT: Record<string, string> = {
   bullish: 'text-emerald-300',
   neutral: 'text-amber-300',

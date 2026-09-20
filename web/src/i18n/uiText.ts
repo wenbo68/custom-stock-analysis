@@ -197,7 +197,7 @@ const zh = {
   'tiered.levelModal.noBase': '本次运行缺少计算该价位所需的数据，没有公式基准。',
   'tiered.levelModal.references': '参考依据',
   'tiered.help.debate':
-    '两位分析师各自独立通读四份报告，列出全部看多与看空证据；一次合并调用把两份清单对齐去重。\n每条证据引用的数值都由代码逐一校验：数值必须与报告显示的完全一致、且出现在句子里；不合格的引用会退回给 AI 修正（最多 3 次），仍失败的整条划线剔除。\n每条证据按多数票决定去留（最多 3 票）：作者自动算一张有效票，两位分析师都独立列出的证据直接确认；只有一位列出的证据由复核 AI 投第二票；1 比 1 平局时由决胜票裁定。\n代码按看多/看空条数算出得分——AI 不经手任何数字。',
+    '两个 AI 各自独立地给六份报告（技术面、基本面、持仓面、宏观经济、公司新闻、世界新闻）的每个字段打上看多、看空或中性标签；每个看多或看空标签变成一条单句证据，并附 1-5 的重要性评分。\n每条证据引用的数值都由代码逐一校验：数值必须与报告显示的完全一致、且出现在句子里；不合格的引用会退回给 AI 修正（最多 3 次），仍失败的整条划线剔除。\n代码合并两份评分表，每条证据按多数票决定去留（最多 3 票）：作者自动算一张有效票，两个 AI 标签相同的字段直接确认；只有一位列出的证据由复核 AI 投第二票；1 比 1 平局时由决胜票裁定。\n代码按重要性评分加权看多/看空证据算出得分——AI 不经手任何数字。最后一次 AI 调用根据投票结果撰写摘要，得分不依赖于它。',
   'tiered.debate.noOutlook': '辩论未产生展望——请重新运行（详见警告）。',
   'tiered.tree.bullish': '看多',
   'tiered.tree.bearish': '看空',
@@ -207,15 +207,24 @@ const zh = {
   'tiered.tree.finalScore': '最终展望分',
   'tiered.tree.transcript': '详情',
   'tiered.tree.howItWorks': '规则说明',
-  'tiered.tree.explain1': '两个 AI 各自独立通读四份报告，分别列出全部看多与看空证据。',
+  'tiered.tree.explain1':
+    '两个 AI 各自独立地给六份报告（技术面、基本面、持仓面、宏观经济、公司新闻、世界新闻）里的每一个字段打上看多、看空或中性标签，互不知晓对方的结果。',
   'tiered.tree.explain2':
-    '代码逐条核对引用的数值；不合格的引用退回修正，仍失败的整条划线剔除，不计入任何得分。',
+    '看多或看空标签会变成一条引用该字段数值的单句证据；中性标签不产生任何证据。每个经手证据的 AI 还会给它打 1-5 的重要性评分（1 = 非常次要，5 = 非常重要）并说明理由。',
   'tiered.tree.explain3':
-    '两份清单合并。两个 AI 都列出的证据已经达成一致——无需再检查，因此没有任何检查标记。',
-  'tiered.tree.explain4': '只有一个 AI 列出的证据由另一个 AI 检查——即证据后的 ✓ 或 ✗；点击标记可查看理由。',
-  'tiered.tree.explain5': '若该检查为无效，该证据 1 比 1 平票，再由一个 AI 投出决胜票——即第二个标记。',
-  'tiered.tree.explain6': '带有两个 ✗ 的证据被否决并划线；未划线的证据全部计入。',
-  'tiered.tree.explain7': '最终得分 = 10 × 看多条数 ÷ 存活总条数：低于 4 卖出，4–6 持有，高于 6 买入。',
+    '代码逐条核对证据引用的数值；不合格的引用退回给 AI 修正（最多 3 次），仍失败的整条划线剔除，不计入任何得分。',
+  'tiered.tree.explain4':
+    '代码合并两份评分表。两个 AI 给出相同标签的字段合成一条有两位作者的证据——已经 2 比 0 达成一致，因此没有任何检查标记。',
+  'tiered.tree.explain5':
+    '只有一个 AI 列出的证据（或两个 AI 标签相反的字段）由第三次 AI 调用检查——即证据后的 ✓ 或 ✗；点击标记可查看理由。',
+  'tiered.tree.explain6':
+    '若该检查为无效，该证据 1 比 1 平票，再由一次 AI 调用投出决胜票——即第二个标记。没有决胜票的平票不计入得分。',
+  'tiered.tree.explain7':
+    '带有两个 ✗ 的证据被否决并划线；未划线的证据全部计入，权重取它收到的全部 1-5 评分的中位数。点击评分可查看理由。',
+  'tiered.tree.explain8':
+    '代码算出最终得分：10 × 看多证据的权重和 ÷ 全部计入证据的权重和。低于 4 看空，4–6 中性，高于 6 看多。没有任何 AI 写分数。',
+  'tiered.tree.explain9':
+    '最后一次 AI 调用根据投票后的证据清单撰写摘要；摘要里的数字同样经过引用核对，即使摘要失败，代码算出的得分也不受影响。',
   'tiered.tree.codeCheck': '代码检查结果',
   'tiered.note.listerDegradedRole': '{role}——评分表连续不合规，本次只使用另一位分析师的评分表。',
   'tiered.note.sheetsVoided': '两位分析师的评分表连续不合规——深度分析作废。',
@@ -428,8 +437,6 @@ const zh = {
   'tiered.tree.totalWeight': '总权重和',
 
   // ---- 层级 2 详情（v11：1-5 评分 + 评分理由）----
-  'tiered.tree.explainWeights5':
-    '每位 AI 还会给每条证据打 1-5 的重要性评分（1 = 非常次要，5 = 非常重要）；证据的最终分是所有评分的中位数，总分按它加权：10 × 看多证据的权重和 ÷ 全部证据的权重和。点击分数或勾叉可看理由。',
   'tiered.tree.lister': '列出者 {n}',
   'tiered.tree.checker': '核查员 {n}',
   'tiered.tree.validityLine': '结果：{value}',
@@ -710,7 +717,7 @@ const en: Record<UiTextKey, string> = {
     'This run lacked the data needed to compute this level, so there is no formula base.',
   'tiered.levelModal.references': 'References',
   'tiered.help.debate':
-    'Two analysts independently read the four reports and each lists ALL the evidence — bullish and bearish; a merge call lines the two lists up.\nCode verifies every cited value: it must match the report’s displayed number exactly and appear in the sentence; failed citations go back to the AI to fix (up to 3 times), and bullets still broken are crossed out and dropped.\nEach bullet lives or dies by majority vote (at most 3 votes): its author counts as one valid vote, so a bullet both analysts listed independently is confirmed on the spot; a checker AI casts the second vote on single-author bullets; a deciding vote breaks 1-1 ties.\nCode counts the surviving bullish vs bearish bullets into the score — no AI touches the numbers.',
+    'Two AIs independently grade every field of the six reports (technicals, fundamentals, positioning, macro economy, company news, world news) as bullish, bearish or neutral; each bullish or bearish grade becomes a one-sentence evidence bullet with a 1-5 importance rating.\nCode verifies every cited value: it must match the report’s displayed number exactly and appear in the sentence; failed citations go back to the AI to fix (up to 3 times), and bullets still broken are crossed out and dropped.\nCode merges the two sheets, and each bullet lives or dies by majority vote (at most 3 votes): its author counts as one valid vote, so a field both AIs graded the same way is confirmed on the spot; a checker AI casts the second vote on single-author bullets; a deciding vote breaks 1-1 ties.\nCode weighs the surviving bullish vs bearish bullets by their importance ratings into the score — no AI touches the numbers. A last AI call writes the summary from the voted list; the score never depends on it.',
   'tiered.debate.noOutlook':
     'The debate produced no outlook — re-run the stock (see Warnings).',
   'tiered.tree.bullish': 'bullish',
@@ -722,19 +729,23 @@ const en: Record<UiTextKey, string> = {
   'tiered.tree.transcript': 'Details',
   'tiered.tree.howItWorks': 'How this works',
   'tiered.tree.explain1':
-    'Two AIs read the four reports independently and each lists every piece of bullish and bearish evidence.',
+    'Two AIs each independently grade every field of the six reports (technicals, fundamentals, positioning, macro economy, company news, world news) as bullish, bearish or neutral. Neither sees the other’s work.',
   'tiered.tree.explain2':
-    'Code verifies every cited number against the reports; failed citations go back to be fixed, and bullets that cannot be fixed are crossed out and count toward nothing.',
+    'A bullish or bearish grade becomes a one-sentence evidence bullet that quotes the field’s value; a neutral grade produces nothing. Every AI that handles a bullet also rates its importance 1-5 (1 = very minor, 5 = very important) and gives a reason.',
   'tiered.tree.explain3':
-    'The two lists are merged. A bullet listed by BOTH AIs is already agreed on — it needs no further checking, so it carries no check marks.',
+    'Code verifies every number a bullet cites against the reports; failed citations go back to the AI to fix (up to 3 times), and a bullet still broken is crossed out and counts toward nothing.',
   'tiered.tree.explain4':
-    'A bullet only one AI listed is checked by another AI — the ✓ or ✗ after it; click the mark to read the reasoning.',
+    'Code merges the two grade sheets. A field both AIs graded the same way becomes one bullet with two authors — already agreed 2-0, so it carries no check marks.',
   'tiered.tree.explain5':
-    'If that check says invalid, the bullet is tied 1-1 and one more AI casts the deciding vote — the second mark.',
+    'A bullet only one AI listed (or a field the two graded opposite ways) is checked by a third AI call — the ✓ or ✗ after it; click the mark to read the reasoning.',
   'tiered.tree.explain6':
-    'A bullet with two ✗ loses the vote and is crossed out; everything not crossed out counts.',
+    'If that check says invalid, the bullet is tied 1-1 and one more AI call casts the deciding vote — the second mark. A tie with no deciding vote is left out of the score.',
   'tiered.tree.explain7':
-    'The final score is 10 × bullish ÷ total surviving bullets: below 4 sell, 4–6 hold, above 6 buy.',
+    'A bullet with two ✗ loses the vote and is crossed out; everything not crossed out counts, with a weight equal to the median of all its 1-5 ratings. Click a rating to read why.',
+  'tiered.tree.explain8':
+    'Code computes the final score: 10 × the bullish bullets’ weight ÷ all counted bullets’ weight. Below 4 bearish, 4–6 neutral, above 6 bullish. No AI writes a score.',
+  'tiered.tree.explain9':
+    'A last AI call writes the summary from the voted list; its numbers are citation-checked the same way, and if it fails the computed score still stands.',
   'tiered.tree.codeCheck': 'code check result',
   'tiered.note.listerDegradedRole':
     '{role} — the grade sheet kept coming back invalid; this run used the other analyst’s sheet only.',
@@ -964,8 +975,6 @@ const en: Record<UiTextKey, string> = {
   'tiered.tree.totalWeight': 'total weight',
 
   // ---- Tier-2 details (v11: 1-5 scores + score reasons) ----
-  'tiered.tree.explainWeights5':
-    'Each AI also rates every bullet’s importance 1-5 (1 = very minor, 5 = very important); a bullet’s final score is the median of its ratings, and the total score is weighted by it: 10 × the bullish bullets’ weight ÷ all bullets’ weight. Click a score or a mark for the reasoning.',
   'tiered.tree.lister': 'Lister {n}',
   'tiered.tree.checker': 'Checker {n}',
   'tiered.tree.validityLine': 'result: {value}',

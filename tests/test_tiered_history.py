@@ -46,7 +46,7 @@ def isolated_db(tmp_path):
 # (2026-08-19) and new runs never write the key, but rows persisted
 # before the retirement still carry it — history must reload such
 # results verbatim, never choke on the stray key.
-RESULT = {"symbol": "AAPL", "direction": "hold", "score": 56,
+RESULT = {"symbol": "AAPL", "outlook": "neutral", "score": 56,
           "dimensions": [{"dimension": "technicals", "coverage": "full"}]}
 
 
@@ -64,7 +64,7 @@ class TestTieredRunHistory:
         mark_done("task-1", RESULT)
         run = get_run("task-1")
         assert run["status"] == "done"
-        assert run["result"]["direction"] == "hold"
+        assert run["result"]["outlook"] == "neutral"
         assert run["result"]["dimensions"][0]["coverage"] == "full"
 
     def test_mark_failed_stores_error(self, isolated_db):
@@ -88,24 +88,25 @@ class TestTieredRunHistory:
         # list is lightweight: no full result payloads
         assert all("result" not in r for r in runs)
 
-    def test_list_digest_has_direction_shares_and_tier(self, isolated_db):
+    def test_list_digest_has_outlook_shares_and_tier(self, isolated_db):
         create_run("task-1", "AAPL")
         mark_done("task-1", {**RESULT,
                              "depth": 3,
-                             "final": {"direction": "buy", "tier": 3},
+                             "outlook": "bullish",
+                             "final": {"outlook": "bullish", "tier": 3},
                              "sizing": {"shares": 41,
                                         "inputs": {"capital": 100000,
                                                    "risk_fraction": 0.01,
                                                    "reward_risk": 2.0}}})
         create_run("task-2", "NVDA")  # still running — no digest yet
         runs = {r["task_id"]: r for r in list_runs()}
-        assert runs["task-1"]["direction"] == "buy"
+        assert runs["task-1"]["outlook"] == "bullish"
         assert runs["task-1"]["shares"] == 41
         assert runs["task-1"]["tier"] == 3
         assert runs["task-1"]["capital"] == 100000
         assert runs["task-1"]["risk_fraction"] == 0.01
         assert runs["task-1"]["reward_risk"] == 2.0
-        assert runs["task-2"]["direction"] is None
+        assert runs["task-2"]["outlook"] is None
         assert runs["task-2"]["shares"] is None
         assert runs["task-2"]["tier"] is None
         assert runs["task-2"]["capital"] is None
@@ -136,7 +137,8 @@ class TestTieredRunHistory:
         })
         mark_done("task-1", {**RESULT,
                              "depth": 2,
-                             "final": {"direction": "buy", "tier": 2},
+                             "outlook": "bullish",
+                             "final": {"outlook": "bullish", "tier": 2},
                              "hold_weeks": 2,
                              "sizing": {"shares": 51,
                                         "inputs": {"capital": 50000,
@@ -156,10 +158,10 @@ class TestTieredRunHistory:
         # card
         create_run("task-2", "MSFT")
         mark_done("task-2", {**RESULT, "depth": 2,
-                             "final": {"direction": "hold", "tier": 2},
+                             "final": {"outlook": "neutral", "tier": 2},
                              "sizing": {"shares": None}})
         runs = {r["task_id"]: r for r in list_runs()}
-        assert runs["task-1"]["direction"] == "hold"
+        assert runs["task-1"]["outlook"] == "neutral"
         assert runs["task-1"]["shares"] is None
         assert runs["task-1"]["tier"] == 1
         assert runs["task-2"]["shares"] == 0

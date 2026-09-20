@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from src.tiered_analysis.debate import direction_from_final
+from src.tiered_analysis.debate import outlook_from_final
 from src.tiered_analysis.earnings import EarningsInfo
 from src.tiered_analysis.integration import (
     dsa_bars_loader,
@@ -32,7 +32,7 @@ from src.tiered_analysis.providers.base import (
     Market,
     SourceKind,
 )
-from src.tiered_analysis.schema import Direction, SniperLevels
+from src.tiered_analysis.schema import SniperLevels
 
 
 def _daily_df(rows):
@@ -112,7 +112,7 @@ class _FakeQuickJudge:
         if outlook:
             self._result = QuickResult(
                 outlook=QuickOutlook(
-                    direction=direction_from_final(score),
+                    outlook=outlook_from_final(score),
                     final_score=score,
                     summary=summary,
                 ),
@@ -146,7 +146,7 @@ class TestRunTieredAnalysis(unittest.TestCase):
     def test_dimensions_attached(self):
         outcome, _ = self._run()
         report = outcome.report
-        self.assertEqual(report.direction, Direction.BUY)
+        self.assertEqual(report.outlook, Outlook.BULLISH)
         self.assertEqual([d.dimension for d in report.dimensions], ["technicals"])
 
     def test_crashing_provider_becomes_warned_empty_dimension(self):
@@ -186,7 +186,7 @@ class TestRunTieredAnalysis(unittest.TestCase):
             warnings=["quick judge LLM call failed: LLM down"],
         )
         outcome, _ = self._run(judge=judge)
-        self.assertEqual(outcome.report.direction, Direction.UNKNOWN)
+        self.assertEqual(outcome.report.outlook, Outlook.UNKNOWN)
         self.assertTrue(outcome.report.dimensions)
         self.assertTrue(any("LLM down" in w for w in outcome.report.warnings))
 
@@ -235,10 +235,10 @@ def _technicals_dim_with_levels():
     )
 
 
-def _debate_outlook(direction=Direction.BUY, score=7.4):
+def _debate_outlook(outlook=Outlook.BULLISH, score=7.4):
     from src.tiered_analysis.debate import DebateOutlook
 
-    return DebateOutlook(direction=direction, final_score=score,
+    return DebateOutlook(outlook=outlook, final_score=score,
                          summary="the vote settled it", initial_score=score,
                          pools={})
 
@@ -293,7 +293,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         self.assertEqual(judge_calls, [])
         self.assertEqual(sorted(outcome.state.reports), [1, 2])
         self.assertEqual(outcome.final_report.tier, 2)
-        self.assertEqual(outcome.final_report.direction, Direction.BUY)
+        self.assertEqual(outcome.final_report.outlook, Outlook.BULLISH)
         self.assertEqual(debate_engine.calls, ["AAPL"])
         # Skipping the blob is the documented depth-2 contract, not a data
         # problem — the foundation report must NOT warn about it.
@@ -304,7 +304,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
 
     def test_depth_2_failure_has_no_tier1_fallback(self):
         outcome, _, _, _ = self._run(depth=2, debate_outlook=None)
-        self.assertEqual(outcome.final_report.direction, Direction.UNKNOWN)
+        self.assertEqual(outcome.final_report.outlook, Outlook.UNKNOWN)
         self.assertEqual(outcome.outlook, Outlook.UNKNOWN)
         self.assertEqual(outcome.action, Action.UNKNOWN)
         self.assertTrue(any("re-run" in w
@@ -338,9 +338,9 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         self.assertEqual(outcome.final_report.sizing.shares, 166.666)
         self.assertEqual(logged[0].sizing.shares, 166.666)
 
-    def test_hold_direction_refuses_sizing_and_maps_to_no_trade(self):
+    def test_neutral_outlook_refuses_sizing_and_maps_to_no_trade(self):
         outcome, _, _, _ = self._run(quick_score=5.0)
-        self.assertEqual(outcome.sizing["reason_code"], "not_a_buy")
+        self.assertEqual(outcome.sizing["reason_code"], "not_bullish")
         self.assertEqual(outcome.outlook, Outlook.NEUTRAL)
         self.assertEqual(outcome.action, Action.NO_TRADE)
 
@@ -360,13 +360,13 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
 
     def test_bearish_is_no_trade_and_sizes_nothing(self):
         outcome, _, _, _ = self._run(
-            depth=2, debate_outlook=_debate_outlook(Direction.SELL, 2.5))
+            depth=2, debate_outlook=_debate_outlook(Outlook.BEARISH, 2.5))
         self.assertEqual(outcome.outlook, Outlook.BEARISH)
         self.assertEqual(outcome.action, Action.NO_TRADE)
         # The ownership input is gone (2026-09-16): no held-shares block.
         self.assertNotIn("ownership", outcome.sizing)
         self.assertNotIn("sell_shares", outcome.sizing)
-        self.assertIn(outcome.sizing["reason_code"], ("not_a_buy", "sizing_off"))
+        self.assertIn(outcome.sizing["reason_code"], ("not_bullish", "sizing_off"))
 
     def test_plan_review_emits_structured_warnings_and_shares_detail(self):
         outcome, _, _, _ = self._run(

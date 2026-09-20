@@ -153,7 +153,8 @@ export type TieredDebateAuthorVote = {
 export type TieredDebateItem = {
   id: string;
   dimension: string;
-  direction: 'bullish' | 'bearish';
+  // Which way this one bullet leans; the run's outlook is counted from these.
+  bullet_outlook: 'bullish' | 'bearish';
   claim: string;
   links?: TieredDebateLink[];
   struck?: boolean;
@@ -240,7 +241,7 @@ export type TieredDebateDetail = {
   format?: number;
   items?: TieredDebateItem[];
   outlook: {
-    direction: string;
+    outlook: TieredOutlook;
     summary: string;
     // The fixed-outline report the summary stage fills (summary + one
     // group per dimension); `summary` above is its flat-text rendering.
@@ -269,8 +270,7 @@ export type TieredEarnings = {
 // The deepest tier's outlook in summary form — what the run ends on.
 export type TieredFinal = {
   tier: number;
-  direction: 'buy' | 'hold' | 'sell' | 'unknown';
-  outlook?: TieredOutlook;
+  outlook: TieredOutlook;
   action?: TieredAction;
   confidence: string | null;
   levels: TieredLevels;
@@ -278,7 +278,7 @@ export type TieredFinal = {
 
 export type TieredTierSection = {
   tier: number;
-  direction: 'buy' | 'hold' | 'sell' | 'unknown';
+  outlook: TieredOutlook;
   confidence: string | null;
   score: number | null;
   levels: TieredLevels;
@@ -339,7 +339,6 @@ export type TieredResult = {
   symbol: string;
   market: string;
   tier: number;
-  direction: 'buy' | 'hold' | 'sell' | 'unknown';
   score: number | null;
   confidence: string | null;
   levels: TieredLevels;
@@ -381,9 +380,6 @@ export type TieredRunSummary = {
   // after a failure, or on rows stored before the backend sent these.
   // shares mirrors the report card: 0 = sizing ran but bought nothing,
   // null = the run has no sizing block (shown as a dash).
-  direction?: 'buy' | 'hold' | 'sell' | 'unknown' | null;
-  // Outlook digest: stored on new runs; the backend maps old runs'
-  // buy/hold/sell to bullish/neutral/bearish so the filter is uniform.
   outlook?: TieredOutlook | null;
   shares?: number | null;
   // The tier the run went to (1-3); null while running/failed.

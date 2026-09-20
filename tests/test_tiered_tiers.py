@@ -11,7 +11,7 @@ import unittest
 
 from src.tiered_analysis.providers.base import Market
 from src.tiered_analysis.schema import (
-    Direction,
+    Outlook,
     SizingSlots,
     TierReport,
     coerce_price,
@@ -75,19 +75,12 @@ class TestSchema(unittest.TestCase):
         self.assertIsNone(slots.shares)
         self.assertTrue(slots.is_empty)
 
-    def test_direction_from_decision_type(self):
-        self.assertEqual(Direction.from_decision_type("buy"), Direction.BUY)
-        self.assertEqual(Direction.from_decision_type("hold"), Direction.HOLD)
-        self.assertEqual(Direction.from_decision_type("sell"), Direction.SELL)
-        self.assertEqual(Direction.from_decision_type("nonsense"), Direction.UNKNOWN)
-        self.assertEqual(Direction.from_decision_type(None), Direction.UNKNOWN)
-
     def test_tier_report_sizing_always_present_and_empty_in_v1(self):
         report = TierReport(
             tier=1,
             symbol="AAPL",
             market=Market.US,
-            direction=Direction.BUY,
+            outlook=Outlook.BULLISH,
         )
         self.assertTrue(report.sizing.is_empty)
 
@@ -96,18 +89,18 @@ class TestTier2Failures(unittest.TestCase):
     def test_tier2_without_foundation_report_fails_unknown(self):
         report = Tier2Stage().run(TierState(symbol="AAPL", market=Market.US))
         self.assertEqual(report.tier, 2)
-        self.assertEqual(report.direction, Direction.UNKNOWN)
+        self.assertEqual(report.outlook, Outlook.UNKNOWN)
         self.assertTrue(any("foundation" in w for w in report.warnings))
 
-    def test_tier2_failure_never_falls_back_to_tier1_direction(self):
+    def test_tier2_failure_never_falls_back_to_tier1_outlook(self):
         # Outlook redesign: a failed vote is UNKNOWN, never the blob's call.
         state = TierState(symbol="AAPL", market=Market.US)
         state.reports[1] = TierReport(
             tier=1, symbol="AAPL", market=Market.US,
-            direction=Direction.BUY,
+            outlook=Outlook.BULLISH,
         )
         report = Tier2Stage().run(state)  # no dimensions -> failure
-        self.assertEqual(report.direction, Direction.UNKNOWN)
+        self.assertEqual(report.outlook, Outlook.UNKNOWN)
         self.assertTrue(any("re-run" in w for w in report.warnings))
 
 

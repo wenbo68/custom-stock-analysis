@@ -18,7 +18,7 @@ from src.tiered_analysis.quick_judge import (
     QuickResult,
     QuickOutlook,
 )
-from src.tiered_analysis.schema import Direction
+from src.tiered_analysis.schema import Outlook
 
 
 def _dims():
@@ -76,21 +76,21 @@ class TestPrompt(unittest.TestCase):
 
 
 class TestOutlook(unittest.TestCase):
-    def test_score_maps_to_direction_with_debate_cutpoints(self):
+    def test_score_maps_to_outlook_with_debate_cutpoints(self):
         cases = [
-            (7.4, Direction.BUY),
-            (HOLD_MAX, Direction.HOLD),
-            (5.0, Direction.HOLD),
-            (SELL_BELOW - 0.1, Direction.SELL),
-            (0.0, Direction.SELL),
-            (10.0, Direction.BUY),
+            (7.4, Outlook.BULLISH),
+            (HOLD_MAX, Outlook.NEUTRAL),
+            (5.0, Outlook.NEUTRAL),
+            (SELL_BELOW - 0.1, Outlook.BEARISH),
+            (0.0, Outlook.BEARISH),
+            (10.0, Outlook.BULLISH),
         ]
         for score, expected in cases:
             result = _run(
                 lambda p, s=score: f'{{"score": {s}, "summary": "Reasoning."}}'
             )
             self.assertIsNotNone(result.outlook, score)
-            self.assertEqual(result.outlook.direction, expected, score)
+            self.assertEqual(result.outlook.outlook, expected, score)
             self.assertEqual(result.outlook.final_score, round(score, 2))
 
     def test_score_rounds_to_two_decimals(self):
@@ -122,7 +122,7 @@ class TestFailures(unittest.TestCase):
 
         self.assertEqual(len(prompts), 2)
         self.assertIn("rejected", prompts[1])
-        self.assertEqual(result.outlook.direction, Direction.SELL)
+        self.assertEqual(result.outlook.outlook, Outlook.BEARISH)
         self.assertTrue(any("rejected" in w for w in result.warnings))
 
     def test_out_of_range_or_missing_fields_are_rejected(self):
@@ -179,12 +179,12 @@ class TestDetail(unittest.TestCase):
     def test_detail_carries_format_and_outlook_score(self):
         detail = QuickResult(
             outlook=QuickOutlook(
-                direction=Direction.BUY, final_score=7.25, summary="Up."
+                outlook=Outlook.BULLISH, final_score=7.25, summary="Up."
             )
         ).to_detail()
         self.assertEqual(detail["format"], QUICK_DETAIL_FORMAT)
         self.assertEqual(detail["outlook"]["final_score"], 7.25)
-        self.assertEqual(detail["outlook"]["direction"], "buy")
+        self.assertEqual(detail["outlook"]["outlook"], "bullish")
 
     def test_failed_result_detail_has_no_outlook(self):
         detail = QuickResult(warnings=["boom"]).to_detail()

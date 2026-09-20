@@ -160,21 +160,6 @@ export const plainNumber = (value: number): string => String(Number(value));
 export const computedCellId = (key: string): string => `alt-level-computed-${key}`;
 export const adjustedCellId = (key: string): string => `alt-level-adjusted-${key}`;
 
-// The outlook word for a tier outlook — the outlook redesign renamed
-// buy/hold/sell to bullish/neutral/bearish everywhere the UI speaks.
-export const directionOutlook = (direction: string | null | undefined): string => {
-  switch (direction) {
-    case 'buy':
-      return 'bullish';
-    case 'hold':
-      return 'neutral';
-    case 'sell':
-      return 'bearish';
-    default:
-      return 'unknown';
-  }
-};
-
 // The citation markup the backend prompts describe — the model is told
 // to put links in a separate array, but sometimes writes the markup
 // inline in the sentence instead: {{ref: "technicals.close", "value":

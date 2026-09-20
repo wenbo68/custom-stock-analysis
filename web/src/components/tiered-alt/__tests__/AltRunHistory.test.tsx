@@ -12,7 +12,6 @@ function makeRun(id: string, overrides: Partial<TieredRunSummary> = {}): TieredR
     error: null,
     created_at: '2026-07-10T04:00:00',
     updated_at: null,
-    direction: 'buy',
     outlook: 'bullish',
     shares: 41,
     tier: 1,
@@ -52,7 +51,7 @@ const titleOf = (text: RegExp) =>
 describe('AltRunHistory', () => {
   it('shows a queued row with its place in line and explains it when expanded', () => {
     renderHistory({
-      runs: [makeRun('q1', { status: 'queued', queue_ahead: 2, direction: null, shares: null })],
+      runs: [makeRun('q1', { status: 'queued', queue_ahead: 2, shares: null })],
       expandedTaskId: 'q1',
     });
 
@@ -62,7 +61,7 @@ describe('AltRunHistory', () => {
   });
 
   it('shows a queued row without a count when the backend sends none', () => {
-    renderHistory({ runs: [makeRun('q1', { status: 'queued', direction: null })] });
+    renderHistory({ runs: [makeRun('q1', { status: 'queued' })] });
 
     expect(screen.getByText(/^排队中$|^Queued$/)).toBeInTheDocument();
   });
@@ -74,7 +73,6 @@ describe('AltRunHistory', () => {
         makeRun('t2', {
           stock_code: 'NVDA',
           status: 'running',
-          direction: null,
           outlook: null,
           shares: null,
           tier: null,
@@ -108,8 +106,8 @@ describe('AltRunHistory', () => {
     renderHistory({
       runs: [
         makeRun('t1', { stock_code: 'MSFT', outlook: 'bullish' }),
-        makeRun('t2', { stock_code: 'NVDA', status: 'failed', direction: null, outlook: null }),
-        makeRun('t3', { stock_code: 'AMD', direction: 'unknown', outlook: 'unknown' }),
+        makeRun('t2', { stock_code: 'NVDA', status: 'failed', outlook: null }),
+        makeRun('t3', { stock_code: 'AMD', outlook: 'unknown' }),
       ],
     });
     fireEvent.focus(screen.getByPlaceholderText(/输入展望|Enter outlook/));
@@ -144,7 +142,7 @@ describe('AltRunHistory', () => {
     renderHistory({
       runs: [
         makeRun('t1', { created_at: todayUtc }),
-        makeRun('t2', { status: 'running', created_at: todayUtc, direction: null, outlook: null }),
+        makeRun('t2', { status: 'running', created_at: todayUtc, outlook: null }),
       ],
     });
     expect(screen.queryByTestId('alt-run-date-stale')).not.toBeInTheDocument();
@@ -204,8 +202,8 @@ describe('AltRunHistory', () => {
     renderHistory({
       runs: [
         // a new run stores its outlook; an old run maps hold → neutral
-        makeRun('t1', { stock_code: 'MSFT', direction: 'buy', outlook: 'bullish' }),
-        makeRun('t2', { stock_code: 'NVDA', direction: 'hold', outlook: 'neutral' }),
+        makeRun('t1', { stock_code: 'MSFT', outlook: 'bullish' }),
+        makeRun('t2', { stock_code: 'NVDA', outlook: 'neutral' }),
       ],
     });
 
@@ -223,7 +221,7 @@ describe('AltRunHistory', () => {
     renderHistory({
       runs: [
         makeRun('t1', { stock_code: 'MSFT' }),
-        makeRun('t2', { stock_code: 'NVDA', status: 'failed', direction: null, outlook: null }),
+        makeRun('t2', { stock_code: 'NVDA', status: 'failed', outlook: null }),
       ],
     });
 
@@ -245,7 +243,7 @@ describe('AltRunHistory', () => {
 
   it('shows a dash outlook for a finished run whose judge produced nothing', () => {
     renderHistory({
-      runs: [makeRun('t1', { stock_code: 'MSFT', direction: 'unknown', outlook: 'unknown' })],
+      runs: [makeRun('t1', { stock_code: 'MSFT', outlook: 'unknown' })],
     });
 
     expect(screen.getByText(/^(已完成|Done)$/)).toBeInTheDocument();
@@ -360,7 +358,6 @@ describe('AltRunHistory', () => {
         makeRun('t2', {
           stock_code: 'NVDA',
           status: 'failed',
-          direction: null,
           shares: null,
           tier: null,
           error: 'LLM quota exhausted',

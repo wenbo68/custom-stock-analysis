@@ -15,7 +15,7 @@ shows blank fields and the AIs kept grading them, voiding whole runs. Code conve
 non-neutral grades into evidence bullets — ids assigned by code in
 field order, the graded field's citation injected by code with the
 exact display value — and MATCHES the two sheets by field in pure code
-(same field + same direction = the same bullet; an opposite-direction
+(same field + same bullet outlook = the same bullet; an opposite-outlook
 clash is a dispute and stays unmatched). The old merge LLM call is
 gone. Membership is a majority vote with at most three votes per
 bullet:
@@ -42,7 +42,7 @@ plain sentence saying why (``weight_reason``, shown in the UI's check
 modals). Listers rate their own bullets in the same call; check/decider
 votes carry a weight alongside the validity. A bullet's final weight is
 the MEDIAN of its voters' weights (two voters → their mean, so halves
-happen). The outlook score is computed by code from the direction tags
+happen). The outlook score is computed by code from the bullet-outlook tags
 and the weights:
 ``10 × Σweight(bullish) / Σweight(all)`` over the whole pool
 (per-dimension counts and weight sums are stored for the section
@@ -111,7 +111,7 @@ from .providers.base import DimensionResult, SourceKind
 from .providers.technicals import is_envelope
 from .schema import (
     DEFAULT_HOLD_WEEKS,
-    Direction,
+    Outlook,
     TierReport,
     hold_weeks_text,
 )
@@ -139,13 +139,13 @@ DETAIL_FORMAT = 11
 _NUMERIC_REASON_RE = re.compile(r"\d+\.\d+|\d+(?:\.\d+)?\s?%")
 
 
-def direction_from_final(final: float) -> Direction:
+def outlook_from_final(final: float) -> Outlook:
     """The fixed mapping from the 0-10 final score to an outlook."""
     if final < SELL_BELOW:
-        return Direction.SELL
+        return Outlook.BEARISH
     if final <= HOLD_MAX:
-        return Direction.HOLD
-    return Direction.BUY
+        return Outlook.NEUTRAL
+    return Outlook.BULLISH
 
 
 @dataclass(frozen=True)
@@ -158,7 +158,7 @@ class AnchoredReason:
 
 @dataclass(frozen=True)
 class DebateOutlook:
-    direction: Direction
+    outlook: Outlook
     #: The final pool's weighted score: 10 × Σweight(bullish) / Σweight(all).
     final_score: float
     summary: str
@@ -187,7 +187,7 @@ class DebateResult:
         if self.outlook is not None:
             v = self.outlook
             outlook = {
-                "direction": v.direction.value,
+                "outlook": v.outlook.value,
                 "final_score": v.final_score,
                 "summary": v.summary,
                 "summary_structure": v.summary_structure,
@@ -456,7 +456,7 @@ _GRADE_RULES = """Grade-sheet rules (all checked mechanically by code):
   field twice.
 - Fields shown blank/null in the report are NOT on the sheet — do not
   grade them (code ignores any grade on a blank field).
-- Each grade: "direction" is "bullish", "bearish" or "neutral" for
+- Each grade: "bullet_outlook" is "bullish", "bearish" or "neutral" for
   this swing trade. Neutral = the field carries no lean either way
   (metadata like dates and bar counts, or a genuinely mixed reading);
   a neutral grade needs no other keys and produces no evidence.
@@ -490,18 +490,18 @@ _GRADE_RULES = """Grade-sheet rules (all checked mechanically by code):
   rows (code attaches the event citation itself); any NUMBER your claim
   quotes from the news text still appears exactly as the report shows
   it.
-- The direction tags ARE the score — code counts them; nobody writes
-  a score."""
+- The bullet_outlook tags ARE the score — code counts them; nobody
+  writes a score."""
 
 # Substituted into the templates as a VALUE (never format()ed itself),
 # so the braces are literal.
 _GRADE_SHAPE = """{"grades": {
-  "technicals.daily.rsi_14": {"direction": "bullish",
+  "technicals.daily.rsi_14": {"bullet_outlook": "bullish",
     "claim": "The 14-day RSI (56.28) is above 50, showing bullish momentum.",
     "links": [],
     "weight": 3, "weight_reason": "Momentum backs the trend but rarely drives it alone."},
-  "technicals.meta.as_of": {"direction": "neutral"},
-  "company_news.news_coverage.items.0.text": {"direction": "bearish",
+  "technicals.meta.as_of": {"bullet_outlook": "neutral"},
+  "company_news.news_coverage.items.0.text": {"bullet_outlook": "bearish",
     "claim": "The new antitrust lawsuit adds legal risk that could weigh on the stock during the hold.",
     "links": [],
     "weight": 4, "weight_reason": "Litigation news can move the price on its own."},
@@ -512,7 +512,7 @@ You are the FIRST analyst. Another analyst is grading the same sheet
 separately; neither of you sees the other's work. Take no side: grade
 EVERY field on the sheet below — bullish, bearish or neutral — walking
 it top to bottom so nothing is skipped. You give no score; code
-computes the outlook score from your direction tags.
+computes the outlook score from your bullet_outlook tags.
 
 The grade sheet (one grade per field key, exactly these keys):
 {field_rows}
@@ -531,7 +531,7 @@ field on the sheet below — bullish, bearish or neutral. Think theme by
 theme — momentum, trend, profitability, valuation, balance sheet,
 macro pressures — then make sure every field key has exactly one
 grade. You give no score; code computes the outlook score from your
-direction tags.
+bullet_outlook tags.
 
 The grade sheet (one grade per field key, exactly these keys):
 {field_rows}
@@ -551,7 +551,7 @@ bullet listed below: point the ref at the right leaf field, copy the
 value exactly as the report above displays it, and make sure the claim
 sentence contains that exact value. Keep each bullet's "id" and
 "dimension" unchanged; you may rewrite the claim, the links, and the
-direction tag.
+bullet_outlook tag.
 
 {link_rules}
 
@@ -619,14 +619,6 @@ see the claim and the objection; weigh both and rule:
 Reply with JSON only:
 {{"votes": {{"T2": {{"validity": "valid", "reason": "why the bullet stands", "links": [], "weight": 3, "weight_reason": "why it matters this much"}}}}}}
 "votes" must cover exactly these bullet ids: {tied_ids}."""
-
-# The summary speaks in outlook words (user-facing tier-2 prose) — the
-# internal Direction enum never leaks its buy/hold/sell vocabulary there.
-_OUTLOOK_WORD = {
-    Direction.BUY: "bullish",
-    Direction.HOLD: "neutral",
-    Direction.SELL: "bearish",
-}
 
 _SUMMARY_TEMPLATE = """{context}
 The voted evidence list:
@@ -798,7 +790,7 @@ class DebateEngine:
             )
 
         # Step 2 — code merge by graded field. Same field + same
-        # direction = listed independently by both (2-0 confirmed);
+        # bullet outlook = listed independently by both (2-0 confirmed);
         # everything else on the second sheet joins the list.
         items.extend(self._assemble(first, second))
         for item in items:
@@ -900,16 +892,16 @@ class DebateEngine:
                 "most of the merged evidence did not survive the votes — "
                 "the final score rests on a thin base"
             )
-        direction = direction_from_final(final)
+        outlook = outlook_from_final(final)
 
         # Step 5 — the user-facing report; its failure never voids anything.
         summary, summary_structure = self._summary(
-            context, items, final, pools, direction, data_dimensions,
+            context, items, final, pools, outlook, data_dimensions,
             dimensions, warnings,
         )
 
         outlook = DebateOutlook(
-            direction=direction,
+            outlook=outlook,
             final_score=final,
             summary=summary,
             initial_score=initial_score,
@@ -1010,7 +1002,7 @@ class DebateEngine:
             prefix = DIMENSION_PREFIX[dimension]
             for ref in dim_refs:
                 grade = sheet.grades[ref]
-                if grade.direction == "neutral":
+                if grade.bullet_outlook == "neutral":
                     continue
                 counters[prefix] = counters.get(prefix, 0) + 1
                 item_id = f"{prefix}{counters[prefix]}"
@@ -1023,7 +1015,7 @@ class DebateEngine:
                     EvidenceItemModel(
                         id=item_id,
                         dimension=dimension,
-                        direction=grade.direction,
+                        bullet_outlook=grade.bullet_outlook,
                         claim=(grade.claim or "").strip(),
                         links=[own_link, *extra_links],
                         weight=grade.weight,
@@ -1042,9 +1034,9 @@ class DebateEngine:
     ) -> List[Dict[str, Any]]:
         """The merged bullet list, matched by graded field in pure code:
         the first sheet's bullets (authors=2 where the second analyst
-        graded the same field the same direction), the second sheet's
+        graded the same field the same way), the second sheet's
         unmatched bullets renumbered in (a different field, or the same
-        field graded the OPPOSITE direction — a genuine dispute the
+        field graded the OPPOSITE way — a genuine dispute the
         votes settle), and both sheets' struck bullets kept for the
         audit trail."""
         lead_author = 1
@@ -1062,7 +1054,7 @@ class DebateEngine:
         if second is not None:
             second_items, second_broken, second_refs = second
             first_id_by_key = {
-                (first_refs[m.id], m.direction): m.id
+                (first_refs[m.id], m.bullet_outlook): m.id
                 for m in first_items
                 if m.id not in first_broken
             }
@@ -1073,7 +1065,7 @@ class DebateEngine:
                     extra_broken[model.id] = second_broken[model.id]
                     continue
                 target = first_id_by_key.get(
-                    (second_refs[model.id], model.direction)
+                    (second_refs[model.id], model.bullet_outlook)
                 )
                 if target is not None:
                     covered[target] = model
@@ -1446,7 +1438,7 @@ class DebateEngine:
         items: Sequence[Dict[str, Any]],
         final: float,
         pools: Dict[str, Any],
-        direction: Direction,
+        outlook: Outlook,
         data_dimensions: Sequence[str],
         dimensions: Sequence[DimensionResult],
         warnings: List[str],
@@ -1462,7 +1454,7 @@ class DebateEngine:
             final_total=pools["final"]["total"],
             final_bullish_weight=pools["final"]["bullish_weight"],
             final_total_weight=pools["final"]["total_weight"],
-            outlook=_OUTLOOK_WORD.get(direction, "neutral"),
+            outlook=outlook.value,
             fill_groups=", ".join(
                 dim for dim in DIMENSIONS if dim in data_dimensions
             ) or "none",
@@ -1619,7 +1611,7 @@ class DebateEngine:
             "id": model.id,
             "dimension": model.dimension,
             "field": field,
-            "direction": model.direction,
+            "bullet_outlook": model.bullet_outlook,
             "claim": model.claim.strip(),
             "links": [_link_detail(link) for link in model.links],
             "struck": struck,
@@ -1670,7 +1662,7 @@ def _pool_detail(items, weight_of) -> Dict[str, Any]:
             {"bullish": 0, "bearish": 0, "total": 0,
              "bullish_weight": 0, "bearish_weight": 0, "total_weight": 0},
         )
-        side = "bullish" if item["direction"] == "bullish" else "bearish"
+        side = "bullish" if item["bullet_outlook"] == "bullish" else "bearish"
         weight = weight_of(item)
         stats["total"] += 1
         stats[side] += 1
@@ -1771,7 +1763,7 @@ def _tree_text(items: Sequence[Dict[str, Any]]) -> str:
                 "listed by BOTH analysts" if item["authors"] >= 2 else "one analyst"
             )
             lines.append(
-                f"  - [{item['id']}] ({item['direction']}, {source}) {item['claim']}"
+                f"  - [{item['id']}] ({item['bullet_outlook']}, {source}) {item['claim']}"
             )
             if item["links"]:
                 lines.append(f"    links: {_links_text(item['links'])}")
@@ -1786,7 +1778,7 @@ def _disputes_text(tied_items: Sequence[Dict[str, Any]]) -> str:
     for item in tied_items:
         checker = next(v for v in item["votes"] if v["role"] == "checker")
         lines.append(
-            f"- [{item['id']}] claim ({item['direction']}): {item['claim']}\n"
+            f"- [{item['id']}] claim ({item['bullet_outlook']}): {item['claim']}\n"
             f"  objection: {checker['reason'] or '(no reason given)'}"
         )
     return "\n".join(lines) if lines else "(none)"

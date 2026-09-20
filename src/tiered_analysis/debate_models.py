@@ -17,7 +17,7 @@ enforced structurally, not by prompt. Code converts non-neutral grades
 into evidence bullets (ids assigned by code in field order) and matches
 the two analysts' sheets by field — no merge LLM call. Every bullet's
 author is its first valid vote (a field both analysts graded the same
-direction is confirmed 2-0 on the spot); a check round casts the second
+way is confirmed 2-0 on the spot); a check round casts the second
 vote on single-author bullets; a deciding round breaks 1-1 ties.
 Citations are code's job alone — links are ``{ref, value}`` and every
 link, including the ones inside vote reasons, is verified mechanically
@@ -58,10 +58,10 @@ Dimension = Literal[
     "technicals", "fundamentals", "macro_economy", "positioning",
     "company_news", "world_news",
 ]
-ItemDirection = Literal["bullish", "bearish"]
+BulletOutlook = Literal["bullish", "bearish"]
 #: A grade adds "neutral": the field carries no lean (metadata, dates,
 #: a genuinely mixed reading) and produces no evidence bullet.
-GradeDirection = Literal["bullish", "bearish", "neutral"]
+GradeOutlook = Literal["bullish", "bearish", "neutral"]
 
 #: Importance weight of one bullet, rated by each voter (owner spec
 #: 2026-07-20, widened to 1-5 the same day): 1 = very minor, 3 = normal
@@ -117,12 +117,12 @@ class LinkModel(_StageModel):
 
 
 class EvidenceItemModel(_StageModel):
-    """One evidence bullet: an atomic claim with a direction tag whose
+    """One evidence bullet: an atomic claim with a bullet-outlook tag whose
     cited values carry code-verified links."""
 
     id: str = Field(min_length=1)
     dimension: Dimension
-    direction: ItemDirection
+    bullet_outlook: BulletOutlook
     claim: str = Field(min_length=1)
     links: List[LinkModel] = Field(min_length=1)
     #: The author's own importance rating of this bullet (1-5).
@@ -138,7 +138,7 @@ class FieldGradeModel(_StageModel):
     sentence (cited values checked by code) and the author's own
     importance rating."""
 
-    direction: GradeDirection
+    bullet_outlook: GradeOutlook
     claim: Optional[str] = None
     links: List[LinkModel] = Field(default_factory=list)
     weight: Weight = DEFAULT_WEIGHT
@@ -149,7 +149,7 @@ class GradeSheetModel(_StageModel):
     """Step 1 (v12): one analyst's completed grade sheet — exactly one
     grade per code-enumerated report field (``check_grade_sheet``
     enforces the key set). No score — the position scores are computed
-    by code from the direction tags."""
+    by code from the bullet-outlook tags."""
 
     grades: Dict[str, FieldGradeModel] = Field(default_factory=dict)
 
@@ -254,9 +254,9 @@ def check_grade_sheet(
     check_exact_keys(list(grades), list(required_refs), "grade")
     errors: List[str] = []
     for ref, grade in grades.items():
-        if grade.direction != "neutral" and not (grade.claim or "").strip():
+        if grade.bullet_outlook != "neutral" and not (grade.claim or "").strip():
             errors.append(
-                f"grade {ref!r} is {grade.direction} but has no claim "
+                f"grade {ref!r} is {grade.bullet_outlook} but has no claim "
                 "sentence — state the evidence or grade it neutral"
             )
     if errors:

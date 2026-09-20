@@ -19,7 +19,7 @@ from enum import Enum
 from typing import List, Optional, Tuple
 
 from .providers.base import Market
-from .schema import Direction, SizingSlots
+from .schema import Outlook, SizingSlots
 
 #: Above this per-trade risk fraction we still size, but flag it as unusual.
 HIGH_RISK_FRACTION_NOTE_THRESHOLD = 0.05
@@ -57,7 +57,7 @@ def floor_to_tradeable(raw_shares: float, lot_size: int) -> float:
 class RefusalReason(str, Enum):
     """Stable machine-readable codes so the UI can localize the message."""
 
-    NOT_A_BUY = "not_a_buy"
+    NOT_BULLISH = "not_bullish"
     SIZING_OFF = "sizing_off"
     NO_ENTRY = "no_entry"
     NO_STOP = "no_stop"
@@ -74,7 +74,7 @@ class SizingInputs:
     risk_fraction: Optional[float]
     entry: Optional[float]
     stop_loss: Optional[float]
-    direction: Direction
+    outlook: Outlook
     market: Market = Market.UNKNOWN
 
 
@@ -111,11 +111,11 @@ def _validate(inputs: SizingInputs) -> Tuple[Optional[SizingResult], List[str]]:
     """Refusal-or-notes gate, run before any arithmetic."""
     notes: List[str] = []
 
-    if inputs.direction is not Direction.BUY:
+    if inputs.outlook is not Outlook.BULLISH:
         return _refuse(
-            RefusalReason.NOT_A_BUY,
-            "Sizing only applies when opening a position (direction is "
-            f"'{inputs.direction.value}', not 'buy').",
+            RefusalReason.NOT_BULLISH,
+            "Sizing only applies when opening a position (outlook is "
+            f"'{inputs.outlook.value}', not 'bullish').",
         ), notes
     if inputs.capital is None or inputs.risk_fraction is None:
         # Name exactly what is missing — "capital not provided" when the

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tier report envelope (docs/tiered-analysis-design.md §3.1, §4).
 
-v1 outputs direction only. The sizing slots (capital / risk_fraction /
+v1 outputs an outlook only. The sizing slots (capital / risk_fraction /
 shares) are reserved in the schema from day one but stay empty until the
 deterministic sizing engine lands in v2 — printing a share count creates an
 obligation to justify it with a backtest, which v1 does not have.
@@ -30,28 +30,13 @@ def hold_weeks_text(hold_weeks: int) -> str:
     return f"{hold_weeks} week" + ("" if hold_weeks == 1 else "s")
 
 
-class Direction(str, Enum):
-    """Normalized trade direction, mapped from DSA's decision_type."""
-
-    BUY = "buy"
-    HOLD = "hold"
-    SELL = "sell"
-    UNKNOWN = "unknown"
-
-    @classmethod
-    def from_decision_type(cls, value: Optional[str]) -> "Direction":
-        try:
-            return cls(str(value).strip().lower())
-        except ValueError:
-            return cls.UNKNOWN
-
-
 class Outlook(str, Enum):
     """The impersonal judgment about the stock (outlook redesign,
     2026-07-20): what the evidence says, with no knowledge of the user's
-    position. Renamed from the old buy/hold/sell outlook — an assessment
-    can't literally mean "you should sell" when it doesn't know whether
-    you own anything."""
+    position. The old buy/hold/sell "direction" vocabulary is gone
+    (2026-09-19) — an assessment can't literally mean "you should sell"
+    when it doesn't know whether you own anything, and one fact deserves
+    one name."""
 
     BULLISH = "bullish"
     NEUTRAL = "neutral"
@@ -59,14 +44,6 @@ class Outlook(str, Enum):
     UNKNOWN = "unknown"
     # (A "stopped" outlook for stale-data runs existed 2026-08-08 to
     # 2026-09-17; such runs now fail with StaleDataError instead.)
-
-    @classmethod
-    def from_direction(cls, direction: Direction) -> "Outlook":
-        return {
-            Direction.BUY: cls.BULLISH,
-            Direction.HOLD: cls.NEUTRAL,
-            Direction.SELL: cls.BEARISH,
-        }.get(direction, cls.UNKNOWN)
 
 
 class Action(str, Enum):
@@ -197,7 +174,7 @@ class TierReport:
     tier: int
     symbol: str
     market: Market
-    direction: Direction
+    outlook: Outlook
     confidence: Optional[str] = None
     score: Optional[int] = None
     levels: SniperLevels = field(default_factory=SniperLevels)

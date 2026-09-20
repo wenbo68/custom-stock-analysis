@@ -95,7 +95,7 @@ def _serialize_tier_section(report: Any) -> Optional[Dict[str, Any]]:
         return None
     section: Dict[str, Any] = {
         "tier": report.tier,
-        "direction": report.direction.value,
+        "outlook": report.outlook.value,
         "confidence": report.confidence,
         "score": report.score,
         "levels": _serialize_levels(report.levels),
@@ -141,7 +141,6 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
         "symbol": report.symbol,
         "market": report.market.value,
         "tier": report.tier,
-        "direction": report.direction.value,
         "score": report.score,
         "confidence": report.confidence,
         "levels": _serialize_levels(report.levels),
@@ -156,8 +155,7 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
         "depth": outcome.depth,
         "final": {
             "tier": final.tier,
-            "direction": final.direction.value,
-            "outlook": outcome.outlook.value,
+            "outlook": final.outlook.value,
             "action": outcome.action.value,
             "confidence": final.confidence,
             "levels": _serialize_levels(final.levels),

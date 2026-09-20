@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel
 
-from .debate import direction_from_final
+from .debate import outlook_from_final
 from .llm_support import (
     LlmConfigError,
     deterministic_summarizer,
@@ -34,7 +34,7 @@ from .llm_support import (
 )
 from .providers.base import DimensionResult
 from .schema import (
-    Direction,
+    Outlook,
     coerce_price,
     hold_weeks_text,
 )
@@ -97,7 +97,7 @@ class _QuickReplyForm(BaseModel):
 class QuickOutlook:
     """The one-call judge's decision on the debate's 0-10 scale."""
 
-    direction: Direction
+    outlook: Outlook
     final_score: float
     summary: str
 
@@ -117,7 +117,7 @@ class QuickResult:
         detail: Dict[str, Any] = {"format": QUICK_DETAIL_FORMAT}
         if self.outlook is not None:
             detail["outlook"] = {
-                "direction": self.outlook.direction.value,
+                "outlook": self.outlook.outlook.value,
                 "final_score": self.outlook.final_score,
             }
         return detail
@@ -137,7 +137,7 @@ def _parse_outlook(raw: str) -> Tuple[Optional[QuickOutlook], Optional[str]]:
     score = round(score, 2)
     return (
         QuickOutlook(
-            direction=direction_from_final(score),
+            outlook=outlook_from_final(score),
             final_score=score,
             summary=summary.strip(),
         ),

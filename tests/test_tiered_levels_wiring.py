@@ -70,11 +70,11 @@ class _FakeQuickJudge:
 
     def run(self, symbol, dimensions, hold_weeks):
         from src.tiered_analysis.quick_judge import QuickResult, QuickOutlook
-        from src.tiered_analysis.schema import Direction
+        from src.tiered_analysis.schema import Outlook
 
         return QuickResult(
             outlook=QuickOutlook(
-                direction=Direction.BUY,
+                outlook=Outlook.BULLISH,
                 final_score=7.5,
                 summary="buy the pullback",
             )

@@ -8,7 +8,7 @@ by field → check round on single-author bullets → deciding round on 1-1
 ties → summary), the deterministic one-grade-per-field contract (a
 reply that skips, invents or double-grades a field is rejected and
 retried), the vote arithmetic (author = first valid vote; same field
-graded the same direction by both = confirmed 2-0; majority of three
+graded the same way by both = confirmed 2-0; majority of three
 decides), the deterministic weighted score (every voter rates a
 bullet's importance 1-5; a bullet's weight is the median of its voters'
 ratings, mean when there are two; score = 10 × Σweight(bullish) /
@@ -36,7 +36,7 @@ from src.tiered_analysis.debate import (
     DebateEngine,
     DebateResult,
     DebateOutlook,
-    direction_from_final,
+    outlook_from_final,
     gradable_field_refs,
     value_pattern,
 )
@@ -51,7 +51,7 @@ from src.tiered_analysis.providers.base import (
     Market,
     SourceKind,
 )
-from src.tiered_analysis.schema import Direction, SniperLevels, TierReport
+from src.tiered_analysis.schema import Outlook, SniperLevels, TierReport
 from src.tiered_analysis.tiers import Tier2Stage, TierState
 
 
@@ -103,12 +103,12 @@ P_REFS = [
 ]
 
 
-def _tier1(direction=Direction.BUY, dimensions=()):
+def _tier1(outlook=Outlook.BULLISH, dimensions=()):
     return TierReport(
         tier=1,
         symbol="AAPL",
         market=Market.US,
-        direction=direction,
+        outlook=outlook,
         score=68,
         levels=SniperLevels(entry=96.0, stop_loss=90.0, take_profit=108.0),
         narrative="buy the pullback",
@@ -136,13 +136,13 @@ INST_CLAIM = "Institutional ownership (61.55) is a solid majority."
 SHORT_CLAIM = "Short interest (3.10) rose against the float."
 DAYS_CLAIM = "Days to cover (1.80) means shorts can exit quickly."
 
-NEUTRAL = {"direction": "neutral"}
+NEUTRAL = {"bullet_outlook": "neutral"}
 
 
-def _grade(direction, claim=None, links=(), weight=2, weight_reason=None):
-    if direction == "neutral":
+def _grade(bullet_outlook, claim=None, links=(), weight=2, weight_reason=None):
+    if bullet_outlook == "neutral":
         return dict(NEUTRAL)
-    return {"direction": direction, "claim": claim, "links": list(links),
+    return {"bullet_outlook": bullet_outlook, "claim": claim, "links": list(links),
             "weight": weight, "weight_reason": weight_reason}
 
 
@@ -176,13 +176,13 @@ SHEET_1_BROKEN_CLOSE = {
 }
 
 
-def _item(item_id, dimension, direction, claim, links, weight=2,
+def _item(item_id, dimension, bullet_outlook, claim, links, weight=2,
           weight_reason=None):
     """A citation-fix reply bullet (the fix loop speaks the item shape)."""
     return {
         "id": item_id,
         "dimension": dimension,
-        "direction": direction,
+        "bullet_outlook": bullet_outlook,
         "claim": claim,
         "links": links,
         "weight": weight,
@@ -342,15 +342,15 @@ def _item_by_id(result, item_id):
 # ---------------------------------------------------------------------------
 
 
-class DirectionBandsTest(unittest.TestCase):
+class OutlookBandsTest(unittest.TestCase):
     def test_owner_spec_bands_on_the_two_decimal_score(self):
-        self.assertEqual(direction_from_final(0.0), Direction.SELL)
-        self.assertEqual(direction_from_final(3.99), Direction.SELL)
-        self.assertEqual(direction_from_final(4.0), Direction.HOLD)
-        self.assertEqual(direction_from_final(5.0), Direction.HOLD)
-        self.assertEqual(direction_from_final(6.0), Direction.HOLD)
-        self.assertEqual(direction_from_final(6.01), Direction.BUY)
-        self.assertEqual(direction_from_final(10.0), Direction.BUY)
+        self.assertEqual(outlook_from_final(0.0), Outlook.BEARISH)
+        self.assertEqual(outlook_from_final(3.99), Outlook.BEARISH)
+        self.assertEqual(outlook_from_final(4.0), Outlook.NEUTRAL)
+        self.assertEqual(outlook_from_final(5.0), Outlook.NEUTRAL)
+        self.assertEqual(outlook_from_final(6.0), Outlook.NEUTRAL)
+        self.assertEqual(outlook_from_final(6.01), Outlook.BULLISH)
+        self.assertEqual(outlook_from_final(10.0), Outlook.BULLISH)
 
 
 class DisplayValueTest(unittest.TestCase):
@@ -540,8 +540,8 @@ class GradeSheetContractTest(unittest.TestCase):
             any(i.get("field") == "technicals.sma_200" for i in result.items)
         )
 
-    def test_a_directional_grade_without_a_claim_is_rejected(self):
-        claimless = {**SHEET_1, "technicals.score": {"direction": "bullish"}}
+    def test_a_leaning_grade_without_a_claim_is_rejected(self):
+        claimless = {**SHEET_1, "technicals.score": {"bullet_outlook": "bullish"}}
         result, fake = _run(
             _replies(lister1=_sheet_reply(claimless)),
             retry_replies={"lister1": _sheet_reply(SHEET_1)},
@@ -575,7 +575,7 @@ class ChoreographyTest(unittest.TestCase):
         # flat counting: 3 bullish of 6 bullets → 5.0
         self.assertEqual(outlook.initial_score, 5.0)
         self.assertEqual(outlook.final_score, 5.0)
-        self.assertEqual(outlook.direction, Direction.HOLD)
+        self.assertEqual(outlook.outlook, Outlook.NEUTRAL)
         # The flat text renders the outline one line per non-empty group;
         # the outline itself rides in summary_structure.
         self.assertEqual(
@@ -605,7 +605,7 @@ class ChoreographyTest(unittest.TestCase):
         self.assertEqual(sorted(stages[:2]), ["lister1", "lister2"])
         self.assertEqual(stages[2:], ["check", "decider", "summary"])
 
-    def test_same_field_same_direction_is_confirmed_without_any_vote(self):
+    def test_same_field_same_bullet_outlook_is_confirmed_without_any_vote(self):
         result, _ = _run()
         for item_id in ("T1", "P1", "P2"):
             item = _item_by_id(result, item_id)
@@ -656,9 +656,9 @@ class ChoreographyTest(unittest.TestCase):
         for item in result.items:
             self.assertEqual(item["final_status"], "counted")
 
-    def test_an_opposite_direction_grade_is_a_dispute_both_face_the_votes(self):
+    def test_an_opposite_bullet_outlook_grade_is_a_dispute_both_face_the_votes(self):
         # The second analyst reads the same RSI field as bearish. Code
-        # matches by (field, direction), so the clash never merges — both
+        # matches by (field, bullet_outlook), so the clash never merges — both
         # versions join the list and the votes settle it.
         disputed = {
             **SHEET_2,
@@ -675,10 +675,10 @@ class ChoreographyTest(unittest.TestCase):
         )
         self.assertIsNotNone(result.outlook)
         t1 = _item_by_id(result, "T1")  # the first analyst's bullish RSI
-        self.assertEqual(t1["direction"], "bullish")
+        self.assertEqual(t1["bullet_outlook"], "bullish")
         self.assertEqual(t1["authors"], 1)
         t3 = _item_by_id(result, "T3")  # the bearish RSI, renumbered in
-        self.assertEqual(t3["direction"], "bearish")
+        self.assertEqual(t3["bullet_outlook"], "bearish")
         self.assertEqual(t3["field"], "technicals.rsi_14")
         self.assertEqual(t3["final_status"], "counted")
 
@@ -695,7 +695,7 @@ class VoteOutcomeTest(unittest.TestCase):
         self.assertEqual(t2["exclusion_reason"], "outvoted")
         # final: 3 bullish of the 5 remaining bullets → 6.0 hold
         self.assertEqual(result.outlook.final_score, 6.0)
-        self.assertEqual(result.outlook.direction, Direction.HOLD)
+        self.assertEqual(result.outlook.outlook, Outlook.NEUTRAL)
 
     def test_failed_deciding_round_excludes_ties_as_unresolved(self):
         result, _ = _run(_replies(decider="not json"))
@@ -742,7 +742,7 @@ class VoteOutcomeTest(unittest.TestCase):
         outlook = result.outlook
         self.assertEqual(outlook.pools["final"]["total"], 0)
         self.assertEqual(outlook.final_score, 5.0)
-        self.assertEqual(outlook.direction, Direction.HOLD)
+        self.assertEqual(outlook.outlook, Outlook.NEUTRAL)
         self.assertTrue(any("no surviving evidence to weigh" in w for w in result.warnings))
         self.assertTrue(
             any("the final score rests on a thin base" in w for w in result.warnings)
@@ -1083,7 +1083,7 @@ class RetryContractTest(unittest.TestCase):
         crossref = {
             **SHEET_1,
             "technicals.rsi_14": {
-                "direction": "bullish",
+                "bullet_outlook": "bullish",
                 "claim": "The 14-day RSI (71.20) is hot while the close (100) holds.",
                 "links": [{"ref": "technicals.close"}],  # value missing
                 "weight": 2,
@@ -1346,7 +1346,7 @@ class DetailShapeTest(unittest.TestCase):
         # v12 addition: every bullet names the field it grades.
         self.assertEqual(detail["items"][0]["field"], "technicals.rsi_14")
         outlook = detail["outlook"]
-        self.assertEqual(outlook["direction"], "hold")
+        self.assertEqual(outlook["outlook"], "neutral")
         self.assertEqual(outlook["final_score"], 5.0)
         self.assertEqual(outlook["initial_score"], 5.0)
         self.assertIn("final", outlook["pools"])
@@ -1384,11 +1384,11 @@ class TestTier2Stage(unittest.TestCase):
             state.dimensions = dimensions
         return state
 
-    def _outlook_result(self, direction=Direction.HOLD):
+    def _outlook_result(self, outlook=Outlook.NEUTRAL):
         return DebateResult(
             items=[],
             outlook=DebateOutlook(
-                direction=direction,
+                outlook=outlook,
                 final_score=6.0,
                 summary="ruling",
                 initial_score=7.5,
@@ -1396,13 +1396,13 @@ class TestTier2Stage(unittest.TestCase):
             ),
         )
 
-    def test_outlook_updates_direction_and_keeps_levels(self):
+    def test_outlook_updates_report_outlook_and_keeps_levels(self):
         engine = _FakeEngine(self._outlook_result())
-        state = self._state(_tier1(Direction.BUY), dimensions=[_technicals()])
+        state = self._state(_tier1(Outlook.BULLISH), dimensions=[_technicals()])
         report = Tier2Stage(engine=engine).run(state)
         self.assertEqual(report.tier, 2)
         self.assertEqual(report.warnings, [])  # a clean success carries none
-        self.assertEqual(report.direction, Direction.HOLD)  # formula overruled
+        self.assertEqual(report.outlook, Outlook.NEUTRAL)  # formula overruled
         self.assertIsNone(report.confidence)  # no judge confidence since v3
         self.assertAlmostEqual(report.levels.entry, 96.0)
         self.assertEqual(report.narrative, "ruling")
@@ -1411,31 +1411,31 @@ class TestTier2Stage(unittest.TestCase):
 
     def test_no_outlook_is_unknown_never_tier1_fallback(self):
         # Outlook redesign: a failed vote fails honestly — no silently
-        # substituting the one-blob judge's direction.
+        # substituting the one-blob judge's outlook.
         engine = _FakeEngine(DebateResult(warnings=["judge exploded"]))
-        state = self._state(_tier1(Direction.BUY), dimensions=[_technicals()])
+        state = self._state(_tier1(Outlook.BULLISH), dimensions=[_technicals()])
         report = Tier2Stage(engine=engine).run(state)
-        self.assertEqual(report.direction, Direction.UNKNOWN)
+        self.assertEqual(report.outlook, Outlook.UNKNOWN)
         self.assertTrue(any("re-run" in w for w in report.warnings))
 
     def test_missing_tier1_report_fails_unknown(self):
         report = Tier2Stage(engine=_FakeEngine(None)).run(self._state())
-        self.assertEqual(report.direction, Direction.UNKNOWN)
+        self.assertEqual(report.outlook, Outlook.UNKNOWN)
         self.assertTrue(any("foundation" in w for w in report.warnings))
 
     def test_no_evidence_skips_engine_entirely(self):
         engine = _FakeEngine(self._outlook_result())
-        state = self._state(_tier1(Direction.BUY))  # no dimensions anywhere
+        state = self._state(_tier1(Outlook.BULLISH))  # no dimensions anywhere
         report = Tier2Stage(engine=engine).run(state)
-        self.assertEqual(report.direction, Direction.UNKNOWN)
+        self.assertEqual(report.outlook, Outlook.UNKNOWN)
         self.assertTrue(any("no collected evidence" in w for w in report.warnings))
         self.assertEqual(engine.calls, [])
 
     def test_dimensions_fall_back_to_tier1_report(self):
         engine = _FakeEngine(self._outlook_result())
-        tier1 = _tier1(Direction.BUY, dimensions=[_technicals()])
+        tier1 = _tier1(Outlook.BULLISH, dimensions=[_technicals()])
         report = Tier2Stage(engine=engine).run(self._state(tier1))
-        self.assertEqual(report.direction, Direction.HOLD)  # outlook landed
+        self.assertEqual(report.outlook, Outlook.NEUTRAL)  # outlook landed
         self.assertEqual(engine.calls, [("AAPL", 1)])
 
 
@@ -1549,7 +1549,7 @@ class NewsDimensionTest(unittest.TestCase):
         bond = _item_by_id(result, "N1")
         self.assertEqual(bond["dimension"], "company_news")
         self.assertEqual(bond["field"], N_REFS[0])
-        self.assertEqual(bond["direction"], "bullish")
+        self.assertEqual(bond["bullet_outlook"], "bullish")
         self.assertEqual(bond["claim"], BOND_CLAIM)
         self.assertEqual(bond["authors"], 2)
         self.assertEqual(bond["final_status"], "counted")
@@ -1559,7 +1559,7 @@ class NewsDimensionTest(unittest.TestCase):
         self.assertEqual(bond["links"][0]["value"], BOND_TEXT)
 
         suit = _item_by_id(result, "N2")
-        self.assertEqual(suit["direction"], "bearish")
+        self.assertEqual(suit["bullet_outlook"], "bearish")
         self.assertEqual(suit["final_status"], "counted")
 
         # News bullets join the pools like any other dimension.

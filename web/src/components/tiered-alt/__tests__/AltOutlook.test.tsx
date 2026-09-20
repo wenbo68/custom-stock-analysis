@@ -33,7 +33,6 @@ function makeOutlookResult(overrides: Partial<TieredResult> = {}): TieredResult 
     symbol: 'AAPL',
     market: 'us',
     tier: 1,
-    direction: 'buy',
     score: 72,
     confidence: null,
     levels: LEVELS,
@@ -59,7 +58,7 @@ function makeWeightedDebate(): TieredDebateDetail {
       {
         id: 'T1',
         dimension: 'technicals',
-        direction: 'bullish',
+        bullet_outlook: 'bullish',
         claim: 'The 14-day RSI (71.20) is above 70.',
         links: [{ ref: 'technicals.rsi_14', value: '71.20' }],
         struck: false,
@@ -74,7 +73,7 @@ function makeWeightedDebate(): TieredDebateDetail {
       {
         id: 'S1',
         dimension: 'positioning',
-        direction: 'bearish',
+        bullet_outlook: 'bearish',
         claim: 'The deal is not closed yet.',
         links: [{ ref: 'citation:2', value: null }],
         struck: false,
@@ -96,7 +95,7 @@ function makeWeightedDebate(): TieredDebateDetail {
       },
     ],
     outlook: {
-      direction: 'hold',
+      outlook: 'neutral',
       summary: 'Weighted to hold.',
       final_score: 5.45,
       initial_score: 5.45,
@@ -141,7 +140,7 @@ function makeWeightedDebate(): TieredDebateDetail {
 function makeTier2(detail: TieredDebateDetail): NonNullable<TieredResult['tier2']> {
   return {
     tier: 2,
-    direction: 'hold',
+    outlook: 'neutral',
     confidence: null,
     score: null,
     levels: LEVELS,
@@ -286,7 +285,6 @@ describe('AltResult outlook conclusion', () => {
       makeOutlookResult({
         outlook: 'bearish',
         action: 'no_trade',
-        direction: 'sell',
         warnings: [
           'no usable ATR — no volatility stop, and no target without a stop',
           "reward below goal: overhead resistance at 316.94 caps the plan's " +
@@ -310,7 +308,6 @@ describe('AltResult outlook conclusion', () => {
       makeOutlookResult({
         outlook: 'bearish',
         action: 'no_trade',
-        direction: 'sell',
         warnings: ['no usable ATR — no volatility stop, and no target without a stop'],
       }),
     );
@@ -344,7 +341,7 @@ describe('AltResult outlook conclusion', () => {
           risk_amount: null,
           loss_per_share: null,
           lot_size: 1,
-          reason_code: 'not_a_buy',
+          reason_code: 'not_bullish',
           refusal_reason: null,
           notes: [],
           inputs: {
@@ -448,7 +445,7 @@ describe('AltResult weighted vote formula', () => {
       depth: 2,
       tier2: {
         tier: 2,
-        direction: 'hold',
+        outlook: 'neutral',
         confidence: null,
         score: null,
         levels: LEVELS,
@@ -465,7 +462,7 @@ describe('AltResult weighted vote formula', () => {
       depth: 2,
       tier2: {
         tier: 2,
-        direction: 'hold',
+        outlook: 'neutral',
         confidence: null,
         score: null,
         levels: LEVELS,
