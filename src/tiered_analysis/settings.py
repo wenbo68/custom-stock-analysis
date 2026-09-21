@@ -22,6 +22,11 @@ DEFAULT_RISK_FRACTION = 0.01
 #: A resistance-capped target below this ratio draws a warning; the 1.5
 #: hard floor in levels.py still voids the plan outright.
 DEFAULT_REWARD_RISK = 2.0
+#: The form's other defaults, kept beside the sizing ones so the request
+#: model and the server-status route read the same numbers: the quick
+#: analysis, judged over a two-week hold.
+DEFAULT_TIER = 1
+DEFAULT_HOLD_WEEKS = 2
 
 
 @dataclass(frozen=True)

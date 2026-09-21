@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   TieredDebateDetail,
+  TieredDebateItem,
   TieredLevelsDetail,
   TieredResult,
   TieredTierSection,
@@ -236,13 +237,27 @@ function makeTreeDebateV9(): TieredDebateDetail {
   };
 }
 
-function renderResult(result: TieredResult) {
+// The vote tree fetches its items when its fold opens (2026-09-21);
+// here they come from the fixture's own record.
+function renderResult(
+  result: TieredResult,
+  loader: (taskId: string) => Promise<TieredDebateItem[]> = async () =>
+    result.tier2?.debate_detail?.items ?? [],
+) {
   render(
     <MemoryRouter>
       <UiLanguageProvider>
-        <AltResult result={result} taskId="task-9" />
+        <AltResult result={result} taskId="task-9" debateItemsLoader={loader} />
       </UiLanguageProvider>
     </MemoryRouter>,
+  );
+}
+
+// Open the vote tree's fold and wait for its items.
+async function openTree() {
+  fireEvent.click(screen.getByText(/Details|详情/));
+  await waitFor(() =>
+    expect(screen.getByTestId('alt-debate-tree').querySelector('[data-testid^="alt-tree-item-"]')).not.toBeNull(),
   );
 }
 
@@ -499,15 +514,36 @@ describe('AltResult', () => {
 });
 
 describe('AltResult evidence vote tree', () => {
-  function renderTreeV9() {
+  async function renderTreeV9() {
     const deep = makeResult();
     deep.tier2!.debate_detail = makeTreeDebateV9();
     deep.tier2!.narrative = 'Only balanced evidence survived.';
     renderResult(deep);
+    await openTree();
   }
 
-  it('tucks the whole vote record into a Transcript foldable with the how-it-works list on top', () => {
-    renderTreeV9();
+  it('fetches the items the first time the fold opens, and says so if that fails', async () => {
+    const deep = makeResult();
+    const loader = vi.fn().mockResolvedValue(makeTreeDebateV9().items);
+    renderResult(deep, loader);
+    expect(loader).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('alt-tree-item-T1')).not.toBeInTheDocument();
+    await openTree();
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(loader).toHaveBeenCalledWith('task-9');
+    // Closing and reopening does not fetch again.
+    fireEvent.click(screen.getByText(/Details|详情/));
+    fireEvent.click(screen.getByText(/Details|详情/));
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    renderResult(deep, vi.fn().mockRejectedValue(new Error('network down')));
+    fireEvent.click(screen.getByText(/Details|详情/));
+    await waitFor(() => expect(screen.getByText(/network down/)).toBeInTheDocument());
+  });
+
+  it('tucks the whole vote record into a Transcript foldable with the how-it-works list on top', async () => {
+    await renderTreeV9();
     expect(screen.getByText(/Details|详情/)).toBeInTheDocument();
     const explain = screen.getByTestId('alt-tree-explain');
     expect(explain).toHaveTextContent(/How this works|规则说明/);
@@ -516,8 +552,8 @@ describe('AltResult evidence vote tree', () => {
     expect(explain).toHaveTextContent(/deciding vote|决胜票/);
   });
 
-  it('shows colored bullet-outlook words and counts them in the section headers', () => {
-    renderTreeV9();
+  it('shows colored bullet-outlook words and counts them in the section headers', async () => {
+    await renderTreeV9();
     const t1 = screen.getByTestId('alt-tree-item-T1');
     expect(within(t1).getByText(/bullish|看多/)).toHaveClass('text-emerald-300');
     const t2 = screen.getByTestId('alt-tree-item-T2');
@@ -526,8 +562,8 @@ describe('AltResult evidence vote tree', () => {
     expect(screen.getByTestId('alt-debate-tree')).toHaveTextContent(/1 bullish, 0 bearish|1 看多, 0 看空/);
   });
 
-  it('a bullet from both AIs carries no marks; single-author bullets carry ✓/✗ marks', () => {
-    renderTreeV9();
+  it('a bullet from both AIs carries no marks; single-author bullets carry ✓/✗ marks', async () => {
+    await renderTreeV9();
     expect(
       within(screen.getByTestId('alt-tree-item-T1')).queryAllByRole('button', { name: /✓|✗/ }),
     ).toHaveLength(0);
@@ -539,8 +575,8 @@ describe('AltResult evidence vote tree', () => {
     ).toBeInTheDocument();
   });
 
-  it('clicking the code ✗ on a struck bullet shows the citation errors', () => {
-    renderTreeV9();
+  it('clicking the code ✗ on a struck bullet shows the citation errors', async () => {
+    await renderTreeV9();
     fireEvent.click(
       within(screen.getByTestId('alt-tree-item-T3')).getByRole('button', { name: '✗' }),
     );
@@ -549,8 +585,8 @@ describe('AltResult evidence vote tree', () => {
     expect(dialog).toHaveTextContent('must be copied exactly');
   });
 
-  it('crosses out every bullet that is not in the final score, with no pills or steps', () => {
-    renderTreeV9();
+  it('crosses out every bullet that is not in the final score, with no pills or steps', async () => {
+    await renderTreeV9();
     expect(
       screen.getByTestId('alt-tree-item-T2').querySelector('.line-through'),
     ).not.toBeNull();
@@ -564,8 +600,8 @@ describe('AltResult evidence vote tree', () => {
     expect(screen.queryByText(/^counted$|^excluded$/)).not.toBeInTheDocument();
   });
 
-  it('opens the flat formula from the header score; no outlook-bands block', () => {
-    renderTreeV9();
+  it('opens the flat formula from the header score; no outlook-bands block', async () => {
+    await renderTreeV9();
     // The arithmetic no longer sits inside the transcript fold.
     expect(screen.queryByTestId('alt-tree-scores')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('alt-debate-score'));
@@ -577,8 +613,8 @@ describe('AltResult evidence vote tree', () => {
     expect(screen.queryByTestId('alt-tree-outlook')).not.toBeInTheDocument();
   });
 
-  it('wraps long claims with a hanging indent (two-column grid rows)', () => {
-    renderTreeV9();
+  it('wraps long claims with a hanging indent (two-column grid rows)', async () => {
+    await renderTreeV9();
     expect(screen.getByTestId('alt-tree-item-T1').className).toContain('grid');
   });
 });

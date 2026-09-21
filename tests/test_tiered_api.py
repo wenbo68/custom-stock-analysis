@@ -234,6 +234,18 @@ class TestTieredAnalyzeEndpoint:
     def test_sizing_defaults_route_is_gone(self, client):
         assert client.get("/tiered/sizing-defaults").status_code == 404
 
+    def test_finished_report_carries_the_dimension_index(self, client):
+        with patch.object(tiered, "_run_analysis",
+                          lambda code, **kwargs: _outcome(code)):
+            accepted = client.post("/tiered/analyze", json={"stock_code": "AAPL"})
+            body = _poll_until_done(client, accepted.json()["task_id"])
+        assert body["result"]["dimension_index"] == [
+            {"dimension": "fundamentals", "kind": "numeric",
+             "is_actionable": True, "warnings": []},
+            {"dimension": "sentiment", "kind": "textual",
+             "is_actionable": False, "warnings": ["one page blocked"]},
+        ]
+
 
 def _finish(client, stock_code, **overrides):
     """Start and finish one run through the endpoint; returns its task id.
@@ -343,6 +355,139 @@ class TestRunDetailSections:
         task_id = _finish(client, "AAPL")
         response = client.get(f"/tiered/runs/{task_id}", params={"section": "gossip"})
         assert response.status_code == 422
+
+
+class TestDeleteEndpoint:
+    """DELETE /runs/{task_id} (2026-09-21): a queued run is cancelled, a
+    finished one removed, a running one refused."""
+
+    def test_finished_run_goes_with_its_transcript(self, client):
+        task_id = _finish(client, "AAPL")
+        other = _finish(client, "NVDA")
+        from tests.test_tiered_history import _record_call
+        _record_call(task_id, 1)
+
+        response = client.delete(f"/tiered/runs/{task_id}")
+
+        assert response.status_code == 200
+        assert response.json() == {"task_id": task_id, "stock_code": "AAPL",
+                                   "status": "done"}
+        assert client.get(f"/tiered/runs/{task_id}").status_code == 404
+        assert client.get(f"/tiered/runs/{task_id}/transcript").status_code == 404
+        assert client.delete(f"/tiered/runs/{task_id}").status_code == 404
+        assert client.get(f"/tiered/runs/{other}").status_code == 200
+        assert client.get("/tiered/runs/tickers").json() == {"items": ["NVDA"]}
+
+    def test_queued_run_is_cancelled_and_a_running_one_refused(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_CONCURRENT_RUNS", "1")
+        runner, release = TestRunQueueEndpoint._gated_runner()
+        with patch.object(tiered, "_run_analysis", runner):
+            first = client.post("/tiered/analyze", json={"stock_code": "AAPL"}).json()
+            second = client.post("/tiered/analyze", json={"stock_code": "MSFT"}).json()
+            assert second["status"] == "queued"
+
+            refused = client.delete(f"/tiered/runs/{first['task_id']}")
+            assert refused.status_code == 409
+            assert refused.json()["detail"] == {
+                "code": "run_in_progress", "task_id": first["task_id"],
+            }
+            cancelled = client.delete(f"/tiered/runs/{second['task_id']}")
+            assert cancelled.status_code == 200
+            assert cancelled.json()["status"] == "queued"
+
+            release.set()
+            assert _poll_until_done(client, first["task_id"])["status"] == "done"
+        # The cancelled run never ran and is not in the history.
+        items = client.get("/tiered/runs").json()["items"]
+        assert [item["task_id"] for item in items] == [first["task_id"]]
+
+
+class TestStatusEndpoint:
+    def test_status_document(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_CONCURRENT_RUNS", "3")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("SUB_LLM", raising=False)
+        _finish(client, "AAPL")
+
+        response = client.get("/tiered/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["llm"] == {"main_model": "gemini/test-model",
+                               "sub_model": "gemini/test-model", "api_key_set": False}
+        assert body["runs"] == {"max_concurrent": 3, "running": 0, "queued": 0}
+        assert body["defaults"]["capital"] == 100_000.0
+        assert set(body["data_sources"]) == {"finnhub", "alphavantage", "fred", "sec_edgar"}
+        assert [m["market"] for m in body["markets"]] == ["cn", "hk", "us", "jp", "kr", "tw"]
+        assert set(body["markets"][0]) == {
+            "market", "timezone", "local_time", "session_open", "session_close",
+            "runs_blocked", "runs_allowed_from",
+        }
+        assert body["server_time"].endswith("+00:00")
+        assert body["transcript_retention_days"] == 14
+
+
+class TestDebateItemsEndpoint:
+    """GET /runs/{task_id}/debate/items (2026-09-21): the vote items,
+    paged, while the debate section carries only the overview."""
+
+    ITEMS = [
+        {"id": "T1", "dimension": "technicals", "final_status": "counted"},
+        {"id": "T2", "dimension": "technicals", "final_status": "excluded"},
+        {"id": "F1", "dimension": "fundamentals", "final_status": "counted"},
+    ]
+
+    def _deep_run(self, client):
+        from dataclasses import replace
+
+        def fake_run(code, **kwargs):
+            outcome = _deep_outcome(code)
+            tier2 = replace(outcome.final_report, debate_detail={
+                "format": 11, "items": self.ITEMS,
+                "outlook": {"outlook": "bullish"}, "warnings": [],
+            })
+            state = TierState(symbol=code, market=Market.US,
+                              reports={1: outcome.report, 2: tier2})
+            return replace(outcome, state=state, final_report=tier2)
+
+        with patch.object(tiered, "_run_analysis", fake_run):
+            task_id = client.post("/tiered/analyze", json={
+                "stock_code": "AAPL", "depth": 2,
+            }).json()["task_id"]
+            _poll_until_done(client, task_id)
+        return task_id
+
+    def test_debate_section_is_the_overview_and_items_are_paged(self, client):
+        task_id = self._deep_run(client)
+        detail = client.get(f"/tiered/runs/{task_id}",
+                            params={"section": "debate"}).json()
+        assert detail["result"]["tier2"]["debate_detail"] == {
+            "format": 11, "outlook": {"outlook": "bullish"}, "warnings": [],
+            "item_count": 3,
+        }
+        # Every answer carries the light per-report index.
+        assert [d["dimension"] for d in detail["result"]["dimension_index"]] == [
+            "fundamentals", "sentiment"]
+
+        page = client.get(f"/tiered/runs/{task_id}/debate/items",
+                          params={"status": "counted", "page_size": 1, "page": 2})
+        assert page.status_code == 200
+        assert page.json() == {
+            "items": [self.ITEMS[2]], "page": 2, "page_size": 1,
+            "total": 2, "page_count": 2,
+        }
+        by_dimension = client.get(f"/tiered/runs/{task_id}/debate/items",
+                                  params={"dimension": ["technicals"]}).json()
+        assert [i["id"] for i in by_dimension["items"]] == ["T1", "T2"]
+
+    def test_tier1_run_has_an_empty_page_and_unknown_run_404(self, client):
+        task_id = _finish(client, "AAPL")
+        page = client.get(f"/tiered/runs/{task_id}/debate/items").json()
+        assert page["items"] == [] and page["total"] == 0
+        assert client.get("/tiered/runs/nope/debate/items").status_code == 404
+        bad = client.get(f"/tiered/runs/{task_id}/debate/items",
+                         params={"status": "maybe"})
+        assert bad.status_code == 422
 
 
 class TestTranscriptEndpoints:

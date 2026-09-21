@@ -19,6 +19,8 @@ from src.tiered_analysis.run_gate import (
     bar_date_only,
     clock_gate,
     expected_bar_date,
+    known_markets,
+    market_clock,
     staleness_stop_reason,
     trim_incomplete_bars,
 )
@@ -192,3 +194,42 @@ class TestTrimIncompleteBars:
 )
 def test_bar_date_only(raw, expected):
     assert bar_date_only(raw) == expected
+
+
+# ---------------------------------------------------------------------------
+# market clock (the status route's per-market view; the gate reads it)
+# ---------------------------------------------------------------------------
+
+class TestMarketClock:
+    def test_every_known_market_has_a_zone(self):
+        assert known_markets() == ("cn", "hk", "us", "jp", "kr", "tw")
+        for market in known_markets():
+            clock = market_clock(market, now=ny(2026, 8, 8, 12))  # Saturday
+            assert clock.market == market and clock.timezone
+            assert clock.local_time.tzinfo is not None
+
+    def test_blocked_mid_session_says_when_runs_resume(self):
+        clock = market_clock("us", now=ny(2026, 8, 5, 14))
+        assert clock.blocked is True
+        assert clock.session_close.hour == 16
+        assert clock.blocked_until == clock.session_close.replace(
+            minute=RUN_BUFFER_MINUTES)
+        assert clock.local_time.tzinfo == NY or clock.local_time.utcoffset() == ny(
+            2026, 8, 5, 14).utcoffset()
+
+    def test_open_after_the_buffer_and_on_weekends(self):
+        after = market_clock("us", now=ny(2026, 8, 5, 16, 45))
+        assert after.blocked is False and after.blocked_until is None
+        assert after.session_open is not None
+        weekend = market_clock("us", now=ny(2026, 8, 8, 12))
+        assert weekend.blocked is False
+        assert weekend.session_open is None and weekend.session_close is None
+
+    def test_the_gate_reads_the_same_clock(self):
+        now = ny(2026, 8, 5, 14)
+        gate = clock_gate("AAPL", now=now)
+        clock = market_clock("us", now=now)
+        assert gate.blocked is clock.blocked
+        assert gate.session_open == clock.session_open
+        assert gate.session_close == clock.session_close
+        assert gate.detail == clock.detail

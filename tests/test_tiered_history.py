@@ -16,7 +16,10 @@ import pytest
 
 from src.tiered_analysis.history import (
     RunFilters,
+    RunInProgressError,
     create_run,
+    delete_run,
+    get_debate_items,
     get_run,
     get_transcript_call,
     list_runs,
@@ -25,6 +28,7 @@ from src.tiered_analysis.history import (
     mark_done,
     mark_failed,
     run_exists,
+    status_counts,
 )
 
 
@@ -332,10 +336,20 @@ class TestSections:
                   "debate_detail": {"items": [{"id": "t1"}]}},
     }
 
-    def test_default_is_everything(self, isolated_db):
+    INDEX = [
+        {"dimension": "technicals", "kind": None, "is_actionable": False, "warnings": []},
+        {"dimension": "fundamentals", "kind": None, "is_actionable": False, "warnings": []},
+    ]
+
+    def test_default_is_everything_with_the_debate_as_overview(self, isolated_db):
         create_run("task-1", "AAPL")
         mark_done("task-1", self.FULL)
-        assert get_run("task-1")["result"] == self.FULL
+        assert get_run("task-1")["result"] == {
+            **self.FULL,
+            "tier2": {"outlook": "bullish", "score": 7.5,
+                      "debate_detail": {"item_count": 1}},
+            "dimension_index": self.INDEX,
+        }
 
     def test_core_only_drops_the_heavy_parts_but_keeps_tier2_headline(self, isolated_db):
         create_run("task-1", "AAPL")
@@ -345,6 +359,7 @@ class TestSections:
         assert run["result"] == {
             "symbol": "AAPL", "outlook": "bullish", "levels": {"entry": 1},
             "tier2": {"outlook": "bullish", "score": 7.5},
+            "dimension_index": self.INDEX,
         }
 
     def test_one_section_plus_a_named_dimension(self, isolated_db):
@@ -358,7 +373,7 @@ class TestSections:
         plan = get_run("task-1", sections=("core", "plan"))["result"]
         assert plan["sizing"] == {"shares": 3} and "dimensions" not in plan
         debate = get_run("task-1", sections=("core", "debate"))["result"]
-        assert debate["tier2"]["debate_detail"] == {"items": [{"id": "t1"}]}
+        assert debate["tier2"]["debate_detail"] == {"item_count": 1}
 
     def test_unfinished_run_has_null_result_whatever_is_asked(self, isolated_db):
         create_run("task-1", "AAPL")
@@ -366,18 +381,91 @@ class TestSections:
         assert run["result"] is None and run["sections"] == ["core", "plan"]
 
 
+class TestDebateItems:
+    def test_unknown_run_is_none_and_a_run_without_a_record_is_empty(self, isolated_db):
+        assert get_debate_items("nope") is None
+        create_run("task-1", "AAPL")
+        assert get_debate_items("task-1")["total"] == 0
+        mark_done("task-1", RESULT)  # tier 1: no debate record
+        assert get_debate_items("task-1") == {
+            "items": [], "page": 1, "page_size": 20, "total": 0, "page_count": 1,
+        }
+
+    def test_pages_and_filters_the_stored_items(self, isolated_db):
+        items = [
+            {"id": "T1", "dimension": "technicals", "final_status": "counted"},
+            {"id": "T2", "dimension": "technicals", "final_status": "excluded"},
+            {"id": "F1", "dimension": "fundamentals", "final_status": "counted"},
+        ]
+        create_run("task-1", "AAPL")
+        mark_done("task-1", {**RESULT, "tier2": {"debate_detail": {"items": items}}})
+        page = get_debate_items("task-1", statuses=["counted"], page=2, page_size=1)
+        assert [i["id"] for i in page["items"]] == ["F1"]
+        assert page["total"] == 2 and page["page_count"] == 2
+        assert get_debate_items("task-1", dimensions=["technicals"])["total"] == 2
+
+
+def _record_call(task_id, seq, prompt="hello there", reply="ok", error=None):
+    from src.storage import DatabaseManager, TieredRunTranscriptRecord
+
+    with DatabaseManager.get_instance().get_session() as session:
+        session.add(TieredRunTranscriptRecord(
+            task_id=task_id, seq=seq, stage="tier1_analysis",
+            model="gemini/flash", temperature=0.0, duration_ms=120,
+            prompt_tokens=10, completion_tokens=5, structured="schema",
+            error=error, prompt=prompt, reply=reply,
+        ))
+        session.commit()
+
+
+class TestDeleteRun:
+    def test_unknown_run_is_none(self, isolated_db):
+        assert delete_run("nope") is None
+
+    def test_finished_run_goes_with_its_transcript(self, isolated_db):
+        create_run("task-1", "AAPL", inputs={"tier": 2})
+        mark_done("task-1", RESULT)
+        _record_call("task-1", 1)
+        create_run("task-2", "NVDA")
+        _record_call("task-2", 1)
+
+        deleted = delete_run("task-1")
+
+        assert deleted["task_id"] == "task-1" and deleted["status"] == "done"
+        assert deleted["stock_code"] == "AAPL" and deleted["tier"] == 2
+        assert not run_exists("task-1")
+        assert list_transcript("task-1") == []
+        # The neighbour and its transcript are untouched.
+        assert run_exists("task-2") and len(list_transcript("task-2")) == 1
+
+    def test_queued_and_failed_runs_can_go_but_a_running_one_stays(self, isolated_db):
+        create_run("queued", "AAPL", status="queued")
+        create_run("failed", "AAPL")
+        mark_failed("failed", "boom")
+        create_run("running", "AAPL")
+
+        assert delete_run("queued")["status"] == "queued"
+        assert delete_run("failed")["status"] == "failed"
+        with pytest.raises(RunInProgressError) as caught:
+            delete_run("running")
+        assert caught.value.task_id == "running"
+        assert run_exists("running")
+
+
+class TestStatusCounts:
+    def test_every_status_is_present(self, isolated_db):
+        assert status_counts() == {"queued": 0, "running": 0, "done": 0, "failed": 0}
+        create_run("a", "AAPL", status="queued")
+        create_run("b", "AAPL", status="queued")
+        create_run("c", "AAPL")
+        create_run("d", "AAPL")
+        mark_done("d", RESULT)
+        assert status_counts() == {"queued": 2, "running": 1, "done": 1, "failed": 0}
+
+
 class TestTranscript:
     def _record(self, task_id, seq, prompt="hello there", reply="ok", error=None):
-        from src.storage import DatabaseManager, TieredRunTranscriptRecord
-
-        with DatabaseManager.get_instance().get_session() as session:
-            session.add(TieredRunTranscriptRecord(
-                task_id=task_id, seq=seq, stage="tier1_analysis",
-                model="gemini/flash", temperature=0.0, duration_ms=120,
-                prompt_tokens=10, completion_tokens=5, structured="schema",
-                error=error, prompt=prompt, reply=reply,
-            ))
-            session.commit()
+        _record_call(task_id, seq, prompt=prompt, reply=reply, error=error)
 
     def test_index_has_facts_and_sizes_but_no_text(self, isolated_db):
         create_run("task-1", "AAPL")

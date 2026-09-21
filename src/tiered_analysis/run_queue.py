@@ -7,6 +7,8 @@ fanning out parallel LLM calls. A few runs at once are fine; a burst of
 them can exhaust the machine and take every run down with it. The cap
 is ``MAX_CONCURRENT_RUNS`` (default ``DEFAULT_MAX_CONCURRENT_RUNS``),
 read on every dispatch so a changed setting applies without a restart.
+``remove`` takes a run out of the line (or out of the history) under the
+same lock, so a cancel and a dispatch can never cross.
 
 How: the line itself lives in the database — a run is created ``queued``
 (src/tiered_analysis/history.py) and ``dispatch`` promotes the oldest
@@ -127,6 +129,21 @@ class RunQueue:
                 ).start()
                 started.append(run.task_id)
         return started
+
+    def remove(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Delete a run that is not executing: a queued run leaves the
+        line (that is how one is cancelled), a finished or failed run is
+        removed from the history. Holds the queue lock so a queued row
+        cannot be promoted to running between the check and the delete.
+        Returns the deleted row's summary, None for an unknown task id;
+        raises ``history.RunInProgressError`` when the run is executing
+        (its thread cannot be stopped)."""
+        from . import history
+
+        with self._lock:
+            if task_id in self._active:
+                raise history.RunInProgressError(task_id)
+            return history.delete_run(task_id)
 
     def _work(self, run: QueuedRun) -> None:
         try:

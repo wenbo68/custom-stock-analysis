@@ -27,7 +27,14 @@ from datetime import datetime, timedelta
 from typing import Any, Collection, Dict, Iterable, List, Optional, Sequence
 
 from .llm_support import TRANSCRIPT_MAX_AGE_DAYS
-from .report_sections import ALL_SECTIONS, select_sections
+from .report_sections import (
+    ALL_SECTIONS,
+    DEFAULT_ITEM_PAGE_SIZE,
+    debate_record,
+    page_count,
+    page_debate_items,
+    select_sections,
+)
 from .run_digest import DIGEST_COLUMNS, digest_from_inputs, digest_from_result
 
 logger = logging.getLogger(__name__)
@@ -61,6 +68,15 @@ FILTERABLE_OUTLOOKS = OUTLOOK_WORDS + (NO_OUTLOOK,)
 #: The creation-time inputs that make two runs "the same run" (and that
 #: the history row shows while a run is in flight).
 INPUT_KEYS = ("tier", "capital", "risk_fraction", "reward_risk", "hold_weeks")
+
+
+class RunInProgressError(RuntimeError):
+    """The run is executing. Its thread cannot be stopped from outside,
+    so the row stays until the run finishes or fails."""
+
+    def __init__(self, task_id: str) -> None:
+        super().__init__(f"run {task_id} is in progress")
+        self.task_id = task_id
 
 
 def _session():
@@ -138,6 +154,37 @@ def mark_running(task_id: str) -> None:
     _update_run(task_id, status=STATUS_RUNNING)
 
 
+def delete_run(task_id: str) -> Optional[Dict[str, Any]]:
+    """Delete a run and its transcript rows. A queued run is simply taken
+    out of the line (that is how one is cancelled); a finished or failed
+    run is removed from the history. Returns the deleted row's summary,
+    or None for an unknown task id. Raises ``RunInProgressError`` for a
+    running row. Go through ``RunQueue.remove`` rather than calling this
+    directly, so a queued row cannot be promoted to running between the
+    check and the delete."""
+    from src.storage import TieredRunRecord, TieredRunTranscriptRecord
+
+    with _session() as session:
+        row = (
+            session.query(TieredRunRecord)
+            .filter_by(task_id=task_id)
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        if row.status == STATUS_RUNNING:
+            raise RunInProgressError(task_id)
+        summary = _row_summary(row)
+        (
+            session.query(TieredRunTranscriptRecord)
+            .filter_by(task_id=task_id)
+            .delete(synchronize_session=False)
+        )
+        session.delete(row)
+        session.commit()
+        return summary
+
+
 def fail_stale_running_runs(error: str = STALE_RUN_ERROR) -> int:
     """Startup housekeeping: every run still marked ``running`` belongs
     to a process that no longer exists (runs execute in-process threads),
@@ -210,6 +257,26 @@ def find_active_duplicate(
             if _digest_inputs(_inputs_of(row)) == wanted:
                 return {"task_id": row.task_id, "status": row.status}
     return None
+
+
+def status_counts() -> Dict[str, int]:
+    """How many runs sit in each status, every status present (0 when
+    none) — the server-status route's queue figures."""
+    from sqlalchemy import func
+
+    from src.storage import TieredRunRecord
+
+    counts = {status: 0 for status in ALL_STATUSES}
+    with _session() as session:
+        rows = (
+            session.query(TieredRunRecord.status, func.count(TieredRunRecord.id))
+            .group_by(TieredRunRecord.status)
+            .all()
+        )
+    for status, count in rows:
+        if status in counts:
+            counts[status] = int(count or 0)
+    return counts
 
 
 def _queue_ahead(session: Any) -> Dict[str, int]:
@@ -335,7 +402,7 @@ def list_runs(
         "page": safe_page,
         "page_size": safe_size,
         "total": total,
-        "page_count": max(1, -(-total // safe_size)),
+        "page_count": page_count(total, safe_size),
     }
 
 
@@ -411,6 +478,44 @@ def get_run(
                     if isinstance(result, dict) else result
                 )
         return summary
+
+
+def get_debate_items(
+    task_id: str,
+    dimensions: Optional[Iterable[str]] = None,
+    statuses: Optional[Iterable[str]] = None,
+    page: int = 1,
+    page_size: int = DEFAULT_ITEM_PAGE_SIZE,
+) -> Optional[Dict[str, Any]]:
+    """One page of the run's deep-analysis vote items (see
+    ``report_sections.page_debate_items``), or None for an unknown task
+    id. A run without a debate record — tier 1, unfinished, failed, or
+    its stored report unreadable — has an empty page, not an error."""
+    from src.storage import TieredRunRecord
+
+    with _session() as session:
+        row = (
+            session.query(TieredRunRecord.result_json)
+            .filter_by(task_id=task_id)
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        result = _parse_result(row.result_json)
+    return page_debate_items(
+        debate_record(result), dimensions, statuses, page=page, page_size=page_size,
+    )
+
+
+def _parse_result(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The stored report as a dict, None when absent or unreadable."""
+    if not raw:
+        return None
+    try:
+        result = json.loads(raw)
+    except ValueError:
+        return None
+    return result if isinstance(result, dict) else None
 
 
 def run_exists(task_id: str) -> bool:

@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,29 @@ class ClockGateResult:
     session_close: Optional[datetime] = None
 
 
+@dataclass(frozen=True)
+class MarketClock:
+    """Where one market's clock stands right now: what the status route
+    reports per market, and what the clock gate reads for a symbol."""
+
+    market: str
+    #: IANA zone name, e.g. America/New_York.
+    timezone: str
+    #: Now, in the market's own zone (tz-aware).
+    local_time: datetime
+    #: Today's regular session, market-local and tz-aware; None on a
+    #: non-session day (or when the calendar could not say).
+    session_open: Optional[datetime]
+    session_close: Optional[datetime]
+    #: Whether a run would be refused right now.
+    blocked: bool
+    #: When blocked: the moment runs are allowed again (the close plus
+    #: ``RUN_BUFFER_MINUTES``); None otherwise.
+    blocked_until: Optional[datetime]
+    #: Log/debug wording — never shown in the UI verbatim.
+    detail: str
+
+
 def market_for_symbol(symbol: str) -> Optional[str]:
     """Market key ('cn'/'hk'/'us'/...) for a symbol, None when unknown."""
     from src.core.trading_calendar import get_market_for_stock
@@ -85,60 +108,85 @@ def market_for_symbol(symbol: str) -> Optional[str]:
     return get_market_for_stock(symbol)
 
 
-def clock_gate(
-    symbol: str, now: Optional[datetime] = None, override: bool = False
-) -> ClockGateResult:
-    """Decide whether an interactive tiered run may start right now.
+def known_markets() -> Tuple[str, ...]:
+    """Every market the clock gate knows, in a fixed order."""
+    from src.core.trading_calendar import MARKET_TIMEZONE
 
-    Blocked window: [session open, session close + RUN_BUFFER_MINUTES) in
-    the exchange's local time. Unknown markets, non-session days and
-    calendar failures fail OPEN — the staleness gate still protects the
-    run's correctness.
-    """
+    return tuple(MARKET_TIMEZONE)
+
+
+def market_clock(market: str, now: Optional[datetime] = None) -> MarketClock:
+    """One market's clock: the blocked window is [session open, session
+    close + RUN_BUFFER_MINUTES) in the exchange's local time. Non-session
+    days and calendar failures fail OPEN — the staleness gate still
+    protects the run's correctness."""
     from src.core.trading_calendar import (
+        MARKET_TIMEZONE,
         calendar_available,
         get_market_now,
         get_session_window,
     )
 
-    market = market_for_symbol(symbol)
-    if override:
-        return ClockGateResult(False, market, "override accepted")
-    if market is None:
-        return ClockGateResult(False, None, f"unknown market for {symbol!r}")
-
     market_now = get_market_now(market, current_time=now)
+    zone = MARKET_TIMEZONE.get(market, "")
     buffer = timedelta(minutes=RUN_BUFFER_MINUTES)
+
+    def clock(session_open, session_close, blocked, detail):
+        return MarketClock(
+            market=market,
+            timezone=zone,
+            local_time=market_now,
+            session_open=session_open,
+            session_close=session_close,
+            blocked=blocked,
+            blocked_until=session_close + buffer if blocked else None,
+            detail=detail,
+        )
 
     if calendar_available():
         session_open, session_close = get_session_window(market, current_time=now)
         if session_open is None or session_close is None:
-            return ClockGateResult(False, market, "no session today")
+            return clock(None, None, False, "no session today")
         blocked = session_open <= market_now < session_close + buffer
-        return ClockGateResult(
-            blocked,
-            market,
+        return clock(
+            session_open, session_close, blocked,
             f"session {session_open:%H:%M}-{session_close:%H:%M} "
             f"+{RUN_BUFFER_MINUTES}min, local now {market_now:%H:%M}",
-            session_open=session_open,
-            session_close=session_close,
         )
 
     # Fallback: fixed weekday sessions, no holiday knowledge.
     open_t, close_t = _FALLBACK_OPEN.get(market), _FALLBACK_CLOSE.get(market)
     if open_t is None or close_t is None or market_now.weekday() >= _SATURDAY:
-        return ClockGateResult(False, market, "fallback: weekend/unknown session")
+        return clock(None, None, False, "fallback: weekend/unknown session")
     day = market_now.date()
     start = datetime.combine(day, open_t, tzinfo=market_now.tzinfo)
     close = datetime.combine(day, close_t, tzinfo=market_now.tzinfo)
     blocked = start <= market_now < close + buffer
-    return ClockGateResult(
-        blocked,
-        market,
+    return clock(
+        start, close, blocked,
         f"fallback session {open_t:%H:%M}-{close_t:%H:%M}"
         f"+{RUN_BUFFER_MINUTES}min, local now {market_now:%H:%M}",
-        session_open=start,
-        session_close=close,
+    )
+
+
+def clock_gate(
+    symbol: str, now: Optional[datetime] = None, override: bool = False
+) -> ClockGateResult:
+    """Decide whether an interactive tiered run may start right now: the
+    symbol's market clock (``market_clock``), unless the caller overrode
+    the gate or the market is unknown, both of which fail OPEN."""
+    market = market_for_symbol(symbol)
+    if override:
+        return ClockGateResult(False, market, "override accepted")
+    if market is None:
+        return ClockGateResult(False, None, f"unknown market for {symbol!r}")
+    clock = market_clock(market, now=now)
+    return ClockGateResult(
+        clock.blocked,
+        market,
+        clock.detail,
+        session_open=clock.session_open,
+        session_close=clock.session_close,
     )
 
 

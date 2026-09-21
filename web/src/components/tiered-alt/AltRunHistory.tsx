@@ -7,7 +7,7 @@ import { isFromPreviousDay, plainNumber, queuePosition, riskPctText } from './al
 import { ALT_COLOR, OUTLOOK_TEXT } from './altStyles';
 import { AltPageSelector, AltPairField, AltPill, AltPillRow, AltSelect } from './AltFields';
 import { AltResult } from './AltResult';
-import { AltModal } from './AltUi';
+import { AltModal, MODAL_BODY } from './AltUi';
 import { hasAnyFilter, isValidDay, toggled, type HistoryFilters } from './historyFilters';
 
 // Status (where the run is: queued, running, done, failed) and outlook
@@ -143,7 +143,16 @@ export interface AltRunHistoryProps {
   expandedResult: TieredResult | null;
   expandedError: string | null;
   onToggle: (taskId: string) => void;
+  /** Remove the run (a queued one is thereby cancelled); the page asks the server. */
+  onDelete: (taskId: string) => void;
+  /** The run whose removal is in flight, if any. */
+  deletingTaskId: string | null;
+  /** Why the last removal failed, shown under the expanded row. */
+  deleteError: string | null;
 }
+
+// Whether the row offers removal: a running run cannot be stopped.
+const isRemovable = (run: TieredRunSummary): boolean => run.status !== 'running';
 
 // Section 2: run history. Filters at the top apply the moment something is
 // entered or picked — no search button — and show as removable pills
@@ -167,10 +176,15 @@ export const AltRunHistory = ({
   expandedResult,
   expandedError,
   onToggle,
+  onDelete,
+  deletingTaskId,
+  deleteError,
 }: AltRunHistoryProps) => {
   const { t, language } = useUiLanguage();
   // The run whose amber date was clicked — its previous-day note is open.
   const [staleNoteTaskId, setStaleNoteTaskId] = useState<string | null>(null);
+  // The run whose remove button was clicked — its confirmation is open.
+  const [confirmTaskId, setConfirmTaskId] = useState<string | null>(null);
 
   const hasFilters = hasAnyFilter(filters);
 
@@ -498,6 +512,65 @@ export const AltRunHistory = ({
                 </AltModal>
                 {isExpanded ? (
                   <div className="pb-5 pt-3">
+                    {isRemovable(run) ? (
+                      // Removal lives inside the expanded row (2026-09-21):
+                      // one quiet link at the top, a confirmation popup, and
+                      // the reason under it if the server refused.
+                      <div className="mb-3 flex flex-col items-end gap-1">
+                        <button
+                          type="button"
+                          data-testid="alt-run-remove"
+                          disabled={deletingTaskId === run.task_id}
+                          onClick={() => setConfirmTaskId(run.task_id)}
+                          className="cursor-pointer text-xs text-gray-500 hover:text-red-300 disabled:cursor-default disabled:hover:text-gray-500"
+                        >
+                          {deletingTaskId === run.task_id
+                            ? t('tiered.altHistory.deleting')
+                            : run.status === 'queued'
+                              ? t('tiered.altHistory.cancel')
+                              : t('tiered.altHistory.delete')}
+                        </button>
+                        {deleteError ? (
+                          <p className="text-xs text-amber-300" data-testid="alt-run-remove-error">
+                            {deleteError}
+                          </p>
+                        ) : null}
+                        <AltModal
+                          isOpen={confirmTaskId === run.task_id}
+                          onClose={() => setConfirmTaskId(null)}
+                        >
+                          <div className={MODAL_BODY}>
+                            <p>
+                              {run.status === 'queued'
+                                ? t('tiered.altHistory.cancelAsk')
+                                : t('tiered.altHistory.deleteAsk')}
+                            </p>
+                            <div className="flex justify-end gap-4 pt-1">
+                              <button
+                                type="button"
+                                className="cursor-pointer text-gray-400 hover:text-gray-200"
+                                onClick={() => setConfirmTaskId(null)}
+                              >
+                                {t('tiered.altHistory.keep')}
+                              </button>
+                              <button
+                                type="button"
+                                data-testid="alt-run-remove-confirm"
+                                className="cursor-pointer font-semibold text-red-300 hover:text-red-200"
+                                onClick={() => {
+                                  setConfirmTaskId(null);
+                                  onDelete(run.task_id);
+                                }}
+                              >
+                                {run.status === 'queued'
+                                  ? t('tiered.altHistory.confirmCancel')
+                                  : t('tiered.altHistory.confirmDelete')}
+                              </button>
+                            </div>
+                          </div>
+                        </AltModal>
+                      </div>
+                    ) : null}
                     {run.status === 'failed' ? (
                       <p className="text-sm text-red-300">
                         {run.error ?? expandedError ?? t('tiered.error.title')}

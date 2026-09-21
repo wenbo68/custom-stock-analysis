@@ -9,7 +9,12 @@ server restarts — one page at a time, filtered in SQL — and
 GET /runs/{task_id} returns the stored report, whole or by section.
 A run's LLM transcript is served as an index (GET .../transcript) plus
 one call at a time (GET .../transcript/{seq}), since the text of every
-call together runs to half a megabyte.
+call together runs to half a megabyte; the deep-analysis vote items are
+paged the same way (GET .../debate/items). DELETE /runs/{task_id}
+removes a run — a queued one is thereby cancelled — and GET /status says
+what the server can do right now (2026-09-21, for the chatbot: the
+model, the data sources, the run slots, the defaults, each market's
+clock), so a client can explain a refusal before it happens.
 
 Request and response shapes live in tiered_schemas.py so /docs shows
 both sides of every route.
@@ -36,17 +41,21 @@ from fastapi import APIRouter, HTTPException, Query
 
 from api.v1.endpoints.tiered_schemas import (
     AnalyzeAccepted,
+    DebateItemPage,
+    DebateItemStatus,
     OutlookFilter,
+    RunDeleted,
     RunDetail,
     RunPage,
     RunStatus,
     Section,
+    ServerStatus,
     TickerList,
     TieredAnalyzeRequest,
     TranscriptCall,
     TranscriptIndex,
 )
-from src.tiered_analysis import history
+from src.tiered_analysis import history, report_sections
 from src.tiered_analysis.llm_support import LlmTranscript
 from src.tiered_analysis.run_context import llm_model
 from src.tiered_analysis.run_queue import QueuedRun, RunQueue
@@ -283,6 +292,23 @@ def start_tiered_analysis(request: TieredAnalyzeRequest) -> Dict[str, Any]:
             "depth": request.depth, "status": status}
 
 
+@router.get("/status", response_model=ServerStatus)
+def get_server_status() -> Dict[str, Any]:
+    """What this server can do right now.
+
+    The model that will answer (and whether a key is set; the key itself
+    is never reported), which data sources are configured, how many run
+    slots exist and how many runs hold or wait for one, what a run uses
+    when the request leaves a field out, how long transcripts are kept,
+    and where each market's clock stands — runs are refused during the
+    trading day, so this says when they are accepted again. Also the
+    server's own time, UTC.
+    """
+    from src.tiered_analysis.server_status import server_status
+
+    return server_status()
+
+
 @router.get("/runs", response_model=RunPage)
 def list_tiered_runs(
     ticker: Optional[List[str]] = Query(
@@ -354,7 +380,9 @@ def get_tiered_run(
             "Which parts of the report to include (repeat to combine). "
             "Omit for everything. `core` (headline facts, a few KB) is always "
             "included; `dimensions` is the data reports (~60 KB), `debate` the "
-            "deep-analysis record (~80 KB), `plan` the trade-plan receipt."
+            "deep-analysis overview (~10 KB: outlook, summary outline, pools, "
+            "item count — the vote items themselves are paged at "
+            "`GET /runs/{task_id}/debate/items`), `plan` the trade-plan receipt."
         ),
     ),
     dimension: Optional[List[str]] = Query(
@@ -369,7 +397,9 @@ def get_tiered_run(
     """One run with its stored report, whole or by section.
 
     `result` is null while the run is queued or running and after a
-    failure (see `status` and `error`). 404 for an unknown task id.
+    failure (see `status` and `error`). Whatever the sections, `result`
+    carries `dimension_index`: one light row per data report (name, kind,
+    whether it counted, warnings). 404 for an unknown task id.
     """
     from src.tiered_analysis.report_sections import normalize_sections
 
@@ -379,6 +409,67 @@ def get_tiered_run(
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return run
+
+
+@router.delete("/runs/{task_id}", response_model=RunDeleted)
+def delete_tiered_run(task_id: str) -> Dict[str, Any]:
+    """Delete a run and its transcript.
+
+    A queued run is taken out of the line — this is how a run is
+    cancelled. A finished or failed run is removed from the history.
+
+    - 404: unknown task id.
+    - 409 `run_in_progress`: the run is executing and cannot be stopped;
+      wait for it to finish or fail, then delete it.
+    """
+    try:
+        deleted = run_queue.remove(task_id)
+    except history.RunInProgressError:
+        raise HTTPException(status_code=409, detail={
+            "code": "run_in_progress", "task_id": task_id,
+        })
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    logger.info("tiered run %s (%s, %s) deleted",
+                task_id, deleted["stock_code"], deleted["status"])
+    return {
+        "task_id": deleted["task_id"],
+        "stock_code": deleted["stock_code"],
+        "status": deleted["status"],
+    }
+
+
+@router.get("/runs/{task_id}/debate/items", response_model=DebateItemPage)
+def list_tiered_debate_items(
+    task_id: str,
+    dimension: Optional[List[str]] = Query(
+        default=None,
+        description="Keep items about these data reports (any of), e.g. technicals, company_news.",
+    ),
+    status: Optional[List[DebateItemStatus]] = Query(
+        default=None, description="Any of: counted, excluded.",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(
+        default=report_sections.DEFAULT_ITEM_PAGE_SIZE,
+        ge=1, le=report_sections.MAX_ITEM_PAGE_SIZE,
+    ),
+) -> Dict[str, Any]:
+    """One page of a deep-analysis run's vote items.
+
+    Each item is one piece of evidence the listers raised and the
+    checkers voted on; `final_status` says whether it counted toward the
+    score. Filters combine with AND. A run without a deep-analysis record
+    (tier 1, unfinished, failed) has an empty page; 404 for an unknown
+    task id.
+    """
+    items = history.get_debate_items(
+        task_id, dimensions=dimension, statuses=status,
+        page=page, page_size=page_size,
+    )
+    if items is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return items
 
 
 @router.get("/runs/{task_id}/transcript", response_model=TranscriptIndex)

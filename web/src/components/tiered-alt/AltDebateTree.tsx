@@ -460,22 +460,51 @@ export const DebateScores = ({ detail }: { detail: TieredDebateDetail }) => {
   );
 };
 
+// Fetches a run's vote items — the test seam; production pages them
+// from the server.
+export type DebateItemsLoader = (taskId: string) => Promise<TieredDebateItem[]>;
+
+type ItemsState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; items: TieredDebateItem[] };
+
 // The v8/v9 evidence vote, one page: per-dimension groups headed by the
 // surviving ↑/↓ counts and every bullet's history as marks. No steps, no
 // pills — crossed out = not counted. The score arithmetic lives in the
-// header score's modal (DebateScores), not here.
-const VoteTree = ({ detail }: { detail: TieredDebateDetail }) => {
+// header score's modal (DebateScores), not here. The items arrive the
+// first time the fold opens (2026-09-21): the server serves the debate
+// as an overview and pages the items separately, since they are ~70 KB
+// of the report and most readers never open this fold.
+const VoteTree = ({ taskId, loader }: { taskId: string; loader: DebateItemsLoader }) => {
   const { t } = useUiLanguage();
   const [modal, setModal] = useState<MarkModal | null>(null);
-  const items = detail.items ?? [];
+  const [state, setState] = useState<ItemsState>({ kind: 'idle' });
+  const items = state.kind === 'ready' ? state.items : [];
   const groups = DIMENSION_ORDER.map((dimension) => ({
     dimension,
     items: items.filter((item) => item.dimension === dimension),
   })).filter((group) => group.items.length > 0);
 
+  const ensureLoaded = (opened: boolean) => {
+    if (!opened || state.kind !== 'idle') {
+      return;
+    }
+    setState({ kind: 'loading' });
+    void loader(taskId).then(
+      (loaded) => setState({ kind: 'ready', items: loaded }),
+      (error: unknown) =>
+        setState({
+          kind: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        }),
+    );
+  };
+
   return (
     <>
-      <AltFold title={t('tiered.tree.transcript')}>
+      <AltFold title={t('tiered.tree.transcript')} onToggle={ensureLoaded}>
         <div data-testid="alt-debate-tree" className="flex flex-col gap-3">
           <div data-testid="alt-tree-explain">
             <AltSectionLabel>{t('tiered.tree.howItWorks')}</AltSectionLabel>
@@ -485,6 +514,15 @@ const VoteTree = ({ detail }: { detail: TieredDebateDetail }) => {
               ))}
             </ol>
           </div>
+
+          {state.kind === 'loading' ? (
+            <p className="text-xs text-gray-500">{t('tiered.tree.loading')}</p>
+          ) : null}
+          {state.kind === 'error' ? (
+            <p className="text-xs text-amber-300">
+              {t('tiered.tree.loadError', { error: state.message })}
+            </p>
+          ) : null}
 
           {groups.map((group) => {
             const counted = group.items.filter((item) => item.final_status === 'counted');
@@ -526,7 +564,11 @@ const VoteTree = ({ detail }: { detail: TieredDebateDetail }) => {
 };
 
 interface AltDebateTreeProps {
-  detail: TieredDebateDetail;
+  /** The run whose vote items to show. */
+  taskId: string;
+  loader: DebateItemsLoader;
 }
 
-export const AltDebateTree = ({ detail }: AltDebateTreeProps) => <VoteTree detail={detail} />;
+export const AltDebateTree = ({ taskId, loader }: AltDebateTreeProps) => (
+  <VoteTree taskId={taskId} loader={loader} />
+);

@@ -239,7 +239,12 @@ export type TieredSummaryStructure = {
 export type TieredDebateDetail = {
   // 5/6/7 on tree-format runs; absent on everything stored before.
   format?: number;
+  // The server serves the record as an overview (2026-09-21): the items
+  // are never in it — they are paged at GET /runs/{id}/debate/items —
+  // only their count. `items` remains for a caller that already holds
+  // the whole stored record.
   items?: TieredDebateItem[];
+  item_count?: number;
   outlook: {
     outlook: TieredOutlook;
     summary: string;
@@ -347,6 +352,16 @@ export type TieredTranscriptCall = TieredTranscriptCallFacts & {
   reply: string | null;
 };
 
+// One light row per data report, on every report whatever sections
+// were asked for (2026-09-21): which reports exist and which went wrong,
+// without the reports themselves.
+export type TieredDimensionIndexEntry = {
+  dimension: string;
+  kind: string | null;
+  is_actionable: boolean;
+  warnings: string[];
+};
+
 export type TieredResult = {
   symbol: string;
   market: string;
@@ -373,6 +388,7 @@ export type TieredResult = {
   // Max hold time in weeks the run was judged against (2026-08-08);
   // absent on old stored runs.
   hold_weeks?: number | null;
+  dimension_index?: TieredDimensionIndexEntry[];
 };
 
 // queued (2026-09-15): waiting for a free slot in the server's global run
@@ -450,6 +466,62 @@ export type TieredRunPage = {
   // Every match, not just this page.
   total: number;
   page_count: number;
+};
+
+// DELETE /runs/{id}: what the run was. `queued` means it was cancelled
+// before it started.
+export type TieredRunDeleted = {
+  task_id: string;
+  stock_code: string;
+  status: 'queued' | 'done' | 'failed';
+};
+
+// GET /runs/{id}/debate/items: one page of a deep run's vote items.
+export type TieredDebateItemStatus = 'counted' | 'excluded';
+
+export type TieredDebateItemQuery = {
+  dimension?: string[];
+  status?: TieredDebateItemStatus[];
+  page?: number;
+  page_size?: number;
+};
+
+export type TieredDebateItemPage = {
+  items: TieredDebateItem[];
+  page: number;
+  page_size: number;
+  total: number;
+  page_count: number;
+};
+
+// The most vote items one page may hold (the server's cap).
+export const DEBATE_ITEMS_PAGE_MAX = 200;
+
+// GET /status: what the server can do right now (2026-09-21).
+export type TieredMarketClock = {
+  market: string;
+  timezone: string;
+  local_time: string;
+  session_open: string | null;
+  session_close: string | null;
+  runs_blocked: boolean;
+  runs_allowed_from: string | null;
+};
+
+export type TieredServerStatus = {
+  server_time: string;
+  llm: { main_model: string | null; sub_model: string | null; api_key_set: boolean };
+  data_sources: { finnhub: boolean; alphavantage: boolean; fred: boolean; sec_edgar: boolean };
+  runs: { max_concurrent: number; running: number; queued: number };
+  defaults: {
+    tier: number;
+    hold_weeks: number;
+    capital: number | null;
+    risk_fraction: number | null;
+    reward_risk: number;
+  };
+  transcript_retention_days: number;
+  markets: TieredMarketClock[];
 };
 
 // Tier 3 retired (outlook redesign): the backend rejects depth 3 with a
@@ -544,6 +616,45 @@ export const tieredApi = {
     const response = await apiClient.get<TieredTranscriptCall>(
       `/api/v1/tiered/runs/${taskId}/transcript/${seq}`,
     );
+    return response.data;
+  },
+
+  // One page of a deep run's vote items, filtered by the server.
+  getDebateItems: async (
+    taskId: string,
+    query: TieredDebateItemQuery = {},
+  ): Promise<TieredDebateItemPage> => {
+    const response = await apiClient.get<TieredDebateItemPage>(
+      `/api/v1/tiered/runs/${taskId}/debate/items`,
+      { params: query, paramsSerializer: { indexes: null } },
+    );
+    return response.data;
+  },
+
+  // Every vote item of a deep run, in stored order — the vote tree shows
+  // them all at once, so it pages through at the largest page size.
+  getAllDebateItems: async (taskId: string): Promise<TieredDebateItem[]> => {
+    const first = await tieredApi.getDebateItems(taskId, { page_size: DEBATE_ITEMS_PAGE_MAX });
+    const rest = await Promise.all(
+      Array.from({ length: first.page_count - 1 }, (_, index) =>
+        tieredApi.getDebateItems(taskId, { page: index + 2, page_size: DEBATE_ITEMS_PAGE_MAX }),
+      ),
+    );
+    return [first, ...rest].flatMap((page) => page.items);
+  },
+
+  // Delete a run and its transcript; a queued run is thereby cancelled.
+  // A running run is refused with a 409 whose detail.code is
+  // run_in_progress.
+  deleteRun: async (taskId: string): Promise<TieredRunDeleted> => {
+    const response = await apiClient.delete<TieredRunDeleted>(`/api/v1/tiered/runs/${taskId}`);
+    return response.data;
+  },
+
+  // What the server can do right now: model, data sources, run slots,
+  // defaults, and each market's clock.
+  getStatus: async (): Promise<TieredServerStatus> => {
+    const response = await apiClient.get<TieredServerStatus>('/api/v1/tiered/status');
     return response.data;
   },
 };

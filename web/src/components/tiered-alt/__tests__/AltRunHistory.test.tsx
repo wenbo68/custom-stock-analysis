@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { TieredRunSummary } from '../../../api/tiered';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
@@ -35,6 +35,9 @@ function renderHistory(overrides: Partial<AltRunHistoryProps> = {}) {
     expandedResult: null,
     expandedError: null,
     onToggle: vi.fn(),
+    onDelete: vi.fn(),
+    deletingTaskId: null,
+    deleteError: null,
     ...overrides,
   };
   render(
@@ -62,6 +65,60 @@ const commit = (box: HTMLElement, value: string) => {
 };
 
 describe('AltRunHistory', () => {
+  it('offers to delete an expanded finished run, after a confirmation', () => {
+    const props = renderHistory({
+      runs: [makeRun('t1'), makeRun('t2')],
+      expandedTaskId: 't1',
+      expandedError: 'not loaded',
+    });
+    const remove = screen.getByTestId('alt-run-remove');
+    expect(remove).toHaveTextContent(/Delete this run|删除这次分析/);
+    fireEvent.click(remove);
+    expect(props.onDelete).not.toHaveBeenCalled();
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(/cannot be undone|无法撤销/);
+    fireEvent.click(screen.getByText(/^Keep$|^保留$/));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(props.onDelete).not.toHaveBeenCalled();
+    fireEvent.click(remove);
+    fireEvent.click(screen.getByTestId('alt-run-remove-confirm'));
+    expect(props.onDelete).toHaveBeenCalledWith('t1');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('words removal of a queued run as cancelling it, and offers none for a running one', () => {
+    const props = renderHistory({
+      runs: [makeRun('q1', { status: 'queued', outlook: undefined })],
+      expandedTaskId: 'q1',
+    });
+    const remove = screen.getByTestId('alt-run-remove');
+    expect(remove).toHaveTextContent(/Cancel this run|取消排队/);
+    fireEvent.click(remove);
+    expect(screen.getByRole('dialog')).toHaveTextContent(/will not start|不会开始/);
+    fireEvent.click(screen.getByTestId('alt-run-remove-confirm'));
+    expect(props.onDelete).toHaveBeenCalledWith('q1');
+
+    cleanup();
+    renderHistory({
+      runs: [makeRun('r1', { status: 'running', outlook: undefined })],
+      expandedTaskId: 'r1',
+    });
+    expect(screen.queryByTestId('alt-run-remove')).not.toBeInTheDocument();
+  });
+
+  it('shows the removal in flight and the server’s refusal under the row', () => {
+    renderHistory({
+      runs: [makeRun('t1')],
+      expandedTaskId: 't1',
+      deletingTaskId: 't1',
+      deleteError: 'This run is in progress and cannot be removed.',
+    });
+    const remove = screen.getByTestId('alt-run-remove');
+    expect(remove).toBeDisabled();
+    expect(remove).toHaveTextContent(/Deleting…|删除中…/);
+    expect(screen.getByTestId('alt-run-remove-error')).toHaveTextContent(/in progress/);
+  });
+
   it('shows a queued row with its place in line and explains it when expanded', () => {
     renderHistory({
       runs: [makeRun('q1', { status: 'queued', queue_ahead: 2, shares: null })],

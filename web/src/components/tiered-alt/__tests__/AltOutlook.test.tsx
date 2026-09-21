@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 import type {
@@ -198,13 +198,27 @@ function makeRichDebate(): TieredDebateDetail {
   };
 }
 
+// The vote tree fetches its items when its fold opens (2026-09-21);
+// here they come from the fixture's own record.
 function renderResult(result: TieredResult) {
   render(
     <MemoryRouter>
       <UiLanguageProvider>
-        <AltResult result={result} taskId="task-9" />
+        <AltResult
+          result={result}
+          taskId="task-9"
+          debateItemsLoader={async () => result.tier2?.debate_detail?.items ?? []}
+        />
       </UiLanguageProvider>
     </MemoryRouter>,
+  );
+}
+
+// Open the vote tree's fold and wait for its items.
+async function openTree() {
+  fireEvent.click(screen.getByText(/Details|详情/));
+  await waitFor(() =>
+    expect(screen.getByTestId('alt-debate-tree').querySelector('[data-testid^="alt-tree-item-"]')).not.toBeNull(),
   );
 }
 
@@ -549,12 +563,13 @@ describe('AltResult deep-analysis layout', () => {
 });
 
 describe('AltResult v11 detail tree', () => {
-  function renderRich() {
+  async function renderRich() {
     renderResult(makeOutlookResult({ depth: 2, tier2: makeTier2(makeRichDebate()) }));
+    await openTree();
   }
 
-  it('shows the median as a bare number whose modal lists every score', () => {
-    renderRich();
+  it('shows the median as a bare number whose modal lists every score', async () => {
+    await renderRich();
     const badge = screen.getByTestId('alt-tree-weight-T1');
     expect(badge).toHaveTextContent(/^4\.5$/);
     fireEvent.click(badge);
@@ -564,8 +579,8 @@ describe('AltResult v11 detail tree', () => {
     expect(dialog).toHaveTextContent(/中位数：4\.5|Median: 4\.5/);
   });
 
-  it('shows one check per lister; its modal carries validity, score and reason', () => {
-    renderRich();
+  it('shows one check per lister; its modal carries validity, score and reason', async () => {
+    await renderRich();
     const marks = within(screen.getByTestId('alt-tree-item-T1')).getAllByRole('button', {
       name: '✓',
     });
@@ -579,8 +594,8 @@ describe('AltResult v11 detail tree', () => {
     expect(dialog).toHaveTextContent('Strong but not decisive.');
   });
 
-  it('a checker ✗ modal shows the objection, then the score and its reason', () => {
-    renderRich();
+  it('a checker ✗ modal shows the objection, then the score and its reason', async () => {
+    await renderRich();
     fireEvent.click(
       within(screen.getByTestId('alt-tree-item-S1')).getByRole('button', { name: '✗' }),
     );
@@ -592,8 +607,8 @@ describe('AltResult v11 detail tree', () => {
     expect(dialog).toHaveTextContent('A minor point either way.');
   });
 
-  it('the second vote is Checker 2 — never a decider word', () => {
-    renderRich();
+  it('the second vote is Checker 2 — never a decider word', async () => {
+    await renderRich();
     const marks = within(screen.getByTestId('alt-tree-item-S1')).getAllByRole('button', {
       name: '✓',
     });
@@ -604,8 +619,8 @@ describe('AltResult v11 detail tree', () => {
     expect(dialog).not.toHaveTextContent(/裁决者|Decider/);
   });
 
-  it('the how-it-works list explains the 1-5 scale', () => {
-    renderRich();
+  it('the how-it-works list explains the 1-5 scale', async () => {
+    await renderRich();
     expect(screen.getByTestId('alt-tree-explain')).toHaveTextContent(/1-5/);
   });
 });

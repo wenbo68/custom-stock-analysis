@@ -1,5 +1,5 @@
 import { useState, type ComponentProps, type ReactNode } from 'react';
-import type { TieredResult, TieredTierSection } from '../../api/tiered';
+import { tieredApi, type TieredResult, type TieredTierSection } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey } from '../../i18n/uiText';
 import { cn } from '../../utils/cn';
@@ -12,7 +12,7 @@ import { fillTemplate } from './altTemplate';
 import { ALT_LINK, OUTLOOK_TEXT } from './altStyles';
 import { AltCard, AltModal, AltNotesButton } from './AltUi';
 import { AltSummaryOutline } from './AltSummaryOutline';
-import { AltDebateTree, DebateScores } from './AltDebateTree';
+import { AltDebateTree, DebateScores, type DebateItemsLoader } from './AltDebateTree';
 import { AltDimensions } from './AltDimensions';
 import { AltLevels } from './AltLevels';
 import { AltTranscript } from './AltTranscript';
@@ -235,13 +235,16 @@ const AltPlanCard = ({ result, taskId }: AltPlanProps) => (
 interface AltDebateProps {
   result: TieredResult;
   section: TieredTierSection;
+  /** The run's task id — the vote tree fetches its items by it. */
+  taskId?: string;
+  loadItems: DebateItemsLoader;
 }
 
 // The deep-analysis card: the outlook, the clickable pool score, the
 // action, the fixed-outline report, and the evidence vote tree. Its
 // notes mark carries the card's own warnings plus the run-level ones
 // (owner decision 2026-09-18: the conclusion card that held them is gone).
-const AltDebate = ({ result, section }: AltDebateProps) => {
+const AltDebate = ({ result, section, taskId, loadItems }: AltDebateProps) => {
   const { t } = useUiLanguage();
   const [scoreOpen, setScoreOpen] = useState(false);
   const detail = section.debate_detail ?? null;
@@ -282,7 +285,7 @@ const AltDebate = ({ result, section }: AltDebateProps) => {
       {!outlook ? (
         <p className="text-sm text-amber-300">{t('tiered.debate.noOutlook')}</p>
       ) : null}
-      {detail ? <AltDebateTree detail={detail} /> : null}
+      {detail && taskId ? <AltDebateTree taskId={taskId} loader={loadItems} /> : null}
       {detail ? (
         <AltModal
           isOpen={scoreOpen}
@@ -303,13 +306,19 @@ interface AltResultProps {
   result: TieredResult;
   /** The run's task id — lets formula numbers link back to the run row. */
   taskId?: string;
+  /** Test seam; production pages the vote items from the server. */
+  debateItemsLoader?: DebateItemsLoader;
 }
 
 // The fixed skeleton (owner order 2026-09-18): the dimension reports →
 // one analysis card (preliminary at depth 1, deep at depth 2; both carry
 // the outlook and the action) → the trade plan (levels + shares +
 // warnings). The separate conclusion card is gone.
-export const AltResult = ({ result, taskId }: AltResultProps) => {
+export const AltResult = ({
+  result,
+  taskId,
+  debateItemsLoader = tieredApi.getAllDebateItems,
+}: AltResultProps) => {
   const { t } = useUiLanguage();
   const usage = result.llm_usage ?? null;
   // Token total is the exact sum of what the provider reported per call
@@ -327,7 +336,12 @@ export const AltResult = ({ result, taskId }: AltResultProps) => {
       </AltBlock>
       {result.tier2 ? (
         <AltBlock title={t('tiered.alt.tier2Title')} helpKey="tiered.help.debate">
-          <AltDebate result={result} section={result.tier2} />
+          <AltDebate
+            result={result}
+            section={result.tier2}
+            taskId={taskId}
+            loadItems={debateItemsLoader}
+          />
         </AltBlock>
       ) : (
         <AltBlock title={t('tiered.alt.tier1Title')} helpKey="tiered.help.outlook">

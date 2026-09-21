@@ -86,10 +86,13 @@ show what comes back as well as what goes in.
 
 | Route | What it does |
 | --- | --- |
+| `GET /status` | What the server can do right now: the configured model (never the key), which data sources are set, run slots and how many runs hold or wait for one, the run defaults, and each market's clock — whether a run would be refused now and when runs are accepted again. |
 | `POST /analyze` | Start a run (ticker, depth 1 or 2, hold weeks, optional sizing). 409 when the market is open or the same run is already in flight. |
 | `GET /runs` | One page of the history, newest first, filtered in the database (ticker, status, outlook, tier, hold, capital/risk/reward ranges, date range; `page`, `page_size`). |
 | `GET /runs/tickers` | Every ticker ever run. |
-| `GET /runs/{task_id}` | One run with its report — whole, or only the named `section`s (`core`, `dimensions`, `debate`, `plan`), optionally one `dimension`. |
+| `GET /runs/{task_id}` | One run with its report — whole, or only the named `section`s (`core`, `dimensions`, `debate`, `plan`), optionally one `dimension`. Every answer carries `dimension_index`: one light row per data report. The `debate` section is an overview; its vote items are paged below. |
+| `DELETE /runs/{task_id}` | Delete a run and its transcript. A queued run is thereby cancelled; a running one is refused (409) until it finishes. |
+| `GET /runs/{task_id}/debate/items` | One page of a deep run's vote items, filtered by `dimension` and `status` (`counted`, `excluded`). |
 | `GET /runs/{task_id}/transcript` | The run's LLM calls without their text (facts plus prompt/reply sizes). |
 | `GET /runs/{task_id}/transcript/{seq}` | One LLM call with its full prompt and raw reply. |
 

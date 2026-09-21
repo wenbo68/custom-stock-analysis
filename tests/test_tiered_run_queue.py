@@ -150,6 +150,32 @@ class TestRunQueue:
         _wait_until(lambda: seen == ["x", "y"])
         _wait_until(lambda: queue.active_count == 0)
 
+    def test_remove_cancels_a_queued_run_and_refuses_a_running_one(
+        self, isolated_db, monkeypatch,
+    ):
+        monkeypatch.setenv(MAX_CONCURRENT_RUNS_ENV, "1")
+        runner = _GatedRunner()
+        queue = RunQueue(runner)
+        history.create_run("first", "AAPL", status=history.STATUS_QUEUED)
+        history.create_run("second", "MSFT", status=history.STATUS_QUEUED)
+        queue.dispatch()
+        _wait_until(lambda: len(runner.started) == 1)
+
+        # The executing run cannot be removed; the waiting one leaves the line.
+        with pytest.raises(history.RunInProgressError):
+            queue.remove("first")
+        assert queue.remove("second")["status"] == "queued"
+        assert queue.remove("second") is None
+        assert not history.run_exists("second")
+
+        # When the slot frees, the cancelled run is not started.
+        runner.release.set()
+        _wait_until(lambda: runner.finished == ["first"])
+        _wait_until(lambda: queue.active_count == 0)
+        assert [run.task_id for run in runner.started] == ["first"]
+        # And a finished run can go.
+        assert queue.remove("first")["status"] == "done"
+
     def test_queue_ahead_counts_the_earlier_rows(self, isolated_db):
         history.create_run("p", "AAPL", status=history.STATUS_QUEUED)
         history.create_run("q", "MSFT", status=history.STATUS_QUEUED)

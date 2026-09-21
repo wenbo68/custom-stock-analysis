@@ -84,6 +84,16 @@ function duplicateRejection(error: unknown): TieredDuplicateRun | null {
   };
 }
 
+// Whether the backend refused a delete because the run is executing
+// (409 with the run_in_progress code).
+function runInProgressRejection(error: unknown): boolean {
+  if (!axios.isAxiosError(error) || error.response?.status !== 409) {
+    return false;
+  }
+  const detail = (error.response.data as { detail?: { code?: string } } | undefined)?.detail;
+  return detail?.code === 'run_in_progress';
+}
+
 function readStoredNumber(key: string): string | null {
   try {
     return window.localStorage.getItem(key) || null;
@@ -142,6 +152,8 @@ const TieredAltPage = () => {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const loadingDetailRef = useRef<string | null>(null);
   // A poll and a filter change can be in flight together; only the
   // latest request may write the list, whatever order they return in.
@@ -244,8 +256,38 @@ const TieredAltPage = () => {
 
   const handleToggle = useCallback((taskId: string) => {
     setDetailError(null);
+    setDeleteError(null);
     setExpandedTaskId((prev) => (prev === taskId ? null : taskId));
   }, []);
+
+  // Remove a run (a queued one is thereby cancelled), then re-ask the
+  // server for the page and the tickers so the row and, if it was the
+  // last of its ticker, the dropdown entry go together.
+  const handleDelete = useCallback(
+    async (taskId: string) => {
+      setDeleteError(null);
+      setDeletingTaskId(taskId);
+      try {
+        await tieredApi.deleteRun(taskId);
+        setExpandedTaskId((prev) => (prev === taskId ? null : prev));
+        setDetails((prev) =>
+          Object.fromEntries(Object.entries(prev).filter(([id]) => id !== taskId)),
+        );
+        await Promise.all([refreshRuns(), refreshTickers()]);
+      } catch (error) {
+        setDeleteError(
+          runInProgressRejection(error)
+            ? t('tiered.altHistory.deleteInProgress')
+            : t('tiered.altHistory.deleteError', {
+                error: error instanceof Error ? error.message : String(error),
+              }),
+        );
+      } finally {
+        setDeletingTaskId(null);
+      }
+    },
+    [refreshRuns, refreshTickers, t],
+  );
 
   // Capital follows the ticker: picking a ticker auto-fills capital with
   // the remembered/default amount; removing the ticker removes capital too
@@ -386,6 +428,9 @@ const TieredAltPage = () => {
             expandedResult={expandedTaskId ? (details[expandedTaskId] ?? null) : null}
             expandedError={detailError}
             onToggle={handleToggle}
+            onDelete={(taskId) => void handleDelete(taskId)}
+            deletingTaskId={deletingTaskId}
+            deleteError={deleteError}
           />
         </div>
       </section>
