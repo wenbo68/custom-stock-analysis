@@ -154,7 +154,7 @@ class TestRunQueue:
         history.create_run("p", "AAPL", status=history.STATUS_QUEUED)
         history.create_run("q", "MSFT", status=history.STATUS_QUEUED)
         history.create_run("r", "NVDA", status=history.STATUS_QUEUED)
-        by_id = {row["task_id"]: row for row in history.list_runs()}
+        by_id = {row["task_id"]: row for row in history.list_runs()["items"]}
         assert by_id["p"]["queue_ahead"] == 0
         assert by_id["q"]["queue_ahead"] == 1
         assert by_id["r"]["queue_ahead"] == 2

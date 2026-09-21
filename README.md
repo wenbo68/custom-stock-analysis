@@ -76,6 +76,23 @@ when a retry was needed. The old fail-soft fallbacks (keep all
 articles, no grouping, score order, feed abstracts) remain the last
 line of defense.
 
+## API
+
+The frontend talks to a small JSON API under `/api/v1/tiered`; the
+server documents it itself at `/docs` (interactive: fill in a form and
+send a real request) and `/redoc` (read-only), from the schema at
+`/openapi.json`. Every route declares its response shape, so the pages
+show what comes back as well as what goes in.
+
+| Route | What it does |
+| --- | --- |
+| `POST /analyze` | Start a run (ticker, depth 1 or 2, hold weeks, optional sizing). 409 when the market is open or the same run is already in flight. |
+| `GET /runs` | One page of the history, newest first, filtered in the database (ticker, status, outlook, tier, hold, capital/risk/reward ranges, date range; `page`, `page_size`). |
+| `GET /runs/tickers` | Every ticker ever run. |
+| `GET /runs/{task_id}` | One run with its report — whole, or only the named `section`s (`core`, `dimensions`, `debate`, `plan`), optionally one `dimension`. |
+| `GET /runs/{task_id}/transcript` | The run's LLM calls without their text (facts plus prompt/reply sizes). |
+| `GET /runs/{task_id}/transcript/{seq}` | One LLM call with its full prompt and raw reply. |
+
 ## LLM transcripts
 
 Every analysis run stores a transcript of its AI exchanges in the

@@ -178,7 +178,7 @@ def sizing_detail_dict(
         "lot_size": result.lot_size,
         "reason_code": result.reason_code.value if result.reason_code else None,
         "refusal_reason": result.refusal_reason,
-        "notes": list(result.notes) + list(settings.warnings) + list(extra_notes),
+        "notes": list(result.notes) + list(extra_notes),
         "inputs": {
             "capital": settings.capital,
             "risk_fraction": settings.risk_fraction,

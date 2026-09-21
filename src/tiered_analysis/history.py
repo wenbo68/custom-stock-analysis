@@ -9,6 +9,11 @@ error), and stays in the list as history across page navigation and
 server restarts. Queued rows outlive the process: the queue resumes them
 at startup, whereas running rows die with their thread and are failed.
 
+The list is served one page at a time, filtered and sorted in SQL
+(2026-09-21): the facts a row shows — tier, sizing inputs, hold window,
+outlook, shares — are real columns (see run_digest.py), so the endpoint
+never ships the whole table for the browser to sift.
+
 Storage is the product's database via DatabaseManager (sqlite by
 default, Postgres when DATABASE_URL is set) — one small table, no
 separate infrastructure.
@@ -17,14 +22,19 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
-from typing import Any, Collection, Dict, List, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, Collection, Dict, Iterable, List, Optional, Sequence
 
 from .llm_support import TRANSCRIPT_MAX_AGE_DAYS
+from .report_sections import ALL_SECTIONS, select_sections
+from .run_digest import DIGEST_COLUMNS, digest_from_inputs, digest_from_result
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LIST_LIMIT = 50
+#: Page size when the caller names none, and the most rows one page may hold.
+DEFAULT_PAGE_SIZE = 10
+MAX_PAGE_SIZE = 200
 
 #: The error stored on runs that were still "running" when the server
 #: came back up: the background thread died with the old process, so the
@@ -38,6 +48,15 @@ STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
+ALL_STATUSES = (STATUS_QUEUED, STATUS_RUNNING, STATUS_DONE, STATUS_FAILED)
+
+#: The outlooks that count as an opinion. A finished run whose judge
+#: produced nothing stores "unknown", which the list treats like no
+#: outlook at all (the dash), as does any unfinished or failed run.
+OUTLOOK_WORDS = ("bullish", "neutral", "bearish")
+#: The outlook filter value meaning "rows with no opinion" (the dash).
+NO_OUTLOOK = "none"
+FILTERABLE_OUTLOOKS = OUTLOOK_WORDS + (NO_OUTLOOK,)
 
 #: The creation-time inputs that make two runs "the same run" (and that
 #: the history row shows while a run is in flight).
@@ -48,6 +67,11 @@ def _session():
     from src.storage import DatabaseManager
 
     return DatabaseManager.get_instance().get_session()
+
+
+# ---------------------------------------------------------------------------
+# Writes
+# ---------------------------------------------------------------------------
 
 
 def create_run(
@@ -71,6 +95,7 @@ def create_run(
             stock_code=stock_code,
             status=status,
             inputs_json=json.dumps(inputs) if inputs else None,
+            **digest_from_inputs(inputs),
         ))
         session.commit()
 
@@ -93,7 +118,14 @@ def _update_run(task_id: str, **fields: Any) -> None:
 
 
 def mark_done(task_id: str, result: Dict[str, Any]) -> None:
-    _update_run(task_id, status="done", result_json=json.dumps(result))
+    """Store the finished report, and lay its own facts (outlook, shares,
+    the sizing it actually used) over the creation-time columns."""
+    _update_run(
+        task_id,
+        status=STATUS_DONE,
+        result_json=json.dumps(result),
+        **digest_from_result(result),
+    )
 
 
 def mark_failed(task_id: str, error: str) -> None:
@@ -104,6 +136,29 @@ def mark_running(task_id: str) -> None:
     """A queued run took a slot (the queue calls this as it starts the
     thread)."""
     _update_run(task_id, status=STATUS_RUNNING)
+
+
+def fail_stale_running_runs(error: str = STALE_RUN_ERROR) -> int:
+    """Startup housekeeping: every run still marked ``running`` belongs
+    to a process that no longer exists (runs execute in-process threads),
+    so mark them failed rather than leave a spinner forever. Returns the
+    number of rows changed."""
+    from src.storage import TieredRunRecord
+
+    with _session() as session:
+        changed = (
+            session.query(TieredRunRecord)
+            .filter_by(status=STATUS_RUNNING)
+            .update({"status": STATUS_FAILED, "error": error},
+                    synchronize_session=False)
+        )
+        session.commit()
+        return int(changed or 0)
+
+
+# ---------------------------------------------------------------------------
+# Queue helpers
+# ---------------------------------------------------------------------------
 
 
 def next_queued_run(exclude: Collection[str] = ()) -> Optional[Dict[str, Any]]:
@@ -152,158 +207,9 @@ def find_active_duplicate(
             .all()
         )
         for row in rows:
-            if _inputs_digest(row) == wanted:
+            if _digest_inputs(_inputs_of(row)) == wanted:
                 return {"task_id": row.task_id, "status": row.status}
     return None
-
-
-def fail_stale_running_runs(error: str = STALE_RUN_ERROR) -> int:
-    """Startup housekeeping: every run still marked ``running`` belongs
-    to a process that no longer exists (runs execute in-process threads),
-    so mark them failed rather than leave a spinner forever. Returns the
-    number of rows changed."""
-    from src.storage import TieredRunRecord
-
-    with _session() as session:
-        changed = (
-            session.query(TieredRunRecord)
-            .filter_by(status=STATUS_RUNNING)
-            .update({"status": STATUS_FAILED, "error": error},
-                    synchronize_session=False)
-        )
-        session.commit()
-        return int(changed or 0)
-
-
-def list_transcript(task_id: str) -> List[Dict[str, Any]]:
-    """The run's LLM exchanges in call order (empty for unknown runs and
-    runs that made no LLM call)."""
-    from src.storage import TieredRunTranscriptRecord
-
-    with _session() as session:
-        rows = (
-            session.query(TieredRunTranscriptRecord)
-            .filter_by(task_id=task_id)
-            .order_by(TieredRunTranscriptRecord.seq.asc())
-            .all()
-        )
-        return [
-            {
-                "seq": row.seq,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-                "stage": row.stage,
-                "model": row.model,
-                "temperature": row.temperature,
-                "duration_ms": row.duration_ms,
-                "prompt_tokens": row.prompt_tokens,
-                "completion_tokens": row.completion_tokens,
-                "structured": row.structured,
-                "error": row.error,
-                "prompt": row.prompt,
-                "reply": row.reply,
-            }
-            for row in rows
-        ]
-
-
-def prune_transcripts(max_age_days: int = TRANSCRIPT_MAX_AGE_DAYS) -> int:
-    """Delete transcript rows older than ``max_age_days``; returns the count."""
-    from src.storage import TieredRunTranscriptRecord, utc_naive_now
-
-    cutoff = utc_naive_now() - timedelta(days=max_age_days)
-    with _session() as session:
-        deleted = (
-            session.query(TieredRunTranscriptRecord)
-            .filter(TieredRunTranscriptRecord.created_at < cutoff)
-            .delete(synchronize_session=False)
-        )
-        session.commit()
-        return int(deleted or 0)
-
-
-def _row_summary(row: Any) -> Dict[str, Any]:
-    return {
-        "task_id": row.task_id,
-        "stock_code": row.stock_code,
-        "status": row.status,
-        "error": row.error,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-    }
-
-
-def _result_digest(row: Any) -> Dict[str, Any]:
-    """The report facts the run list shows per row — final outlook,
-    computed share count, and the tier the run went to — without shipping
-    the full report. ``shares`` mirrors the report card: 0 when sizing ran
-    but bought nothing, None (shown as a dash) when the run has no sizing
-    block at all. ``tier`` is the requested depth.
-    ``capital``/``risk_fraction`` are the sizing inputs the
-    run used, for the row's capital and risk columns. Anything unreadable
-    degrades to None rather than breaking the list."""
-    digest: Dict[str, Any] = {
-        "outlook": None,
-        "shares": None,
-        "tier": None,
-        "capital": None,
-        "risk_fraction": None,
-        "reward_risk": None,
-        "hold_weeks": None,
-    }
-    # The inputs recorded at creation show while the run is in flight (and
-    # stand as fallback on failed runs); a finished report's own values
-    # overwrite them below.
-    digest.update(_inputs_digest(row))
-    if row.status != "done" or not row.result_json:
-        return digest
-    try:
-        result = json.loads(row.result_json)
-    except ValueError:
-        return digest
-    if not isinstance(result, dict):
-        return digest
-    digest["outlook"] = result.get("outlook")
-    sizing = result.get("sizing")
-    if isinstance(sizing, dict):
-        shares = sizing.get("shares")
-        digest["shares"] = shares if shares is not None else 0
-    if isinstance(result.get("depth"), int):
-        digest["tier"] = result["depth"]
-    if isinstance(sizing, dict) and isinstance(sizing.get("inputs"), dict):
-        inputs = sizing["inputs"]
-        for key in ("capital", "risk_fraction", "reward_risk"):
-            # The report's own values win, but never None-overwrite the
-            # inputs recorded at creation.
-            if inputs.get(key) is not None:
-                digest[key] = inputs[key]
-    if result.get("hold_weeks") is not None:
-        digest["hold_weeks"] = result["hold_weeks"]
-    return digest
-
-
-def _inputs_of(row: Any) -> Dict[str, Any]:
-    """The row's stored inputs as a dict, {} when absent/unreadable — old
-    rows never break the list."""
-    raw = getattr(row, "inputs_json", None)
-    if not raw:
-        return {}
-    try:
-        inputs = json.loads(raw)
-    except ValueError:
-        return {}
-    return inputs if isinstance(inputs, dict) else {}
-
-
-def _digest_inputs(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """Just the ``INPUT_KEYS`` that are set — what the history row shows
-    and what the duplicate check compares."""
-    return {key: inputs[key] for key in INPUT_KEYS if inputs.get(key) is not None}
-
-
-def _inputs_digest(row: Any) -> Dict[str, Any]:
-    """The creation-time inputs (tier/capital/risk_fraction/reward_risk/
-    hold_weeks) of a row."""
-    return _digest_inputs(_inputs_of(row))
 
 
 def _queue_ahead(session: Any) -> Dict[str, int]:
@@ -320,17 +226,99 @@ def _queue_ahead(session: Any) -> Dict[str, int]:
     return {task_id: position for position, (task_id,) in enumerate(waiting)}
 
 
-def list_runs(limit: int = DEFAULT_LIST_LIMIT) -> List[Dict[str, Any]]:
-    """Newest-first run summaries (no result payloads — keep the list
-    light)."""
+# ---------------------------------------------------------------------------
+# The run list: filters + one page at a time
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunFilters:
+    """What the list endpoint can narrow the history by. Every field is
+    optional; an empty list or None means "don't filter on this".
+    Multi-value fields match any of their values. Ranges are inclusive.
+    ``risk_min``/``risk_max`` are fractions (0.01 = 1%), like the column.
+    Datetimes are compared in UTC (aware values are converted, naive
+    values are taken as UTC already)."""
+
+    tickers: Sequence[str] = field(default_factory=tuple)
+    statuses: Sequence[str] = field(default_factory=tuple)
+    outlooks: Sequence[str] = field(default_factory=tuple)
+    tiers: Sequence[int] = field(default_factory=tuple)
+    hold_weeks: Sequence[int] = field(default_factory=tuple)
+    capital_min: Optional[float] = None
+    capital_max: Optional[float] = None
+    risk_min: Optional[float] = None
+    risk_max: Optional[float] = None
+    reward_min: Optional[float] = None
+    reward_max: Optional[float] = None
+    created_after: Optional[datetime] = None
+    created_before: Optional[datetime] = None
+
+
+def _apply_filters(query: Any, filters: RunFilters) -> Any:
+    from sqlalchemy import and_, func, or_
+
+    from src.storage import TieredRunRecord as R, to_utc_naive_datetime
+
+    if filters.tickers:
+        wanted = {ticker.strip().upper() for ticker in filters.tickers if ticker.strip()}
+        query = query.filter(func.upper(R.stock_code).in_(sorted(wanted)))
+    if filters.statuses:
+        query = query.filter(R.status.in_(list(filters.statuses)))
+    if filters.outlooks:
+        words = [word for word in filters.outlooks if word in OUTLOOK_WORDS]
+        clauses = []
+        if words:
+            clauses.append(and_(R.status == STATUS_DONE, R.outlook.in_(words)))
+        if NO_OUTLOOK in filters.outlooks:
+            clauses.append(or_(
+                R.status != STATUS_DONE,
+                R.outlook.is_(None),
+                R.outlook.notin_(list(OUTLOOK_WORDS)),
+            ))
+        query = query.filter(or_(*clauses))
+    if filters.tiers:
+        query = query.filter(R.tier.in_(list(filters.tiers)))
+    if filters.hold_weeks:
+        query = query.filter(R.hold_weeks.in_(list(filters.hold_weeks)))
+    for column, low, high in (
+        (R.capital, filters.capital_min, filters.capital_max),
+        (R.risk_fraction, filters.risk_min, filters.risk_max),
+        (R.reward_risk, filters.reward_min, filters.reward_max),
+    ):
+        if low is not None:
+            query = query.filter(column >= low)
+        if high is not None:
+            query = query.filter(column <= high)
+    if filters.created_after is not None:
+        query = query.filter(R.created_at >= to_utc_naive_datetime(filters.created_after))
+    if filters.created_before is not None:
+        query = query.filter(R.created_at < to_utc_naive_datetime(filters.created_before))
+    return query
+
+
+def list_runs(
+    filters: Optional[RunFilters] = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> Dict[str, Any]:
+    """One page of run summaries, newest first, matching ``filters``:
+    {items, page, page_size, total, page_count}. ``total`` counts every
+    match, not just this page, so the caller can draw a page selector.
+    A page past the end is empty, not an error. Summaries carry no
+    report payload — that is ``get_run``."""
     from src.storage import TieredRunRecord
 
-    safe_limit = max(1, min(int(limit), 200))
+    safe_size = max(1, min(int(page_size), MAX_PAGE_SIZE))
+    safe_page = max(1, int(page))
     with _session() as session:
+        query = _apply_filters(session.query(TieredRunRecord), filters or RunFilters())
+        total = int(query.order_by(None).count())
         rows = (
-            session.query(TieredRunRecord)
+            query
             .order_by(TieredRunRecord.created_at.desc(), TieredRunRecord.id.desc())
-            .limit(safe_limit)
+            .offset((safe_page - 1) * safe_size)
+            .limit(safe_size)
             .all()
         )
         ahead = (
@@ -338,18 +326,59 @@ def list_runs(limit: int = DEFAULT_LIST_LIMIT) -> List[Dict[str, Any]]:
             if any(row.status == STATUS_QUEUED for row in rows)
             else {}
         )
-        return [
-            {
-                **_row_summary(row),
-                **_result_digest(row),
-                "queue_ahead": ahead.get(row.task_id),
-            }
+        items = [
+            {**_row_summary(row), "queue_ahead": ahead.get(row.task_id)}
             for row in rows
         ]
+    return {
+        "items": items,
+        "page": safe_page,
+        "page_size": safe_size,
+        "total": total,
+        "page_count": max(1, -(-total // safe_size)),
+    }
 
 
-def get_run(task_id: str) -> Optional[Dict[str, Any]]:
-    """One run with its full result (None result if still running/failed)."""
+def list_tickers() -> List[str]:
+    """Every ticker that has ever been run, A-Z, for the ticker filter's
+    dropdown (and for a caller asking "what have I analyzed?")."""
+    from src.storage import TieredRunRecord
+
+    with _session() as session:
+        rows = session.query(TieredRunRecord.stock_code).distinct().all()
+    return sorted({code for (code,) in rows if code})
+
+
+def _row_summary(row: Any) -> Dict[str, Any]:
+    """The history row: identity, status, timestamps, and the digest
+    columns (tier, sizing inputs, hold, outlook, shares)."""
+    summary = {
+        "task_id": row.task_id,
+        "stock_code": row.stock_code,
+        "status": row.status,
+        "error": row.error,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+    for column in DIGEST_COLUMNS:
+        summary[column] = getattr(row, column, None)
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# One run
+# ---------------------------------------------------------------------------
+
+
+def get_run(
+    task_id: str,
+    sections: Sequence[str] = ALL_SECTIONS,
+    dimensions: Optional[Iterable[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """One run: its summary row plus ``result``, the stored report cut
+    down to ``sections`` (see report_sections.py; None while the run is
+    unfinished or failed), and ``sections`` naming what ``result`` holds.
+    None for an unknown task id."""
     from src.storage import TieredRunRecord
 
     with _session() as session:
@@ -366,13 +395,127 @@ def get_run(task_id: str) -> Optional[Dict[str, Any]]:
             if row.status == STATUS_QUEUED
             else None
         )
+        summary["sections"] = list(sections)
         summary["result"] = None
         if row.result_json:
             try:
-                summary["result"] = json.loads(row.result_json)
+                result = json.loads(row.result_json)
             except ValueError:
                 summary["error"] = (
                     (summary["error"] or "")
                     + " stored result unreadable (corrupt JSON)"
                 ).strip()
+            else:
+                summary["result"] = (
+                    select_sections(result, sections, dimensions)
+                    if isinstance(result, dict) else result
+                )
         return summary
+
+
+def run_exists(task_id: str) -> bool:
+    from src.storage import TieredRunRecord
+
+    with _session() as session:
+        return session.query(
+            session.query(TieredRunRecord.id).filter_by(task_id=task_id).exists()
+        ).scalar()
+
+
+def _inputs_of(row: Any) -> Dict[str, Any]:
+    """The row's stored inputs as a dict, {} when absent/unreadable — old
+    rows never break the queue."""
+    raw = getattr(row, "inputs_json", None)
+    if not raw:
+        return {}
+    try:
+        inputs = json.loads(raw)
+    except ValueError:
+        return {}
+    return inputs if isinstance(inputs, dict) else {}
+
+
+def _digest_inputs(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Just the ``INPUT_KEYS`` that are set — what the duplicate check
+    compares."""
+    return {key: inputs[key] for key in INPUT_KEYS if inputs.get(key) is not None}
+
+
+# ---------------------------------------------------------------------------
+# Transcripts: an index of calls, then one call at a time
+# ---------------------------------------------------------------------------
+
+#: The transcript columns every index row carries (everything but the
+#: prompt and reply text, which is what makes a transcript big).
+_TRANSCRIPT_FACTS = (
+    "seq", "created_at", "stage", "model", "temperature", "duration_ms",
+    "prompt_tokens", "completion_tokens", "structured", "error",
+)
+
+
+def _transcript_facts(row: Any) -> Dict[str, Any]:
+    facts = {name: getattr(row, name) for name in _TRANSCRIPT_FACTS}
+    facts["created_at"] = facts["created_at"].isoformat() if facts["created_at"] else None
+    return facts
+
+
+def list_transcript(task_id: str) -> List[Dict[str, Any]]:
+    """The run's LLM calls in call order, as an index: every fact about
+    each call plus the size of its prompt and reply in characters
+    (``prompt_chars``/``reply_chars``), but not the text itself — see
+    ``get_transcript_call``. Empty for unknown runs and runs that made no
+    LLM call. The text columns are never loaded here."""
+    from sqlalchemy import func
+
+    from src.storage import TieredRunTranscriptRecord as T
+
+    with _session() as session:
+        rows = (
+            session.query(
+                *(getattr(T, name) for name in _TRANSCRIPT_FACTS),
+                func.length(T.prompt).label("prompt_chars"),
+                func.length(T.reply).label("reply_chars"),
+            )
+            .filter(T.task_id == task_id)
+            .order_by(T.seq.asc())
+            .all()
+        )
+        return [
+            {
+                **_transcript_facts(row),
+                "prompt_chars": int(row.prompt_chars or 0),
+                "reply_chars": int(row.reply_chars or 0),
+            }
+            for row in rows
+        ]
+
+
+def get_transcript_call(task_id: str, seq: int) -> Optional[Dict[str, Any]]:
+    """One LLM call of a run, with its full prompt and raw reply, or None
+    when the run has no call numbered ``seq``."""
+    from src.storage import TieredRunTranscriptRecord
+
+    with _session() as session:
+        row = (
+            session.query(TieredRunTranscriptRecord)
+            .filter_by(task_id=task_id, seq=seq)
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        return {**_transcript_facts(row), "prompt": row.prompt, "reply": row.reply}
+
+
+def prune_transcripts(max_age_days: int = TRANSCRIPT_MAX_AGE_DAYS) -> int:
+    """Delete transcript rows older than ``max_age_days``; returns the count."""
+    from src.storage import TieredRunTranscriptRecord, utc_naive_now
+
+    cutoff = utc_naive_now() - timedelta(days=max_age_days)
+    with _session() as session:
+        deleted = (
+            session.query(TieredRunTranscriptRecord)
+            .filter(TieredRunTranscriptRecord.created_at < cutoff)
+            .delete(synchronize_session=False)
+        )
+        session.commit()
+        return int(deleted or 0)

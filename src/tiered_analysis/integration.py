@@ -64,12 +64,7 @@ from .schema import (
     derive_action,
     reward_ratio,
 )
-from .settings import (
-    SizingSettings,
-    load_sizing_settings,
-    merge_overrides,
-    with_fallback_defaults,
-)
+from .settings import SizingSettings, merge_overrides
 from .sizing import SizingInputs, size_position
 from .tiers import Tier2Stage, TierState
 
@@ -298,7 +293,7 @@ def run_tiered_analysis(
 
     ``sizing_overrides`` may carry per-run ``capital`` / ``risk_fraction``
     / ``reward_risk`` values (the API's per-run override) on top of the
-    saved settings. ``earnings_lookup`` is a test seam; production reads
+    form defaults. ``earnings_lookup`` is a test seam; production reads
     the date the fundamentals provider already fetched.
     ``cross_bars_loader`` is a test/demo seam: injected providers skip
     the cross-provider enrichment unless a loader is passed explicitly.
@@ -327,8 +322,10 @@ def run_tiered_analysis(
         providers = get_providers(market, bars_loader=dsa_bars_loader)
         if cross_bars_loader is None:
             cross_bars_loader = dsa_bars_loader
+    # Every run sizes (owner decision 2026-07-24): the defaults are the
+    # web form's own; per-run overrides from the request go on top.
     if sizing_settings is None:
-        sizing_settings = load_sizing_settings()
+        sizing_settings = SizingSettings()
     if sizing_overrides:
         sizing_settings = merge_overrides(
             sizing_settings,
@@ -336,9 +333,6 @@ def run_tiered_analysis(
             risk_fraction=sizing_overrides.get("risk_fraction"),
             reward_risk=sizing_overrides.get("reward_risk"),
         )
-    # Every run sizes (owner decision 2026-07-24): missing capital/risk
-    # fall back to the web form's defaults instead of disabling sizing.
-    sizing_settings = with_fallback_defaults(sizing_settings)
     # Every run keeps a transcript of its LLM exchanges (prompt, raw
     # reply, error) so a "no usable JSON" warning is diagnosable later —
     # llm_usage.transcript_entries on the stored run says how many.

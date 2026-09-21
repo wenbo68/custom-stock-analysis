@@ -5,7 +5,14 @@ A full run takes minutes (data fetch + LLM), so POST /analyze returns a
 task id immediately; the run executes in a background thread. Runs
 persist in the tiered_runs table (src/tiered_analysis/history.py), so
 GET /runs serves a clickable history that survives page navigation and
-server restarts, and GET /runs/{task_id} returns the stored full report.
+server restarts — one page at a time, filtered in SQL — and
+GET /runs/{task_id} returns the stored report, whole or by section.
+A run's LLM transcript is served as an index (GET .../transcript) plus
+one call at a time (GET .../transcript/{seq}), since the text of every
+call together runs to half a megabyte.
+
+Request and response shapes live in tiered_schemas.py so /docs shows
+both sides of every route.
 
 Self-host: one person, one machine. There is no sign-in; the model and
 its API key come from the environment (``MAIN_LLM`` and ``LLM_API_KEY``,
@@ -22,11 +29,23 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, HTTPException, Query
 
+from api.v1.endpoints.tiered_schemas import (
+    AnalyzeAccepted,
+    OutlookFilter,
+    RunDetail,
+    RunPage,
+    RunStatus,
+    Section,
+    TickerList,
+    TieredAnalyzeRequest,
+    TranscriptCall,
+    TranscriptIndex,
+)
 from src.tiered_analysis import history
 from src.tiered_analysis.llm_support import LlmTranscript
 from src.tiered_analysis.run_context import llm_model
@@ -48,37 +67,6 @@ def _run_analysis(stock_code: str, depth: int = 1,
         stock_code, depth=depth, sizing_overrides=sizing_overrides,
         hold_weeks=hold_weeks, transcript=transcript,
     )
-
-
-class SizingOverride(BaseModel):
-    """Per-run sizing inputs; saved settings fill whatever is omitted."""
-
-    capital: Optional[float] = Field(default=None, gt=0)
-    risk_fraction: Optional[float] = Field(default=None, gt=0, lt=1)
-    #: Target reward-to-risk ratio for the plan (target = entry + R × risk).
-    reward_risk: Optional[float] = Field(default=None, gt=1, le=10)
-
-
-class TieredAnalyzeRequest(BaseModel):
-    stock_code: str
-    #: 1 = the one-blob judge, 2 = the evidence vote. Tier 3 is retired
-    #: (outlook redesign) — depth 3 is a validation error, not a clamp.
-    depth: int = Field(default=1, ge=1, le=2)
-    sizing: Optional[SizingOverride] = None
-    #: Max hold time in weeks (2026-08-08): the horizon the AI judges
-    #: against, shown on the report and used as the grading window.
-    hold_weeks: int = Field(default=2, ge=1, le=4)
-    #: Clock-gate override ("run anyway"): start during the trading day,
-    #: analyzing the PREVIOUS completed session's close.
-    run_anyway: bool = False
-
-    @field_validator("stock_code")
-    @classmethod
-    def _not_blank(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("stock_code must not be blank")
-        return cleaned
 
 
 def _serialize_levels(levels: Any) -> Dict[str, Any]:
@@ -207,22 +195,18 @@ _submit_lock = threading.Lock()
 
 def _effective_run_inputs(request: TieredAnalyzeRequest) -> Dict[str, Any]:
     """The settings the run will actually use — request overrides on top
-    of saved .env values, with the web-form fallbacks underneath (the
-    same resolution run_tiered_analysis performs) — recorded on the run
-    row so history shows them while the run is still in flight."""
-    from src.tiered_analysis.settings import (
-        load_sizing_settings,
-        merge_overrides,
-        with_fallback_defaults,
-    )
+    of the form defaults (the same resolution run_tiered_analysis
+    performs) — recorded on the run row so history shows them while the
+    run is still in flight."""
+    from src.tiered_analysis.settings import SizingSettings, merge_overrides
 
     sizing = request.sizing
-    settings = with_fallback_defaults(merge_overrides(
-        load_sizing_settings(),
+    settings = merge_overrides(
+        SizingSettings(),
         capital=sizing.capital if sizing else None,
         risk_fraction=sizing.risk_fraction if sizing else None,
         reward_risk=sizing.reward_risk if sizing else None,
-    ))
+    )
     return {
         "tier": request.depth,
         "capital": settings.capital,
@@ -243,22 +227,20 @@ def _require_llm_configured() -> None:
         })
 
 
-@router.post("/analyze", status_code=202)
+@router.post("/analyze", status_code=202, response_model=AnalyzeAccepted)
 def start_tiered_analysis(request: TieredAnalyzeRequest) -> Dict[str, Any]:
-    """Kick off a tiered run in the background; returns a pollable task.
+    """Start a run.
 
-    CLOCK GATE (2026-08-08): runs are rejected (409, code market_open)
-    from market open until 30 minutes past the close in the exchange's
-    own timezone — the app analyzes completed trading days only.
-    ``run_anyway: true`` overrides and analyzes the previous completed
-    session instead.
+    The run is stored and executes in the background; poll
+    `GET /runs/{task_id}` (or the list) for its status.
 
-    DUPLICATE (2026-09-15): a queued or running run with the same ticker
-    and inputs is refused (409, code duplicate_run, with that run's
-    task_id and status).
-
-    The response ``status`` is ``running`` when a slot was free, else
-    ``queued``.
+    - 400 `llm_not_configured`: no model set in .env.
+    - 409 `market_open`: the ticker's market is inside its trading day
+      (runs analyze completed sessions only). The body carries the market
+      and today's session bounds; send `run_anyway: true` to analyze the
+      previous completed session instead.
+    - 409 `duplicate_run`: a queued or running run has the same ticker
+      and inputs; the body names it (`task_id`, `status`).
     """
     from src.tiered_analysis.run_gate import clock_gate
 
@@ -301,38 +283,126 @@ def start_tiered_analysis(request: TieredAnalyzeRequest) -> Dict[str, Any]:
             "depth": request.depth, "status": status}
 
 
-@router.get("/sizing-defaults")
-def get_sizing_defaults() -> Dict[str, Optional[float]]:
-    """Saved sizing settings (.env-backed) — capital and risk fraction —
-    so the run form can show the values a run would use when the user
-    provides none. Both are null when no defaults are configured."""
-    from src.tiered_analysis.settings import load_sizing_settings
+@router.get("/runs", response_model=RunPage)
+def list_tiered_runs(
+    ticker: Optional[List[str]] = Query(
+        default=None, description="Keep these tickers (any of; case-insensitive).",
+    ),
+    status: Optional[List[RunStatus]] = Query(default=None, description="Any of."),
+    outlook: Optional[List[OutlookFilter]] = Query(
+        default=None,
+        description="Any of. `none` = rows with no opinion (unfinished, failed, or unknown).",
+    ),
+    tier: Optional[List[int]] = Query(default=None, description="Any of 1, 2."),
+    hold_weeks: Optional[List[int]] = Query(default=None, description="Any of 1-4."),
+    capital_min: Optional[float] = Query(default=None, ge=0),
+    capital_max: Optional[float] = Query(default=None, ge=0),
+    risk_min: Optional[float] = Query(
+        default=None, ge=0, le=1, description="Fraction: 0.01 = 1%.",
+    ),
+    risk_max: Optional[float] = Query(default=None, ge=0, le=1),
+    reward_min: Optional[float] = Query(default=None, ge=0),
+    reward_max: Optional[float] = Query(default=None, ge=0),
+    created_after: Optional[datetime] = Query(
+        default=None, description="ISO 8601; inclusive. Naive values are UTC.",
+    ),
+    created_before: Optional[datetime] = Query(
+        default=None, description="ISO 8601; exclusive. Naive values are UTC.",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(
+        default=history.DEFAULT_PAGE_SIZE, ge=1, le=history.MAX_PAGE_SIZE,
+    ),
+) -> Dict[str, Any]:
+    """One page of the run history, newest first, filtered in the database.
 
-    settings = load_sizing_settings()
-    return {"capital": settings.capital,
-            "risk_fraction": settings.risk_fraction,
-            "reward_risk": settings.reward_risk}
+    Every filter is optional and they combine with AND; a multi-value
+    filter matches any of its values (repeat the parameter:
+    `?status=queued&status=running`). Ranges are inclusive. Rows carry
+    the list facts only — fetch a report with `GET /runs/{task_id}`.
+    """
+    filters = history.RunFilters(
+        tickers=tuple(ticker or ()),
+        statuses=tuple(status or ()),
+        outlooks=tuple(outlook or ()),
+        tiers=tuple(tier or ()),
+        hold_weeks=tuple(hold_weeks or ()),
+        capital_min=capital_min,
+        capital_max=capital_max,
+        risk_min=risk_min,
+        risk_max=risk_max,
+        reward_min=reward_min,
+        reward_max=reward_max,
+        created_after=created_after,
+        created_before=created_before,
+    )
+    return history.list_runs(filters, page=page, page_size=page_size)
 
 
-@router.get("/runs")
-def list_tiered_runs(limit: int = 50) -> Dict[str, List[Dict[str, Any]]]:
-    """Run history, newest first (summaries only)."""
-    return {"items": history.list_runs(limit=limit)}
+@router.get("/runs/tickers", response_model=TickerList)
+def list_tiered_tickers() -> Dict[str, List[str]]:
+    """Every ticker that has ever been run, A-Z (the ticker filter's choices)."""
+    return {"items": history.list_tickers()}
 
 
-@router.get("/runs/{task_id}")
-def get_tiered_run(task_id: str) -> Dict[str, Any]:
-    """One run with its stored full report."""
-    run = history.get_run(task_id)
+@router.get("/runs/{task_id}", response_model=RunDetail)
+def get_tiered_run(
+    task_id: str,
+    section: Optional[List[Section]] = Query(
+        default=None,
+        description=(
+            "Which parts of the report to include (repeat to combine). "
+            "Omit for everything. `core` (headline facts, a few KB) is always "
+            "included; `dimensions` is the data reports (~60 KB), `debate` the "
+            "deep-analysis record (~80 KB), `plan` the trade-plan receipt."
+        ),
+    ),
+    dimension: Optional[List[str]] = Query(
+        default=None,
+        description=(
+            "With the dimensions section: keep only these data reports, e.g. "
+            "technicals, fundamentals, positioning, macro_economy, opinion, "
+            "company_news, world_news."
+        ),
+    ),
+) -> Dict[str, Any]:
+    """One run with its stored report, whole or by section.
+
+    `result` is null while the run is queued or running and after a
+    failure (see `status` and `error`). 404 for an unknown task id.
+    """
+    from src.tiered_analysis.report_sections import normalize_sections
+
+    run = history.get_run(
+        task_id, sections=normalize_sections(section), dimensions=dimension,
+    )
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return run
 
 
-@router.get("/runs/{task_id}/transcript")
+@router.get("/runs/{task_id}/transcript", response_model=TranscriptIndex)
 def get_tiered_run_transcript(task_id: str) -> Dict[str, List[Dict[str, Any]]]:
-    """The run's LLM exchanges (prompt, raw reply, error) in call order —
-    served separately from the run so the report stays light."""
-    if history.get_run(task_id) is None:
+    """The run's LLM calls in call order, without their text.
+
+    Each row carries the call's facts (step, model, time, tokens, error)
+    and the size of its prompt and reply in characters; fetch the text
+    of one call with `GET /runs/{task_id}/transcript/{seq}`. Empty when
+    the run made no call or its rows expired (kept 14 days). 404 for an
+    unknown task id.
+    """
+    if not history.run_exists(task_id):
         raise HTTPException(status_code=404, detail="run not found")
     return {"items": history.list_transcript(task_id)}
+
+
+@router.get("/runs/{task_id}/transcript/{seq}", response_model=TranscriptCall)
+def get_tiered_run_transcript_call(task_id: str, seq: int) -> Dict[str, Any]:
+    """One LLM call of a run with its full prompt and raw reply.
+
+    404 when the run is unknown or has no call numbered `seq`.
+    """
+    call = history.get_transcript_call(task_id, seq)
+    if call is None:
+        raise HTTPException(status_code=404, detail="transcript call not found")
+    return call

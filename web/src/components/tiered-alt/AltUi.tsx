@@ -73,16 +73,35 @@ export const AltFold = ({
   title,
   children,
   className = 'mt-4',
+  onToggle,
 }: {
   title: string;
   children: ReactNode;
   className?: string;
-}) => (
-  <details className={`${className} rounded bg-gray-900/60 px-4 py-3`.trim()}>
-    <summary className="cursor-pointer text-xs font-semibold text-gray-300">{title}</summary>
-    <div className="mt-3 flex flex-col gap-3">{children}</div>
-  </details>
-);
+  /** Called with the new state each time the fold opens or closes —
+   *  a caller can load its content on the first open. */
+  onToggle?: (open: boolean) => void;
+}) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <details open={open} className={`${className} rounded bg-gray-900/60 px-4 py-3`.trim()}>
+      <summary
+        className="cursor-pointer text-xs font-semibold text-gray-300"
+        onClick={(event) => {
+          // Owned by React so every browser (and the test DOM) reports
+          // the toggle the same way.
+          event.preventDefault();
+          const next = !open;
+          setOpen(next);
+          onToggle?.(next);
+        }}
+      >
+        {title}
+      </summary>
+      <div className="mt-3 flex flex-col gap-3">{children}</div>
+    </details>
+  );
+};
 
 // showplayer-style popup: black/50 backdrop, flat gray-800 panel.
 export const AltModal = ({ isOpen, title, onClose, children, panelClassName }: AltModalProps) => {

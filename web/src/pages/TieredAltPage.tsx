@@ -6,18 +6,23 @@ import {
   type TieredDuplicateRun,
   type TieredMarketOpenGate,
   type TieredResult,
-  type TieredRunSummary,
+  type TieredRunPage,
   type TieredSizingRequest,
 } from '../api/tiered';
-import { riskPctText } from '../components/tiered-alt/altFormat';
 import { AltRunForm } from '../components/tiered-alt/AltRunForm';
 import { AltRunHistory } from '../components/tiered-alt/AltRunHistory';
+import {
+  NO_FILTERS,
+  toListQuery,
+  type HistoryFilters,
+} from '../components/tiered-alt/historyFilters';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 
 const POLL_INTERVAL_MS = 5000;
 const DEFAULT_TIER: TieredDepth = 1;
-// Suggestions when nothing was remembered or configured — the user still
-// sees and can remove/replace the pill before starting.
+// Suggestions when nothing was remembered — the user still sees and can
+// remove/replace the pill before starting. They match the backend's own
+// defaults for a run that sends nothing.
 const DEFAULT_CAPITAL = '100000';
 const DEFAULT_RISK_PCT = '1';
 // Reward-to-risk ratio the plan aims for (owner decision, 2026-07-21):
@@ -33,6 +38,8 @@ const SIZING_CAPITAL_STORAGE_KEY = 'tiered.sizing.capital';
 const SIZING_RISK_PCT_STORAGE_KEY = 'tiered.sizing.riskPct';
 const SIZING_REWARD_STORAGE_KEY = 'tiered.sizing.reward';
 const HOLD_WEEKS_STORAGE_KEY = 'tiered.holdWeeks';
+
+const EMPTY_PAGE: TieredRunPage = { items: [], page: 1, page_size: 10, total: 0, page_count: 1 };
 
 // The gate payload when the backend rejected the start because the
 // ticker's market is inside the trading day (409 with the market_open
@@ -100,7 +107,9 @@ function storeNumber(key: string, value: string | null): void {
 // Alternate skin for tiered analysis, styled after showplayer.net. Two
 // section cards with their titles sitting above: the new-run form
 // (write-only fields + pills + Start) and the run history (filters +
-// paged rows that expand into the full report).
+// paged rows that expand into the full report). The history is one
+// server page at a time (2026-09-21): this page owns the filters and the
+// page number, and every change re-asks the server.
 const TieredAltPage = () => {
   const { t } = useUiLanguage();
   const [ticker, setTicker] = useState<string | null>(null);
@@ -124,30 +133,47 @@ const TieredAltPage = () => {
   const [gate, setGate] = useState<TieredMarketOpenGate | null>(null);
   // Duplicate-run popup: the 409 duplicate_run payload while it's showing.
   const [duplicate, setDuplicate] = useState<TieredDuplicateRun | null>(null);
-  const [runs, setRuns] = useState<TieredRunSummary[]>([]);
+  const [filters, setFilters] = useState<HistoryFilters>(NO_FILTERS);
+  const [page, setPage] = useState(1);
+  const [runPage, setRunPage] = useState<TieredRunPage>(EMPTY_PAGE);
+  const [tickers, setTickers] = useState<string[]>([]);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, TieredResult>>({});
   const [detailError, setDetailError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  // Tier of runs this page started, so their rows show it while still
-  // running (the backend only knows a run's tier once the report exists).
-  const [pendingTiers, setPendingTiers] = useState<Record<string, TieredDepth>>({});
   const loadingDetailRef = useRef<string | null>(null);
+  // A poll and a filter change can be in flight together; only the
+  // latest request may write the list, whatever order they return in.
+  const listRequestRef = useRef(0);
 
-  // Poll while anything is still in flight — queued runs start by
-  // themselves, so a queued row needs the same polling as a running one.
+  const runs = runPage.items;
+
+  // Poll while anything on the page is still in flight — queued runs
+  // start by themselves, so a queued row needs the same polling as a
+  // running one.
   const anyRunning = useMemo(
     () => runs.some((run) => run.status === 'running' || run.status === 'queued'),
     [runs],
   );
 
   const refreshRuns = useCallback(async () => {
+    const request = ++listRequestRef.current;
     try {
-      const items = await tieredApi.listRuns();
-      setRuns(items);
+      const fetched = await tieredApi.listRuns(toListQuery(filters, page));
+      if (request === listRequestRef.current) {
+        setRunPage(fetched);
+      }
     } catch {
       // transient — next poll retries
+    }
+  }, [filters, page]);
+
+  const refreshTickers = useCallback(async () => {
+    try {
+      setTickers(await tieredApi.listTickers());
+    } catch {
+      // the dropdown just stays as it was
     }
   }, []);
 
@@ -155,36 +181,9 @@ const TieredAltPage = () => {
     void refreshRuns();
   }, [refreshRuns]);
 
-  // Server-side sizing defaults (.env) beat the built-in suggestions when
-  // the browser has no remembered values of its own.
   useEffect(() => {
-    void (async () => {
-      try {
-        const defaults = await tieredApi.sizingDefaults();
-        const storedCapital = readStoredNumber(SIZING_CAPITAL_STORAGE_KEY);
-        const defaultCapital = defaults.capital;
-        if (storedCapital == null && defaultCapital != null) {
-          setCapitalDefault(String(defaultCapital));
-        }
-        const storedRisk = readStoredNumber(SIZING_RISK_PCT_STORAGE_KEY);
-        const defaultRisk = defaults.risk_fraction;
-        if (storedRisk == null && defaultRisk != null) {
-          setRiskPct((prev) =>
-            prev === null || prev === DEFAULT_RISK_PCT ? riskPctText(defaultRisk) : prev,
-          );
-        }
-        const storedReward = readStoredNumber(SIZING_REWARD_STORAGE_KEY);
-        const defaultReward = defaults.reward_risk;
-        if (storedReward == null && defaultReward != null) {
-          setReward((prev) =>
-            prev === null || prev === DEFAULT_REWARD ? String(defaultReward) : prev,
-          );
-        }
-      } catch {
-        // no defaults reachable — the built-in suggestions stand
-      }
-    })();
-  }, []);
+    void refreshTickers();
+  }, [refreshTickers]);
 
   useEffect(() => {
     if (!anyRunning) {
@@ -196,21 +195,22 @@ const TieredAltPage = () => {
     return () => window.clearInterval(timer);
   }, [anyRunning, refreshRuns]);
 
+  // A page past the end (the last row of a page was filtered away, or
+  // the server has fewer pages than before) falls back to the last one.
+  useEffect(() => {
+    if (page > runPage.page_count) {
+      setPage(runPage.page_count);
+    }
+  }, [page, runPage.page_count]);
+
+  const handleFilters = useCallback((patch: Partial<HistoryFilters>) => {
+    setFilters((prev) => ({ ...prev, ...patch }));
+    setPage(1);
+  }, []);
+
   const expandedRun = useMemo(
     () => runs.find((run) => run.task_id === expandedTaskId) ?? null,
     [runs, expandedTaskId],
-  );
-
-  // Rows the backend can't tier yet (still running) get the tier this
-  // page submitted them with.
-  const annotatedRuns = useMemo(
-    () =>
-      runs.map((run) =>
-        run.tier == null && pendingTiers[run.task_id]
-          ? { ...run, tier: pendingTiers[run.task_id] }
-          : run,
-      ),
-    [runs, pendingTiers],
   );
 
   // Fetch the full report the first time a finished run is expanded (a run
@@ -306,10 +306,11 @@ const TieredAltPage = () => {
         setCapitalDefault(capital);
         setTicker(null);
         setCapital(null);
-        setPendingTiers((prev) => ({ ...prev, [started.task_id]: tierUsed }));
-        // The new run is already in the backend list as Running; show it at
-        // the top of the history, expanded, until polling flips it to done.
-        await refreshRuns();
+        // The new run is newest, so it heads page 1 of the history (as
+        // long as the filters admit it); show it there, expanded, until
+        // polling flips it to done.
+        setPage(1);
+        await Promise.all([refreshRuns(), refreshTickers()]);
         setDetailError(null);
         setExpandedTaskId(started.task_id);
       } catch (error) {
@@ -333,7 +334,7 @@ const TieredAltPage = () => {
         setSubmitting(false);
       }
     },
-    [ticker, submitting, tier, capital, riskPct, reward, hold, refreshRuns],
+    [ticker, submitting, tier, capital, riskPct, reward, hold, refreshRuns, refreshTickers],
   );
 
   return (
@@ -374,7 +375,13 @@ const TieredAltPage = () => {
         </h2>
         <div className="rounded bg-gray-900 p-4 text-gray-400 sm:p-6">
           <AltRunHistory
-            runs={annotatedRuns}
+            runs={runs}
+            tickers={tickers}
+            filters={filters}
+            onFilters={handleFilters}
+            page={runPage.page}
+            pageCount={runPage.page_count}
+            onPage={setPage}
             expandedTaskId={expandedTaskId}
             expandedResult={expandedTaskId ? (details[expandedTaskId] ?? null) : null}
             expandedError={detailError}

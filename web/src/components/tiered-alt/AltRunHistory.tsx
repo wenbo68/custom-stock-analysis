@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import type { TieredResult, TieredRunSummary } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey } from '../../i18n/uiText';
@@ -8,8 +8,8 @@ import { ALT_COLOR, OUTLOOK_TEXT } from './altStyles';
 import { AltPageSelector, AltPairField, AltPill, AltPillRow, AltSelect } from './AltFields';
 import { AltResult } from './AltResult';
 import { AltModal } from './AltUi';
+import { hasAnyFilter, isValidDay, toggled, type HistoryFilters } from './historyFilters';
 
-const PAGE_SIZE = 10;
 // Status (where the run is: queued, running, done, failed) and outlook
 // (what the finished analysis says) are separate columns (owner request
 // 2026-09-17). Only a real opinion counts as an outlook: a run with none
@@ -17,6 +17,7 @@ const PAGE_SIZE = 10;
 // and the outlook filter offers that dash too (owner request 2026-09-18).
 const FILTER_STATUSES = ['queued', 'running', 'done', 'failed'] as const;
 const OUTLOOK_WORDS = ['bullish', 'neutral', 'bearish'] as const;
+// The server's name for "rows with no opinion" in the outlook filter.
 const NO_OUTLOOK = 'none';
 const FILTER_OUTLOOKS = [...OUTLOOK_WORDS, NO_OUTLOOK] as const;
 const FILTER_TIERS = ['1', '2'] as const;
@@ -60,21 +61,6 @@ const HEADER_KEYS = [
   'tiered.altHistory.h.outlook',
   'tiered.altHistory.h.date',
 ] as const;
-
-// Accepts 2026/07/14 or 2026-07-14; day boundaries are the viewer's local time.
-const DAY_RE = /^\d{4}[/-]\d{2}[/-]\d{2}$/;
-
-const isValidDay = (raw: string): boolean => {
-  if (!DAY_RE.test(raw)) {
-    return false;
-  }
-  return !Number.isNaN(parseDay(raw).getTime());
-};
-
-function parseDay(raw: string, plusDays = 0): Date {
-  const [year, month, day] = raw.split(/[/-]/).map(Number);
-  return new Date(year, month - 1, day + plusDays);
-}
 
 const isPositiveNumber = (raw: string): boolean => {
   const value = Number(raw);
@@ -127,11 +113,6 @@ function hasOutlook(run: TieredRunSummary): boolean {
   return run.status === 'done' && (OUTLOOK_WORDS as readonly string[]).includes(runOutlook(run));
 }
 
-// The outlook filter value the row matches: its word, or the dash.
-function filterOutlook(run: TieredRunSummary): string {
-  return hasOutlook(run) ? runOutlook(run) : NO_OUTLOOK;
-}
-
 // The outlook filter's option text: the outlook word, or the dash.
 function outlookOptionLabel(value: string, t: (key: UiTextKey) => string): string {
   return value === NO_OUTLOOK ? '—' : t(`tiered.outlook.${value}` as UiTextKey);
@@ -148,97 +129,16 @@ function dateTone(run: TieredRunSummary): 'fresh' | 'stale' | 'none' {
   return time && isFromPreviousDay(time) ? 'stale' : 'fresh';
 }
 
-interface HistoryFilters {
-  tickers: string[];
-  capitalMin: string | null;
-  capitalMax: string | null;
-  riskMin: string | null;
-  riskMax: string | null;
-  rewardMin: string | null;
-  rewardMax: string | null;
-  holds: string[];
-  tiers: string[];
-  statuses: string[];
-  outlooks: string[];
-  dateMin: string | null;
-  dateMax: string | null;
-}
-
-const NO_FILTERS: HistoryFilters = {
-  tickers: [],
-  capitalMin: null,
-  capitalMax: null,
-  riskMin: null,
-  riskMax: null,
-  rewardMin: null,
-  rewardMax: null,
-  holds: [],
-  tiers: [],
-  statuses: [],
-  outlooks: [],
-  dateMin: null,
-  dateMax: null,
-};
-
-// Add the value if absent, remove it if present — how multi-value filters
-// clear from the dropdown as well as from the pill.
-function toggled(list: string[], value: string): string[] {
-  return list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
-}
-
-function matchesFilters(run: TieredRunSummary, filters: HistoryFilters): boolean {
-  if (filters.tickers.length > 0 && !filters.tickers.includes(run.stock_code)) {
-    return false;
-  }
-  if (filters.capitalMin && !(run.capital != null && run.capital >= Number(filters.capitalMin))) {
-    return false;
-  }
-  if (filters.capitalMax && !(run.capital != null && run.capital <= Number(filters.capitalMax))) {
-    return false;
-  }
-  const riskPct = run.risk_fraction != null ? run.risk_fraction * 100 : null;
-  if (filters.riskMin && !(riskPct != null && riskPct >= Number(filters.riskMin))) {
-    return false;
-  }
-  if (filters.riskMax && !(riskPct != null && riskPct <= Number(filters.riskMax))) {
-    return false;
-  }
-  if (
-    filters.rewardMin &&
-    !(run.reward_risk != null && run.reward_risk >= Number(filters.rewardMin))
-  ) {
-    return false;
-  }
-  if (
-    filters.rewardMax &&
-    !(run.reward_risk != null && run.reward_risk <= Number(filters.rewardMax))
-  ) {
-    return false;
-  }
-  if (filters.holds.length > 0 && !filters.holds.includes(String(run.hold_weeks ?? ''))) {
-    return false;
-  }
-  if (filters.tiers.length > 0 && !filters.tiers.includes(String(run.tier ?? ''))) {
-    return false;
-  }
-  if (filters.statuses.length > 0 && !filters.statuses.includes(run.status)) {
-    return false;
-  }
-  if (filters.outlooks.length > 0 && !filters.outlooks.includes(filterOutlook(run))) {
-    return false;
-  }
-  const time = runTime(run);
-  if (filters.dateMin && (!time || time < parseDay(filters.dateMin))) {
-    return false;
-  }
-  if (filters.dateMax && (!time || time >= parseDay(filters.dateMax, 1))) {
-    return false;
-  }
-  return true;
-}
-
 export interface AltRunHistoryProps {
+  /** The current page's rows, as the server filtered and ordered them. */
   runs: TieredRunSummary[];
+  /** Every ticker ever run, for the ticker filter's dropdown. */
+  tickers: string[];
+  filters: HistoryFilters;
+  onFilters: (patch: Partial<HistoryFilters>) => void;
+  page: number;
+  pageCount: number;
+  onPage: (page: number) => void;
   expandedTaskId: string | null;
   expandedResult: TieredResult | null;
   expandedError: string | null;
@@ -247,58 +147,32 @@ export interface AltRunHistoryProps {
 
 // Section 2: run history. Filters at the top apply the moment something is
 // entered or picked — no search button — and show as removable pills
-// (ticker, tier, status and outlook take several values at once). Below,
-// one row per run (10 per page), each fact sitting directly under its
-// filter: ticker, capital, risk, reward, max hold, tier, status, outlook,
-// date. Clicking a row expands the full report inline. A freshly started
-// run appears at the top as Queued or Running with a dash for its outlook,
+// (ticker, tier, status and outlook take several values at once). The
+// page owns the filter and page state and asks the server for one page
+// at a time (2026-09-21); this component only draws it. Below, one row
+// per run (10 per page), each fact sitting directly under its filter:
+// ticker, capital, risk, reward, max hold, tier, status, outlook, date.
+// Clicking a row expands the full report inline. A freshly started run
+// appears at the top as Queued or Running with a dash for its outlook,
 // and turns into a Done row with its outlook when it finishes.
 export const AltRunHistory = ({
   runs,
+  tickers,
+  filters,
+  onFilters,
+  page,
+  pageCount,
+  onPage,
   expandedTaskId,
   expandedResult,
   expandedError,
   onToggle,
 }: AltRunHistoryProps) => {
   const { t, language } = useUiLanguage();
-  const [filters, setFilters] = useState<HistoryFilters>(NO_FILTERS);
-  const [page, setPage] = useState(1);
   // The run whose amber date was clicked — its previous-day note is open.
   const [staleNoteTaskId, setStaleNoteTaskId] = useState<string | null>(null);
 
-  const updateFilters = (patch: Partial<HistoryFilters>) => {
-    setFilters((prev) => ({ ...prev, ...patch }));
-    setPage(1);
-  };
-
-  // Every ticker that has ever been run, for the ticker filter's dropdown.
-  const knownTickers = useMemo(
-    () => Array.from(new Set(runs.map((run) => run.stock_code))).sort(),
-    [runs],
-  );
-
-  const filtered = useMemo(
-    () => runs.filter((run) => matchesFilters(run, filters)),
-    [runs, filters],
-  );
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const safePage = Math.min(page, pageCount);
-  const visible = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-
-  const hasFilters =
-    filters.tickers.length > 0 ||
-    filters.holds.length > 0 ||
-    filters.tiers.length > 0 ||
-    filters.statuses.length > 0 ||
-    filters.outlooks.length > 0 ||
-    filters.capitalMin !== null ||
-    filters.capitalMax !== null ||
-    filters.riskMin !== null ||
-    filters.riskMax !== null ||
-    filters.rewardMin !== null ||
-    filters.rewardMax !== null ||
-    filters.dateMin !== null ||
-    filters.dateMax !== null;
+  const hasFilters = hasAnyFilter(filters);
 
   // Pills in filter order: ticker, capital, risk, reward, max hold, tier,
   // status, outlook, date.
@@ -308,7 +182,7 @@ export const AltRunHistory = ({
       key: `ticker-${ticker}`,
       tone: TONE.ticker,
       label: t('tiered.pill.ticker', { value: ticker }),
-      onRemove: () => updateFilters({ tickers: toggled(filters.tickers, ticker) }),
+      onRemove: () => onFilters({ tickers: toggled(filters.tickers, ticker) }),
     });
   });
   ([
@@ -325,7 +199,7 @@ export const AltRunHistory = ({
         key: field,
         tone,
         label: t(labelKey, { value }),
-        onRemove: () => updateFilters({ [field]: null }),
+        onRemove: () => onFilters({ [field]: null }),
       });
     }
   });
@@ -334,7 +208,7 @@ export const AltRunHistory = ({
       key: `hold-${hold}`,
       tone: TONE.hold,
       label: t('tiered.pill.hold', { value: hold }),
-      onRemove: () => updateFilters({ holds: toggled(filters.holds, hold) }),
+      onRemove: () => onFilters({ holds: toggled(filters.holds, hold) }),
     });
   });
   filters.tiers.forEach((tier) => {
@@ -342,7 +216,7 @@ export const AltRunHistory = ({
       key: `tier-${tier}`,
       tone: TONE.tier,
       label: t('tiered.pill.tier', { value: tier }),
-      onRemove: () => updateFilters({ tiers: toggled(filters.tiers, tier) }),
+      onRemove: () => onFilters({ tiers: toggled(filters.tiers, tier) }),
     });
   });
   filters.statuses.forEach((status) => {
@@ -352,7 +226,7 @@ export const AltRunHistory = ({
       label: t('tiered.pill.status', {
         value: t(`tiered.status.${status}` as UiTextKey),
       }),
-      onRemove: () => updateFilters({ statuses: toggled(filters.statuses, status) }),
+      onRemove: () => onFilters({ statuses: toggled(filters.statuses, status) }),
     });
   });
   filters.outlooks.forEach((outlook) => {
@@ -360,7 +234,7 @@ export const AltRunHistory = ({
       key: `outlook-${outlook}`,
       tone: TONE.outlook,
       label: t('tiered.pill.outlook', { value: outlookOptionLabel(outlook, t) }),
-      onRemove: () => updateFilters({ outlooks: toggled(filters.outlooks, outlook) }),
+      onRemove: () => onFilters({ outlooks: toggled(filters.outlooks, outlook) }),
     });
   });
   ([
@@ -373,7 +247,7 @@ export const AltRunHistory = ({
         key: field,
         tone,
         label: t(labelKey, { value }),
-        onRemove: () => updateFilters({ [field]: null }),
+        onRemove: () => onFilters({ [field]: null }),
       });
     }
   });
@@ -384,11 +258,11 @@ export const AltRunHistory = ({
         <AltSelect
           label={t('tiered.altForm.ticker')}
           tone={filters.tickers.length > 0 ? TONE.ticker : undefined}
-          options={knownTickers.map((value) => ({ value, label: value }))}
+          options={tickers.map((value) => ({ value, label: value }))}
           selected={filters.tickers}
           placeholder={t('tiered.altFilter.tickerPh')}
           multi
-          onCommit={(value) => updateFilters({ tickers: toggled(filters.tickers, value) })}
+          onCommit={(value) => onFilters({ tickers: toggled(filters.tickers, value) })}
         />
         <AltPairField
           label={t('tiered.altFilter.capital')}
@@ -397,13 +271,13 @@ export const AltRunHistory = ({
             placeholder: t('tiered.altFilter.min'),
             inputMode: 'decimal',
             validate: isPositiveNumber,
-            onCommit: (value) => updateFilters({ capitalMin: value }),
+            onCommit: (value) => onFilters({ capitalMin: value }),
           }}
           end={{
             placeholder: t('tiered.altFilter.max'),
             inputMode: 'decimal',
             validate: isPositiveNumber,
-            onCommit: (value) => updateFilters({ capitalMax: value }),
+            onCommit: (value) => onFilters({ capitalMax: value }),
           }}
         />
         <AltPairField
@@ -413,13 +287,13 @@ export const AltRunHistory = ({
             placeholder: t('tiered.altFilter.min'),
             inputMode: 'decimal',
             validate: isRiskPct,
-            onCommit: (value) => updateFilters({ riskMin: value }),
+            onCommit: (value) => onFilters({ riskMin: value }),
           }}
           end={{
             placeholder: t('tiered.altFilter.max'),
             inputMode: 'decimal',
             validate: isRiskPct,
-            onCommit: (value) => updateFilters({ riskMax: value }),
+            onCommit: (value) => onFilters({ riskMax: value }),
           }}
         />
         <AltPairField
@@ -429,13 +303,13 @@ export const AltRunHistory = ({
             placeholder: t('tiered.altFilter.min'),
             inputMode: 'decimal',
             validate: isPositiveNumber,
-            onCommit: (value) => updateFilters({ rewardMin: value }),
+            onCommit: (value) => onFilters({ rewardMin: value }),
           }}
           end={{
             placeholder: t('tiered.altFilter.max'),
             inputMode: 'decimal',
             validate: isPositiveNumber,
-            onCommit: (value) => updateFilters({ rewardMax: value }),
+            onCommit: (value) => onFilters({ rewardMax: value }),
           }}
         />
         <AltSelect
@@ -445,7 +319,7 @@ export const AltRunHistory = ({
           selected={filters.holds}
           placeholder={t('tiered.altFilter.holdPh')}
           multi
-          onCommit={(value) => updateFilters({ holds: toggled(filters.holds, value) })}
+          onCommit={(value) => onFilters({ holds: toggled(filters.holds, value) })}
         />
         <AltSelect
           label={t('tiered.altFilter.tier')}
@@ -457,7 +331,7 @@ export const AltRunHistory = ({
           selected={filters.tiers}
           placeholder={t('tiered.altFilter.tierPh')}
           multi
-          onCommit={(value) => updateFilters({ tiers: toggled(filters.tiers, value) })}
+          onCommit={(value) => onFilters({ tiers: toggled(filters.tiers, value) })}
         />
         <AltSelect
           label={t('tiered.altFilter.status')}
@@ -469,7 +343,7 @@ export const AltRunHistory = ({
           selected={filters.statuses}
           placeholder={t('tiered.altFilter.statusPh')}
           multi
-          onCommit={(value) => updateFilters({ statuses: toggled(filters.statuses, value) })}
+          onCommit={(value) => onFilters({ statuses: toggled(filters.statuses, value) })}
         />
         <AltSelect
           label={t('tiered.altFilter.outlook')}
@@ -481,7 +355,7 @@ export const AltRunHistory = ({
           selected={filters.outlooks}
           placeholder={t('tiered.altFilter.outlookPh')}
           multi
-          onCommit={(value) => updateFilters({ outlooks: toggled(filters.outlooks, value) })}
+          onCommit={(value) => onFilters({ outlooks: toggled(filters.outlooks, value) })}
         />
         <AltPairField
           label={t('tiered.altFilter.date')}
@@ -489,12 +363,12 @@ export const AltRunHistory = ({
           start={{
             placeholder: t('tiered.altFilter.min'),
             validate: isValidDay,
-            onCommit: (value) => updateFilters({ dateMin: value }),
+            onCommit: (value) => onFilters({ dateMin: value }),
           }}
           end={{
             placeholder: t('tiered.altFilter.max'),
             validate: isValidDay,
-            onCommit: (value) => updateFilters({ dateMax: value }),
+            onCommit: (value) => onFilters({ dateMax: value }),
           }}
         />
       </div>
@@ -508,9 +382,9 @@ export const AltRunHistory = ({
         ))}
       </AltPillRow>
 
-      {visible.length === 0 ? (
+      {runs.length === 0 ? (
         <p className="py-8 text-center text-sm text-gray-600">
-          {hasFilters && runs.length > 0 ? t('tiered.altHistory.none') : t('tiered.empty')}
+          {hasFilters ? t('tiered.altHistory.none') : t('tiered.empty')}
         </p>
       ) : (
         <>
@@ -526,7 +400,7 @@ export const AltRunHistory = ({
             ))}
           </div>
           <ul className="flex flex-col divide-y divide-gray-800">
-          {visible.map((run) => {
+          {runs.map((run) => {
             const isExpanded = run.task_id === expandedTaskId;
             return (
               <li key={run.task_id}>
@@ -649,9 +523,9 @@ export const AltRunHistory = ({
       )}
 
       <AltPageSelector
-        page={safePage}
+        page={page}
         pageCount={pageCount}
-        onPage={setPage}
+        onPage={onPage}
         labels={{
           first: t('tiered.altHistory.first'),
           prev: t('tiered.altHistory.prev'),

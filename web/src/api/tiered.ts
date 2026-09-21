@@ -319,8 +319,8 @@ export type TieredLlmUsage = {
   transcript_entries?: number | null;
 };
 
-// One LLM exchange of a run, from GET /runs/{task_id}/transcript.
-export type TieredTranscriptEntry = {
+// Everything about one LLM call of a run except its text.
+export type TieredTranscriptCallFacts = {
   seq: number;
   created_at: string | null;
   stage: string | null;
@@ -331,6 +331,18 @@ export type TieredTranscriptEntry = {
   completion_tokens: number | null;
   structured: string | null;
   error: string | null;
+};
+
+// One row of the transcript index (GET /runs/{task_id}/transcript): the
+// facts plus how big the prompt and reply are, so a reader can decide
+// whether to open them. The text is one more call away.
+export type TieredTranscriptCallSummary = TieredTranscriptCallFacts & {
+  prompt_chars: number;
+  reply_chars: number;
+};
+
+// One call with its text (GET /runs/{task_id}/transcript/{seq}).
+export type TieredTranscriptCall = TieredTranscriptCallFacts & {
   prompt: string | null;
   reply: string | null;
 };
@@ -376,13 +388,13 @@ export type TieredRunSummary = {
   updated_at: string | null;
   // Queued rows only: how many runs are ahead in the line.
   queue_ahead?: number | null;
-  // Digest of the stored report for the history rows. Null while running,
-  // after a failure, or on rows stored before the backend sent these.
-  // shares mirrors the report card: 0 = sizing ran but bought nothing,
-  // null = the run has no sizing block (shown as a dash).
+  // The facts the history row shows (real columns since 2026-09-21).
+  // Outlook and shares are set once the run is done: shares mirrors the
+  // report card, 0 = sizing ran but bought nothing, null = no sizing
+  // block (shown as a dash). Tier and the inputs are known from the
+  // moment the run is created.
   outlook?: TieredOutlook | null;
   shares?: number | null;
-  // The tier the run went to (1-3); null while running/failed.
   tier?: number | null;
   // The sizing inputs the run used (capital in the ticker's own currency,
   // risk as a 0-1 fraction); null when the run had no sizing block.
@@ -396,8 +408,48 @@ export type TieredRunSummary = {
   hold_weeks?: number | null;
 };
 
+// The parts of a stored report GET /runs/{task_id} can return
+// (2026-09-21). `core` is the light headline and always comes back;
+// `dimensions` (the data reports), `debate` (the deep-analysis record)
+// and `plan` (the trade-plan receipt) are the heavy parts.
+export type TieredReportSection = 'core' | 'dimensions' | 'debate' | 'plan';
+
 export type TieredRun = TieredRunSummary & {
+  // Which sections `result` holds.
+  sections: TieredReportSection[];
   result: TieredResult | null;
+};
+
+// The run-list filters as the server takes them (GET /runs). Every
+// field is optional and they combine with AND; a list matches any of
+// its values. Ranges are inclusive; risk is a fraction (0.01 = 1%);
+// dates are ISO instants (after inclusive, before exclusive).
+export type TieredRunListQuery = {
+  ticker?: string[];
+  status?: string[];
+  outlook?: string[];
+  tier?: number[];
+  hold_weeks?: number[];
+  capital_min?: number;
+  capital_max?: number;
+  risk_min?: number;
+  risk_max?: number;
+  reward_min?: number;
+  reward_max?: number;
+  created_after?: string;
+  created_before?: string;
+  page?: number;
+  page_size?: number;
+};
+
+// One page of the run history, newest first.
+export type TieredRunPage = {
+  items: TieredRunSummary[];
+  page: number;
+  page_size: number;
+  // Every match, not just this page.
+  total: number;
+  page_count: number;
 };
 
 // Tier 3 retired (outlook redesign): the backend rejects depth 3 with a
@@ -453,39 +505,45 @@ export const tieredApi = {
     return response.data;
   },
 
-  // 200 is the backend's cap; the page paginates client-side over this.
-  listRuns: async (limit = 200): Promise<TieredRunSummary[]> => {
-    const response = await apiClient.get<{ items: TieredRunSummary[] }>('/api/v1/tiered/runs', {
-      params: { limit },
+  // One page of the history, filtered by the server. Repeated params
+  // are sent as ?ticker=A&ticker=B (no [] suffix), as the backend reads them.
+  listRuns: async (query: TieredRunListQuery = {}): Promise<TieredRunPage> => {
+    const response = await apiClient.get<TieredRunPage>('/api/v1/tiered/runs', {
+      params: query,
+      paramsSerializer: { indexes: null },
     });
-    return response.data.items;
-  },
-
-  getRun: async (taskId: string): Promise<TieredRun> => {
-    const response = await apiClient.get<TieredRun>(`/api/v1/tiered/runs/${taskId}`);
     return response.data;
   },
 
-  // The run's LLM exchanges, served apart from the report (they're big).
-  getTranscript: async (taskId: string): Promise<TieredTranscriptEntry[]> => {
-    const response = await apiClient.get<{ items: TieredTranscriptEntry[] }>(
+  // Every ticker ever run, A-Z — the ticker filter's choices.
+  listTickers: async (): Promise<string[]> => {
+    const response = await apiClient.get<{ items: string[] }>('/api/v1/tiered/runs/tickers');
+    return response.data.items;
+  },
+
+  // One run with its report, whole (no sections named) or by section.
+  getRun: async (taskId: string, sections?: TieredReportSection[]): Promise<TieredRun> => {
+    const response = await apiClient.get<TieredRun>(`/api/v1/tiered/runs/${taskId}`, {
+      params: sections && sections.length > 0 ? { section: sections } : undefined,
+      paramsSerializer: { indexes: null },
+    });
+    return response.data;
+  },
+
+  // The run's LLM calls without their text (the index is small; the
+  // text of every call together runs to half a megabyte).
+  getTranscript: async (taskId: string): Promise<TieredTranscriptCallSummary[]> => {
+    const response = await apiClient.get<{ items: TieredTranscriptCallSummary[] }>(
       `/api/v1/tiered/runs/${taskId}/transcript`,
     );
     return response.data.items;
   },
 
-  // Saved sizing settings (.env-backed) — what a run uses when the form
-  // sends nothing. Both null when no defaults are configured.
-  sizingDefaults: async (): Promise<{
-    capital: number | null;
-    risk_fraction: number | null;
-    reward_risk?: number | null;
-  }> => {
-    const response = await apiClient.get<{
-      capital: number | null;
-      risk_fraction: number | null;
-      reward_risk?: number | null;
-    }>('/api/v1/tiered/sizing-defaults');
+  // One call with its full prompt and raw reply.
+  getTranscriptCall: async (taskId: string, seq: number): Promise<TieredTranscriptCall> => {
+    const response = await apiClient.get<TieredTranscriptCall>(
+      `/api/v1/tiered/runs/${taskId}/transcript/${seq}`,
+    );
     return response.data;
   },
 };

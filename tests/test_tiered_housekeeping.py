@@ -161,11 +161,13 @@ class TestTranscriptStorage:
         rows = history.list_transcript("task-9")
         assert [r["seq"] for r in rows] == [1, 2]
         assert rows[0]["stage"] == "tier1_analysis"
-        assert rows[0]["prompt"] == "first"
-        assert rows[0]["reply"] == "one"
         assert rows[0]["structured"] == "schema"
-        assert rows[1]["reply"] is None
+        assert (rows[0]["prompt_chars"], rows[0]["reply_chars"]) == (5, 3)
+        assert rows[1]["reply_chars"] == 0
         assert "boom" in rows[1]["error"]
+        first = history.get_transcript_call("task-9", 1)
+        assert (first["prompt"], first["reply"]) == ("first", "one")
+        assert history.get_transcript_call("task-9", 2)["reply"] is None
         assert history.list_transcript("unknown") == []
 
     def test_transcript_endpoint_serves_the_rows_and_404s_unknown_runs(self, isolated_db):
@@ -181,8 +183,11 @@ class TestTranscriptStorage:
         response = client.get("/tiered/runs/task-9/transcript")
         assert response.status_code == 200
         [item] = response.json()["items"]
-        assert item["prompt"] == "p"
-        assert item["reply"] == "r"
+        # The index carries sizes, not text; the text is one call away.
+        assert "prompt" not in item and "reply" not in item
+        assert (item["prompt_chars"], item["reply_chars"]) == (1, 1)
+        call = client.get("/tiered/runs/task-9/transcript/1").json()
+        assert (call["prompt"], call["reply"]) == ("p", "r")
         assert client.get("/tiered/runs/nope/transcript").status_code == 404
 
 

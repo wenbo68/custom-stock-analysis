@@ -229,23 +229,161 @@ class TestTieredAnalyzeEndpoint:
         response = client.get("/tiered/runs/nope")
         assert response.status_code == 404
         assert client.get("/tiered/runs/nope/transcript").status_code == 404
+        assert client.get("/tiered/runs/nope/transcript/1").status_code == 404
 
-    def test_sizing_defaults_reflect_env_settings(self, client, monkeypatch):
-        monkeypatch.setenv("TIERED_SIZING_CAPITAL", "100000")
-        monkeypatch.setenv("TIERED_SIZING_RISK_FRACTION", "0.01")
-        response = client.get("/tiered/sizing-defaults")
-        assert response.status_code == 200
-        assert response.json() == {
-            "capital": 100000.0, "risk_fraction": 0.01, "reward_risk": 2.0}
+    def test_sizing_defaults_route_is_gone(self, client):
+        assert client.get("/tiered/sizing-defaults").status_code == 404
 
-    def test_sizing_defaults_null_when_unconfigured(self, client, monkeypatch):
-        monkeypatch.delenv("TIERED_SIZING_CAPITAL", raising=False)
-        monkeypatch.delenv("TIERED_SIZING_RISK_FRACTION", raising=False)
-        response = client.get("/tiered/sizing-defaults")
-        assert response.status_code == 200
-        # reward_risk always has a default — the form needs a number.
-        assert response.json() == {
-            "capital": None, "risk_fraction": None, "reward_risk": 2.0}
+
+def _finish(client, stock_code, **overrides):
+    """Start and finish one run through the endpoint; returns its task id.
+    The fake runner reports the depth and hold it was asked for, as the
+    real one does, so the row's tier and hold columns are meaningful."""
+    from dataclasses import replace
+
+    def fake_run(code, **kwargs):
+        return replace(_outcome(code), depth=kwargs.get("depth", 1),
+                       hold_weeks=kwargs.get("hold_weeks", 2))
+
+    with patch.object(tiered, "_run_analysis", fake_run):
+        task_id = client.post("/tiered/analyze", json={
+            "stock_code": stock_code, **overrides,
+        }).json()["task_id"]
+        _poll_until_done(client, task_id)
+    return task_id
+
+
+class TestRunListEndpoint:
+    """GET /runs: one page at a time, filtered in SQL (2026-09-21)."""
+
+    def test_page_envelope_and_row_shape(self, client):
+        _finish(client, "AAPL", depth=2, hold_weeks=3,
+                sizing={"capital": 50000, "risk_fraction": 0.02, "reward_risk": 3})
+        body = client.get("/tiered/runs").json()
+        assert set(body) == {"items", "page", "page_size", "total", "page_count"}
+        assert (body["page"], body["page_size"], body["total"], body["page_count"]) == (1, 10, 1, 1)
+        row = body["items"][0]
+        assert set(row) == {
+            "task_id", "stock_code", "status", "error", "created_at",
+            "updated_at", "queue_ahead", "tier", "capital", "risk_fraction",
+            "reward_risk", "hold_weeks", "outlook", "shares",
+        }
+        assert row["stock_code"] == "AAPL" and row["status"] == "done"
+        assert (row["tier"], row["hold_weeks"]) == (2, 3)
+        assert (row["capital"], row["risk_fraction"], row["reward_risk"]) == (50000, 0.02, 3.0)
+        assert row["outlook"] == "neutral"
+
+    def test_filters_and_paging_reach_the_database(self, client):
+        _finish(client, "AAPL")
+        _finish(client, "NVDA", depth=2)
+        _finish(client, "MSFT")
+        page = client.get("/tiered/runs", params={"page": 2, "page_size": 2}).json()
+        assert [r["stock_code"] for r in page["items"]] == ["AAPL"]
+        assert (page["total"], page["page_count"]) == (3, 2)
+        by_ticker = client.get("/tiered/runs", params={"ticker": ["nvda", "msft"]}).json()
+        assert sorted(r["stock_code"] for r in by_ticker["items"]) == ["MSFT", "NVDA"]
+        assert client.get("/tiered/runs", params={"tier": 2}).json()["total"] == 1
+        assert client.get("/tiered/runs", params={"outlook": "neutral"}).json()["total"] == 3
+        assert client.get("/tiered/runs", params={"outlook": "none"}).json()["total"] == 0
+        assert client.get("/tiered/runs", params={"status": "failed"}).json()["total"] == 0
+        assert client.get("/tiered/runs", params={
+            "capital_min": 100000, "risk_max": 0.01,
+        }).json()["total"] == 3
+        assert client.get("/tiered/runs", params={
+            "created_after": "2000-01-01T00:00:00Z",
+            "created_before": "2000-01-02T00:00:00+08:00",
+        }).json()["total"] == 0
+
+    def test_bad_filter_values_are_422(self, client):
+        assert client.get("/tiered/runs", params={"status": "sleeping"}).status_code == 422
+        assert client.get("/tiered/runs", params={"outlook": "sideways"}).status_code == 422
+        assert client.get("/tiered/runs", params={"page": 0}).status_code == 422
+        assert client.get("/tiered/runs", params={"page_size": 201}).status_code == 422
+        assert client.get("/tiered/runs", params={"risk_min": 1.5}).status_code == 422
+        assert client.get("/tiered/runs", params={"created_after": "yesterday"}).status_code == 422
+
+    def test_tickers_route(self, client):
+        assert client.get("/tiered/runs/tickers").json() == {"items": []}
+        _finish(client, "NVDA")
+        _finish(client, "AAPL")
+        _finish(client, "NVDA")
+        assert client.get("/tiered/runs/tickers").json() == {"items": ["AAPL", "NVDA"]}
+
+
+class TestRunDetailSections:
+    """GET /runs/{task_id}?section=…: the report by section (2026-09-21)."""
+
+    def test_whole_report_by_default_and_sections_named(self, client):
+        task_id = _finish(client, "AAPL")
+        body = client.get(f"/tiered/runs/{task_id}").json()
+        assert body["sections"] == ["core", "dimensions", "debate", "plan"]
+        assert body["result"]["dimensions"]
+        assert "sizing" in body["result"]
+
+    def test_core_only(self, client):
+        task_id = _finish(client, "AAPL")
+        body = client.get(f"/tiered/runs/{task_id}", params={"section": "core"}).json()
+        assert body["sections"] == ["core"]
+        result = body["result"]
+        assert result["symbol"] == "AAPL" and result["outlook"] == "neutral"
+        assert result["levels"]["entry"] == 303.8
+        for heavy in ("dimensions", "levels_detail", "sizing", "plan_warnings"):
+            assert heavy not in result
+
+    def test_named_sections_and_one_dimension(self, client):
+        task_id = _finish(client, "AAPL")
+        body = client.get(f"/tiered/runs/{task_id}", params={
+            "section": ["dimensions", "plan"], "dimension": "sentiment",
+        }).json()
+        assert body["sections"] == ["core", "dimensions", "plan"]
+        assert [d["dimension"] for d in body["result"]["dimensions"]] == ["sentiment"]
+        assert "sizing" in body["result"]
+
+    def test_unknown_section_is_422(self, client):
+        task_id = _finish(client, "AAPL")
+        response = client.get(f"/tiered/runs/{task_id}", params={"section": "gossip"})
+        assert response.status_code == 422
+
+
+class TestTranscriptEndpoints:
+    """The transcript as an index plus one call at a time (2026-09-21)."""
+
+    @staticmethod
+    def _record(task_id, seq, prompt, reply):
+        from src.storage import DatabaseManager, TieredRunTranscriptRecord
+
+        with DatabaseManager.get_instance().get_session() as session:
+            session.add(TieredRunTranscriptRecord(
+                task_id=task_id, seq=seq, stage="tier1_analysis",
+                model="gemini/flash", temperature=0.0, duration_ms=120,
+                prompt_tokens=10, completion_tokens=5, structured="schema",
+                prompt=prompt, reply=reply,
+            ))
+            session.commit()
+
+    def test_index_then_one_call(self, client):
+        task_id = _finish(client, "AAPL")
+        self._record(task_id, 1, "ask one", "answer one")
+        self._record(task_id, 2, "ask two", None)
+        index = client.get(f"/tiered/runs/{task_id}/transcript").json()["items"]
+        assert [row["seq"] for row in index] == [1, 2]
+        assert set(index[0]) == {
+            "seq", "created_at", "stage", "model", "temperature", "duration_ms",
+            "prompt_tokens", "completion_tokens", "structured", "error",
+            "prompt_chars", "reply_chars",
+        }
+        assert (index[0]["prompt_chars"], index[0]["reply_chars"]) == (7, 10)
+        assert (index[1]["prompt_chars"], index[1]["reply_chars"]) == (7, 0)
+
+        call = client.get(f"/tiered/runs/{task_id}/transcript/2").json()
+        assert call["prompt"] == "ask two" and call["reply"] is None
+        assert call["seq"] == 2 and call["model"] == "gemini/flash"
+        assert "prompt_chars" not in call
+        assert client.get(f"/tiered/runs/{task_id}/transcript/3").status_code == 404
+
+    def test_run_without_calls_has_an_empty_index(self, client):
+        task_id = _finish(client, "AAPL")
+        assert client.get(f"/tiered/runs/{task_id}/transcript").json() == {"items": []}
 
 
 class TestLlmConfiguration:
@@ -258,9 +396,9 @@ class TestLlmConfiguration:
         response = client.post("/tiered/analyze", json={"stock_code": "AAPL"})
         assert response.status_code == 400
         assert response.json()["detail"]["error"] == "llm_not_configured"
-        assert client.get("/tiered/runs").json() == {"items": []}
-        # the sizing defaults are server config and need no model
-        assert client.get("/tiered/sizing-defaults").status_code == 200
+        assert client.get("/tiered/runs").json()["items"] == []
+        # reads need no model
+        assert client.get("/tiered/runs/tickers").json() == {"items": []}
 
 
 class TestTieredDepthAndSizingApi:

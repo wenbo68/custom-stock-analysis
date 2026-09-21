@@ -52,6 +52,19 @@ CURRENT_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
 #: names are rewritten once at startup so the page keeps recognising
 #: them; this version string in schema_migrations marks that it ran.
 RENAME_MIGRATION_VERSION = "2026-09-18-rename-dimensions-and-stages"
+#: The run-list facts became columns on tiered_runs (2026-09-21); rows
+#: stored before that are filled in once from their JSON at startup.
+DIGEST_MIGRATION_VERSION = "2026-09-21-run-digest-columns"
+#: Column name -> DDL type, for databases created before the columns.
+DIGEST_COLUMN_DDL: Dict[str, str] = {
+    "tier": "INTEGER",
+    "capital": "FLOAT",
+    "risk_fraction": "FLOAT",
+    "reward_risk": "FLOAT",
+    "hold_weeks": "INTEGER",
+    "outlook": "VARCHAR(16)",
+    "shares": "FLOAT",
+}
 RENAMED_DIMENSIONS: Dict[str, str] = {
     "macro_econ": "macro_economy",
     "company_events": "company_news",
@@ -138,6 +151,18 @@ class TieredRunRecord(Base):
     error = Column(Text)
     created_at = Column(DateTime, default=utc_naive_now, index=True)
     updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+    #: The run-list facts as real columns (2026-09-21), so the list
+    #: endpoint can filter and page in SQL instead of shipping every row
+    #: for the browser to sift. Written from the inputs at creation and
+    #: from the report at completion; see src/tiered_analysis/run_digest.
+    tier = Column(Integer, index=True)
+    capital = Column(Float)
+    risk_fraction = Column(Float)
+    reward_risk = Column(Float)
+    hold_weeks = Column(Integer)
+    outlook = Column(String(16), index=True)
+    #: Float: some markets size in fractional units.
+    shares = Column(Float)
 
 
 class TieredRunTranscriptRecord(Base):
@@ -259,8 +284,11 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             # 创建所有表
             Base.metadata.create_all(self._engine)
             self._ensure_column(TieredRunRecord.__tablename__, "inputs_json", "TEXT")
+            for column, ddl_type in DIGEST_COLUMN_DDL.items():
+                self._ensure_column(TieredRunRecord.__tablename__, column, ddl_type)
             self._ensure_schema_migration_record()
             self._apply_rename_migration()
+            self._apply_digest_migration()
 
             self._initialized = True
             logger.info(f"数据库初始化完成: {db_url}")
@@ -353,6 +381,45 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         except Exception as exc:
             session.rollback()
             logger.warning("stored-name rename migration skipped: %s", exc)
+        finally:
+            session.close()
+
+    def _apply_digest_migration(self) -> None:
+        """One-time fill of the run-list columns (DIGEST_COLUMN_DDL) on
+        rows stored before they existed, from each row's inputs and
+        report JSON. Best-effort like the rename migration: a failure
+        only leaves old rows unfilterable, never blocks startup."""
+        from src.tiered_analysis.run_digest import digest_from_json
+
+        session = self._SessionLocal()
+        try:
+            if session.get(DatabaseSchemaMigration, DIGEST_MIGRATION_VERSION) is not None:
+                return
+            filled = 0
+            for row in session.query(TieredRunRecord):
+                digest = digest_from_json(row.inputs_json, row.result_json, row.status)
+                if all(value is None for value in digest.values()):
+                    continue
+                filled += 1
+                session.execute(
+                    TieredRunRecord.__table__.update()
+                    .where(TieredRunRecord.id == row.id)
+                    # Explicit updated_at: the onupdate default must not
+                    # re-stamp a run nobody touched.
+                    .values(**digest, updated_at=row.updated_at)
+                )
+            session.add(DatabaseSchemaMigration(
+                version=DIGEST_MIGRATION_VERSION,
+                description="Run-list facts (tier, sizing inputs, hold, outlook, shares) filled into their own tiered_runs columns",
+            ))
+            session.commit()
+            if filled:
+                logger.info("filled run-list columns on %d stored run(s)", filled)
+        except IntegrityError:
+            session.rollback()  # another instance recorded the marker first
+        except Exception as exc:
+            session.rollback()
+            logger.warning("run-list column migration skipped: %s", exc)
         finally:
             session.close()
 

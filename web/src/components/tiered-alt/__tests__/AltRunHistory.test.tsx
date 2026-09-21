@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { TieredRunSummary } from '../../../api/tiered';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
 import { AltRunHistory, type AltRunHistoryProps } from '../AltRunHistory';
+import { NO_FILTERS } from '../historyFilters';
 
 function makeRun(id: string, overrides: Partial<TieredRunSummary> = {}): TieredRunSummary {
   return {
@@ -24,6 +25,12 @@ function makeRun(id: string, overrides: Partial<TieredRunSummary> = {}): TieredR
 function renderHistory(overrides: Partial<AltRunHistoryProps> = {}) {
   const props: AltRunHistoryProps = {
     runs: [],
+    tickers: [],
+    filters: NO_FILTERS,
+    onFilters: vi.fn(),
+    page: 1,
+    pageCount: 1,
+    onPage: vi.fn(),
     expandedTaskId: null,
     expandedResult: null,
     expandedError: null,
@@ -41,12 +48,18 @@ function renderHistory(overrides: Partial<AltRunHistoryProps> = {}) {
 // Min boxes in filter order: capital, risk, reward, date (the shares
 // filter was dropped 2026-08-16).
 const minBoxes = () => screen.getAllByPlaceholderText(/^下限$|^Min$/);
+const maxBoxes = () => screen.getAllByPlaceholderText(/^上限$|^Max$/);
 const DATE_MIN = 3;
 
 // A filter's title: the bold span above its control (the table has
 // column headers with the same words).
 const titleOf = (text: RegExp) =>
   screen.getAllByText(text).find((el) => el.classList.contains('font-semibold')) as HTMLElement;
+
+const commit = (box: HTMLElement, value: string) => {
+  fireEvent.change(box, { target: { value } });
+  fireEvent.keyDown(box, { key: 'Enter' });
+};
 
 describe('AltRunHistory', () => {
   it('shows a queued row with its place in line and explains it when expanded', () => {
@@ -102,20 +115,22 @@ describe('AltRunHistory', () => {
     expect(screen.getByRole('button', { name: '1' })).toBeInTheDocument();
   });
 
-  it('offers a dash in the outlook filter that keeps only rows without an outlook', () => {
+  it('draws whatever page the server sent: rows are not filtered here', () => {
+    // A row the filters would not admit still shows — the server did the
+    // filtering, and this component trusts it.
     renderHistory({
-      runs: [
-        makeRun('t1', { stock_code: 'MSFT', outlook: 'bullish' }),
-        makeRun('t2', { stock_code: 'NVDA', status: 'failed', outlook: null }),
-        makeRun('t3', { stock_code: 'AMD', outlook: 'unknown' }),
-      ],
+      runs: [makeRun('t1', { stock_code: 'MSFT', outlook: 'bearish' })],
+      filters: { ...NO_FILTERS, outlooks: ['bullish'], tickers: ['NVDA'] },
     });
+    expect(screen.getByText('MSFT')).toBeInTheDocument();
+  });
+
+  it('offers a dash in the outlook filter that asks for rows without an outlook', () => {
+    const props = renderHistory({ runs: [makeRun('t1', { stock_code: 'MSFT' })] });
     fireEvent.focus(screen.getByPlaceholderText(/输入展望|Enter outlook/));
     // the dropdown's dash option (the rows' own dashes are not buttons)
     fireEvent.click(screen.getAllByText('—').find((el) => el.closest('button'))!);
-    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
-    expect(screen.getByText('NVDA')).toBeInTheDocument();
-    expect(screen.getByText('AMD')).toBeInTheDocument();
+    expect(props.onFilters).toHaveBeenCalledWith({ outlooks: ['none'] });
   });
 
   it('shows no status dot before the ticker', () => {
@@ -151,86 +166,70 @@ describe('AltRunHistory', () => {
     expect(dates[1]).toHaveClass('text-gray-400');
   });
 
-  it('filters by capital and risk ranges', () => {
-    renderHistory({
-      runs: [
-        makeRun('t1', { stock_code: 'MSFT', capital: 50000, risk_fraction: 0.005 }),
-        makeRun('t2', { stock_code: 'NVDA', capital: 200000, risk_fraction: 0.02 }),
-      ],
+  it('asks for capital and risk ranges and shows their pills', () => {
+    const props = renderHistory({
+      runs: [makeRun('t1', { stock_code: 'MSFT' })],
+      filters: { ...NO_FILTERS, capitalMin: '100000', riskMax: '1' },
     });
 
-    const capitalMin = minBoxes()[0];
-    fireEvent.change(capitalMin, { target: { value: '100000' } });
-    fireEvent.keyDown(capitalMin, { key: 'Enter' });
-    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
-    expect(screen.getByText('NVDA')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /(Capital Min|本金下限): 100000/ }));
+    commit(minBoxes()[0], '50000');
+    expect(props.onFilters).toHaveBeenLastCalledWith({ capitalMin: '50000' });
+    commit(maxBoxes()[1], '2');
+    expect(props.onFilters).toHaveBeenLastCalledWith({ riskMax: '2' });
 
-    const riskMax = screen.getAllByPlaceholderText(/^上限$|^Max$/)[1];
-    fireEvent.change(riskMax, { target: { value: '1' } });
-    fireEvent.keyDown(riskMax, { key: 'Enter' });
-    expect(screen.getByText('MSFT')).toBeInTheDocument();
-    expect(screen.queryByText('NVDA')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /(Risk Max|单笔风险上限): 1%/ })).toBeInTheDocument();
+    // pills read Label: value and remove on click
+    fireEvent.click(screen.getByRole('button', { name: /(Capital Min|本金下限): 100000/ }));
+    expect(props.onFilters).toHaveBeenLastCalledWith({ capitalMin: null });
+    fireEvent.click(screen.getByRole('button', { name: /(Risk Max|单笔风险上限): 1%/ }));
+    expect(props.onFilters).toHaveBeenLastCalledWith({ riskMax: null });
   });
 
-  it('offers the tickers seen in history as a multi-pick dropdown filter', () => {
-    renderHistory({
-      runs: [makeRun('t1', { stock_code: 'MSFT' }), makeRun('t2', { stock_code: 'NVDA' })],
+  it('offers the tickers the server knows as a multi-pick dropdown filter', () => {
+    const props = renderHistory({
+      runs: [makeRun('t1', { stock_code: 'MSFT' })],
+      tickers: ['MSFT', 'NVDA'],
+      filters: { ...NO_FILTERS, tickers: ['NVDA'] },
     });
 
     const tickerBox = screen.getByPlaceholderText(/输入代码|Enter ticker/);
     fireEvent.focus(tickerBox);
-    fireEvent.click(screen.getByRole('button', { name: 'NVDA' }));
-    // close the still-open multi-pick dropdown so only rows remain
-    fireEvent.mouseDown(document.body);
-    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
-
-    // multi-pick: adding the second ticker brings the other row back
-    fireEvent.focus(tickerBox);
+    // multi-pick: adding a second ticker keeps the first
     fireEvent.click(screen.getByRole('button', { name: 'MSFT' }));
+    expect(props.onFilters).toHaveBeenLastCalledWith({ tickers: ['NVDA', 'MSFT'] });
+    // picking a set one again clears it
+    fireEvent.click(screen.getByRole('button', { name: 'NVDA' }));
+    expect(props.onFilters).toHaveBeenLastCalledWith({ tickers: [] });
     fireEvent.mouseDown(document.body);
-    expect(screen.getByText('MSFT')).toBeInTheDocument();
 
-    // pills read Label: value and remove on click
+    // the pill reads Label: value and removes on click
     fireEvent.click(screen.getByRole('button', { name: /(Ticker|代码): NVDA/ }));
-    fireEvent.click(screen.getByRole('button', { name: /(Ticker|代码): MSFT/ }));
-    expect(screen.getByText('NVDA')).toBeInTheDocument();
+    expect(props.onFilters).toHaveBeenLastCalledWith({ tickers: [] });
   });
 
   it('clears an outlook filter by picking the same option again', () => {
-    renderHistory({
-      runs: [
-        // a new run stores its outlook; an old run maps hold → neutral
-        makeRun('t1', { stock_code: 'MSFT', outlook: 'bullish' }),
-        makeRun('t2', { stock_code: 'NVDA', outlook: 'neutral' }),
-      ],
+    const props = renderHistory({
+      runs: [makeRun('t1', { stock_code: 'MSFT' })],
+      filters: { ...NO_FILTERS, outlooks: ['neutral'] },
     });
 
     fireEvent.focus(screen.getByPlaceholderText(/输入展望|Enter outlook/));
     fireEvent.click(screen.getAllByText(/中性|Neutral/)[0]);
-    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
-    expect(screen.getByText('NVDA')).toBeInTheDocument();
-
-    // the dropdown stays open for multi-pick filters — same option clears
-    fireEvent.click(screen.getAllByText(/中性|Neutral/)[0]);
-    expect(screen.getByText('MSFT')).toBeInTheDocument();
+    expect(props.onFilters).toHaveBeenLastCalledWith({ outlooks: [] });
+    fireEvent.click(screen.getAllByText(/看多|Bullish/)[0]);
+    expect(props.onFilters).toHaveBeenLastCalledWith({ outlooks: ['neutral', 'bullish'] });
   });
 
-  it('filters by status from the dropdown and shows a dash outlook for a failed run', () => {
-    renderHistory({
-      runs: [
-        makeRun('t1', { stock_code: 'MSFT' }),
-        makeRun('t2', { stock_code: 'NVDA', status: 'failed', outlook: null }),
-      ],
+  it('asks for a status from the dropdown and shows a dash outlook for a failed run', () => {
+    const props = renderHistory({
+      runs: [makeRun('t2', { stock_code: 'NVDA', status: 'failed', outlook: null })],
+      filters: { ...NO_FILTERS, statuses: ['failed'] },
     });
 
     fireEvent.focus(screen.getByPlaceholderText(/输入状态|Enter status/));
-    fireEvent.click(screen.getByRole('button', { name: /^(失败|Failed)$/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^(已完成|Done)$/ }));
+    expect(props.onFilters).toHaveBeenLastCalledWith({ statuses: ['failed', 'done'] });
     fireEvent.mouseDown(document.body);
 
-    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
-    expect(screen.getByText('NVDA')).toBeInTheDocument();
     // the failed row's outlook cell is a dash (plus its reward and hold
     // dashes); its status cell says Failed
     expect(screen.getAllByText('—')).toHaveLength(3);
@@ -238,7 +237,7 @@ describe('AltRunHistory', () => {
     expect(screen.queryByText(/看多|Bullish/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /(Status|状态): (Failed|失败)/ }));
-    expect(screen.getByText('MSFT')).toBeInTheDocument();
+    expect(props.onFilters).toHaveBeenLastCalledWith({ statuses: [] });
   });
 
   it('shows a dash outlook for a finished run whose judge produced nothing', () => {
@@ -251,104 +250,99 @@ describe('AltRunHistory', () => {
     expect(screen.getAllByText('—')).toHaveLength(3);
   });
 
-  it('filters by tier from the dropdown', () => {
-    renderHistory({
-      runs: [
-        makeRun('t1', { stock_code: 'MSFT', tier: 1 }),
-        makeRun('t2', { stock_code: 'NVDA', tier: 2 }),
-      ],
+  it('asks for a tier from the dropdown and shows its pill', () => {
+    const props = renderHistory({
+      runs: [makeRun('t2', { stock_code: 'NVDA', tier: 2 })],
+      filters: { ...NO_FILTERS, tiers: ['2'] },
     });
 
     fireEvent.focus(screen.getByPlaceholderText(/输入层级|Enter tier/));
-    fireEvent.click(screen.getByRole('button', { name: /^2[:：]/ }));
-
-    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
-    expect(screen.getByText('NVDA')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^1[:：]/ }));
+    expect(props.onFilters).toHaveBeenLastCalledWith({ tiers: ['2', '1'] });
     expect(screen.getByRole('button', { name: /(Tier|层级): 2/ })).toBeInTheDocument();
   });
 
-  it('shows the max hold column and filters by it from the dropdown', () => {
-    renderHistory({
+  it('shows the max hold column and asks for a max hold from the dropdown', () => {
+    const props = renderHistory({
       runs: [
         makeRun('t1', { stock_code: 'MSFT', hold_weeks: 2 }),
         // an old stored run without a recorded max hold shows a dash
         makeRun('t2', { stock_code: 'NVDA' }),
       ],
+      filters: { ...NO_FILTERS, holds: ['2'] },
     });
 
     expect(screen.getByText(/^(2w|2 周)$/)).toBeInTheDocument();
 
     fireEvent.focus(screen.getByPlaceholderText(/输入最长持有|Enter max hold/));
-    fireEvent.click(screen.getByRole('button', { name: '2' }));
-
-    expect(screen.getByText('MSFT')).toBeInTheDocument();
-    expect(screen.queryByText('NVDA')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '3' }));
+    expect(props.onFilters).toHaveBeenLastCalledWith({ holds: ['2', '3'] });
 
     // the pill wears the same wording as the form's max-hold pill
     fireEvent.click(screen.getByRole('button', { name: /(Max hold|最长持有): 2/ }));
-    expect(screen.getByText('NVDA')).toBeInTheDocument();
+    expect(props.onFilters).toHaveBeenLastCalledWith({ holds: [] });
   });
 
-  it('filters by a date range (wide bounds keep the row, a future start drops it)', () => {
-    renderHistory({ runs: [makeRun('t1', { stock_code: 'MSFT' })] });
+  it('asks for a date range and rejects an invalid date instead of committing it', () => {
+    const props = renderHistory({
+      runs: [makeRun('t1', { stock_code: 'MSFT' })],
+      filters: { ...NO_FILTERS, dateMin: '2026/07/01' },
+    });
     const dateMin = minBoxes()[DATE_MIN];
-    const dateMax = screen.getAllByPlaceholderText(/^上限$|^Max$/)[DATE_MIN];
+    const dateMax = maxBoxes()[DATE_MIN];
 
-    fireEvent.change(dateMin, { target: { value: '2026/07/01' } });
-    fireEvent.keyDown(dateMin, { key: 'Enter' });
-    fireEvent.change(dateMax, { target: { value: '2026/07/31' } });
-    fireEvent.keyDown(dateMax, { key: 'Enter' });
-    expect(screen.getByText('MSFT')).toBeInTheDocument();
+    commit(dateMax, '2026/07/31');
+    expect(props.onFilters).toHaveBeenLastCalledWith({ dateMax: '2026/07/31' });
+
+    commit(dateMin, 'yesterday');
+    expect(dateMin).toHaveValue('yesterday');
+    expect(props.onFilters).not.toHaveBeenCalledWith({ dateMin: 'yesterday' });
 
     fireEvent.click(screen.getByRole('button', { name: /2026\/07\/01/ }));
-    fireEvent.change(dateMin, { target: { value: '2027/01/01' } });
-    fireEvent.keyDown(dateMin, { key: 'Enter' });
-    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
+    expect(props.onFilters).toHaveBeenLastCalledWith({ dateMin: null });
   });
 
-  it('rejects an invalid date instead of committing it', () => {
-    renderHistory({ runs: [makeRun('t1', { stock_code: 'MSFT' })] });
-    const dateMin = minBoxes()[DATE_MIN];
-
-    fireEvent.change(dateMin, { target: { value: 'yesterday' } });
-    fireEvent.keyDown(dateMin, { key: 'Enter' });
-
-    expect(dateMin).toHaveValue('yesterday');
-    expect(screen.getByText('MSFT')).toBeInTheDocument();
-  });
-
-  it('shows the column-name header row and filters by reward', () => {
-    renderHistory({
+  it('shows the column-name header row and asks for a reward range', () => {
+    const props = renderHistory({
       runs: [
         makeRun('t1', { stock_code: 'MSFT', reward_risk: 1.5 }),
         makeRun('t2', { stock_code: 'NVDA', reward_risk: 3 }),
       ],
+      filters: { ...NO_FILTERS, rewardMin: '2' },
     });
     expect(screen.getByTestId('alt-history-header')).toBeInTheDocument();
     expect(screen.getByText('1.5×')).toBeInTheDocument();
     expect(screen.getByText('3×')).toBeInTheDocument();
 
-    const rewardMin = minBoxes()[2];
-    fireEvent.change(rewardMin, { target: { value: '2' } });
-    fireEvent.keyDown(rewardMin, { key: 'Enter' });
-
-    expect(screen.queryByText('MSFT')).not.toBeInTheDocument();
-    expect(screen.getByText('NVDA')).toBeInTheDocument();
+    commit(minBoxes()[2], '2.5');
+    expect(props.onFilters).toHaveBeenLastCalledWith({ rewardMin: '2.5' });
     expect(
       screen.getByRole('button', { name: /(Reward Min|盈亏比下限): 2×/ }),
     ).toBeInTheDocument();
   });
 
-  it('pages the list 10 rows at a time with numbered page buttons', () => {
-    renderHistory({
-      runs: Array.from({ length: 12 }, (_, index) => makeRun(`t${index}`)),
+  it('draws the server’s page count and asks for another page', () => {
+    const props = renderHistory({
+      runs: Array.from({ length: 10 }, (_, index) => makeRun(`t${index}`)),
+      page: 1,
+      pageCount: 3,
     });
 
     expect(screen.getAllByText('AAPL')).toHaveLength(10);
     fireEvent.click(screen.getByRole('button', { name: '2' }));
-    expect(screen.getAllByText('AAPL')).toHaveLength(2);
-    fireEvent.click(screen.getByRole('button', { name: /第一页|First page/ }));
-    expect(screen.getAllByText('AAPL')).toHaveLength(10);
+    expect(props.onPage).toHaveBeenCalledWith(2);
+    fireEvent.click(screen.getByRole('button', { name: /最后一页|Last page/ }));
+    expect(props.onPage).toHaveBeenCalledWith(3);
+  });
+
+  it('says "no match" under filters and "start a run" without them', () => {
+    renderHistory({ runs: [], filters: { ...NO_FILTERS, tiers: ['2'] } });
+    expect(screen.getByText(/没有符合筛选的运行|No runs match/)).toBeInTheDocument();
+  });
+
+  it('says "start a run" when the history is empty and unfiltered', () => {
+    renderHistory({ runs: [] });
+    expect(screen.getByText(/输入股票代码|Enter a ticker/)).toBeInTheDocument();
   });
 
   it('clicking a row asks to expand it; a failed expanded row shows its error', () => {
@@ -372,20 +366,13 @@ describe('AltRunHistory', () => {
   });
 
   it("colors a set filter's title like its pill and leaves the others gray", () => {
-    renderHistory({ runs: [makeRun('t1', { stock_code: 'MSFT' })] });
-    expect(titleOf(/^Capital$|^本金$/)).toHaveClass('text-gray-300');
-
+    renderHistory({
+      runs: [makeRun('t1', { stock_code: 'MSFT' })],
+      filters: { ...NO_FILTERS, capitalMin: '50000', statuses: ['done'] },
+    });
     // one end of a range is enough to count as set
-    fireEvent.change(minBoxes()[0], { target: { value: '50000' } });
-    fireEvent.keyDown(minBoxes()[0], { key: 'Enter' });
     expect(titleOf(/^Capital$|^本金$/)).toHaveClass('text-orange-300');
-
-    fireEvent.focus(screen.getByLabelText(/^Status$|^状态$/));
-    fireEvent.click(screen.getByRole('button', { name: /^Done$|^已完成$/ }));
     expect(titleOf(/^Status$|^状态$/)).toHaveClass('text-blue-300');
-    // removing the pill grays the title again
-    fireEvent.click(screen.getByRole('button', { name: /(Status|状态): (Done|已完成)/ }));
-    expect(titleOf(/^Status$|^状态$/)).toHaveClass('text-gray-300');
     expect(titleOf(/^Ticker$|^代码$/)).toHaveClass('text-gray-300');
   });
 });

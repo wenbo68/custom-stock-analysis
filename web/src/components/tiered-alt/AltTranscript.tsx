@@ -1,5 +1,9 @@
 import { useState, type ReactNode } from 'react';
-import { tieredApi, type TieredTranscriptEntry } from '../../api/tiered';
+import {
+  tieredApi,
+  type TieredTranscriptCall,
+  type TieredTranscriptCallSummary,
+} from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { Tooltip } from '../common/Tooltip';
 import { AltCard, AltFold } from './AltUi';
@@ -9,26 +13,30 @@ export interface AltTranscriptProps {
   taskId: string;
   /** The usage line ("This run used N LLM calls…") — it is the toggle. */
   label: ReactNode;
-  /** Test seam; production reads the run's stored transcript. */
-  loader?: (taskId: string) => Promise<TieredTranscriptEntry[]>;
+  /** Test seams; production reads the run's stored transcript. */
+  loader?: (taskId: string) => Promise<TieredTranscriptCallSummary[]>;
+  callLoader?: (taskId: string, seq: number) => Promise<TieredTranscriptCall>;
 }
 
 type LoadState =
   | { kind: 'idle' }
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
-  | { kind: 'ready'; items: TieredTranscriptEntry[] };
+  | { kind: 'ready'; items: TieredTranscriptCallSummary[] };
 
-// The run's AI exchanges — every prompt and raw reply — folded under the
-// usage line itself (owner decision 2026-09-17: one line to click, not a
-// second "view transcript" link below it). Loaded on first open only:
-// the rows can be large, and most readers never need them. Exists so a
-// "returned no usable JSON" warning is diagnosable from the page instead
-// of a re-run.
+// The run's AI exchanges folded under the usage line itself (owner
+// decision 2026-09-17: one line to click, not a second "view transcript"
+// link below it). Two-step loading (2026-09-21): opening the line fetches
+// the index — one small row of facts per call — and each call's prompt
+// and reply are fetched the first time either fold is opened, since the
+// text of every call together runs to half a megabyte and most readers
+// never open one. Exists so a "returned no usable JSON" warning is
+// diagnosable from the page instead of a re-run.
 export const AltTranscript = ({
   taskId,
   label,
   loader = tieredApi.getTranscript,
+  callLoader = tieredApi.getTranscriptCall,
 }: AltTranscriptProps) => {
   const { t } = useUiLanguage();
   const [open, setOpen] = useState(false);
@@ -87,7 +95,13 @@ export const AltTranscript = ({
             <p className="text-gray-500">{t('tiered.transcript.empty')}</p>
           ) : null}
           {state.kind === 'ready'
-            ? state.items.map((item) => <TranscriptEntry key={item.seq} item={item} />)
+            ? state.items.map((item) => (
+                <TranscriptEntry
+                  key={item.seq}
+                  item={item}
+                  load={() => callLoader(taskId, item.seq)}
+                />
+              ))
             : null}
         </AltCard>
       ) : null}
@@ -98,14 +112,27 @@ export const AltTranscript = ({
 // The stage identifier reads as words: "company_news" → "company news".
 const stageWords = (stage: string | null): string => (stage ?? '—').replace(/_/g, ' ');
 
+type CallState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; call: TieredTranscriptCall };
+
 // One exchange: the call number, then four fact lines (what it was
 // for, the model, time, tokens) in the same quiet-label / bright-value
 // styling as the outlook and score facts, then the prompt and the reply
 // on the same fold surface the deep-analysis card uses — both folded by
 // default and shown whole when opened, no inner scroll box (owner
-// requests 2026-09-18).
-const TranscriptEntry = ({ item }: { item: TieredTranscriptEntry }) => {
+// requests 2026-09-18). The text arrives when either fold first opens.
+const TranscriptEntry = ({
+  item,
+  load,
+}: {
+  item: TieredTranscriptCallSummary;
+  load: () => Promise<TieredTranscriptCall>;
+}) => {
   const { t } = useUiLanguage();
+  const [call, setCall] = useState<CallState>({ kind: 'idle' });
   const tokens = (item.prompt_tokens ?? 0) + (item.completion_tokens ?? 0);
   const facts: [string, string][] = [
     [t('tiered.transcript.for'), stageWords(item.stage)],
@@ -113,6 +140,33 @@ const TranscriptEntry = ({ item }: { item: TieredTranscriptEntry }) => {
     [t('tiered.transcript.time'), item.duration_ms == null ? '—' : `${item.duration_ms}ms`],
     [t('tiered.transcript.tokens'), String(tokens)],
   ];
+
+  const ensureLoaded = (opened: boolean) => {
+    if (!opened || call.kind !== 'idle') {
+      return;
+    }
+    setCall({ kind: 'loading' });
+    void load().then(
+      (loaded) => setCall({ kind: 'ready', call: loaded }),
+      (error: unknown) =>
+        setCall({
+          kind: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        }),
+    );
+  };
+
+  // The fold body for one of the two texts, by load state.
+  const text = (pick: (loaded: TieredTranscriptCall) => string | null, empty: string) => {
+    if (call.kind === 'ready') {
+      return pick(call.call) ?? empty;
+    }
+    if (call.kind === 'error') {
+      return t('tiered.transcript.callError', { error: call.message });
+    }
+    return t('tiered.transcript.callLoading');
+  };
+
   return (
     <article className="flex flex-col gap-2 border-t border-gray-700 pt-4 first:border-t-0 first:pt-0">
       <div className="flex flex-col gap-1">
@@ -130,14 +184,14 @@ const TranscriptEntry = ({ item }: { item: TieredTranscriptEntry }) => {
       {item.error ? (
         <p className="text-amber-300">{t('tiered.transcript.failed', { error: item.error })}</p>
       ) : null}
-      <AltFold title={t('tiered.transcript.prompt')} className="">
+      <AltFold title={t('tiered.transcript.prompt')} className="" onToggle={ensureLoaded}>
         <pre className="whitespace-pre-wrap break-words text-[11px] text-gray-400">
-          {item.prompt ?? ''}
+          {text((loaded) => loaded.prompt, '')}
         </pre>
       </AltFold>
-      <AltFold title={t('tiered.transcript.reply')} className="">
+      <AltFold title={t('tiered.transcript.reply')} className="" onToggle={ensureLoaded}>
         <pre className="whitespace-pre-wrap break-words text-[11px] text-gray-300">
-          {item.reply ?? t('tiered.transcript.noReply')}
+          {text((loaded) => loaded.reply, t('tiered.transcript.noReply'))}
         </pre>
       </AltFold>
     </article>

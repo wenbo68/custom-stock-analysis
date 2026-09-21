@@ -1,27 +1,24 @@
 # -*- coding: utf-8 -*-
-"""User sizing settings for tiered analysis (v2 slice 6).
+"""Sizing settings for a tiered run (v2 slice 6; simplified 2026-09-21).
 
-Sizing is opt-in: the share formula only runs when the user has said how
-much capital they trade with and what fraction of it they accept losing
-on one trade. The values live in the product's existing settings
-mechanism — ``.env`` keys, editable from the web settings page — and
-absent settings keep v1 behavior (no share counts, ever).
-
-Parsing is fail-loud: a malformed value never silently becomes a number;
-it is dropped with a warning and sizing stays off (a missing number is
-safer than a fake one).
+The share formula needs how much capital the user trades with, what
+fraction of it they accept losing on one trade, and the reward-to-risk
+ratio the plan should aim for. Every run sizes (owner decision
+2026-07-24): the run form always sends all three, and a scripted or API
+caller that sends nothing gets the form's own defaults below. There is
+no saved server-side layer any more — the ``.env``-backed settings and
+the ``sizing-defaults`` endpoint that exposed them were never used and
+were removed.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, replace
-from typing import List, Mapping, Optional, Tuple
+from typing import Optional
 
-ENV_CAPITAL = "TIERED_SIZING_CAPITAL"
-ENV_RISK_FRACTION = "TIERED_SIZING_RISK_FRACTION"
-ENV_REWARD_RISK = "TIERED_SIZING_REWARD_RISK"
-
-#: The reward-to-risk ratio the target aims for (target = entry + R × risk).
+#: The web form's own defaults: 100k capital, 1% risk, target = entry +
+#: 2 × risk. What a run uses when the caller sends nothing.
+DEFAULT_CAPITAL = 100_000.0
+DEFAULT_RISK_FRACTION = 0.01
 #: A resistance-capped target below this ratio draws a warning; the 1.5
 #: hard floor in levels.py still voids the plan outright.
 DEFAULT_REWARD_RISK = 2.0
@@ -29,80 +26,17 @@ DEFAULT_REWARD_RISK = 2.0
 
 @dataclass(frozen=True)
 class SizingSettings:
-    """What the sizing engine needs from the user, plus parse warnings."""
+    """What the sizing engine needs from the user. The fields stay
+    optional so a test can switch sizing off by passing None; production
+    always has all three."""
 
-    capital: Optional[float] = None
-    risk_fraction: Optional[float] = None
-    #: Target reward-to-risk ratio the user asks the plan for.
+    capital: Optional[float] = DEFAULT_CAPITAL
+    risk_fraction: Optional[float] = DEFAULT_RISK_FRACTION
     reward_risk: float = DEFAULT_REWARD_RISK
-    warnings: Tuple[str, ...] = ()
 
     @property
     def is_enabled(self) -> bool:
         return self.capital is not None and self.risk_fraction is not None
-
-
-def _parse_optional(
-    env: Mapping[str, str], key: str, warnings: List[str]
-) -> Optional[float]:
-    raw = (env.get(key) or "").strip()
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        warnings.append(f"{key}={raw!r} is not a number — ignored")
-        return None
-
-
-def load_sizing_settings(env: Optional[Mapping[str, str]] = None) -> SizingSettings:
-    """Read sizing settings from the environment (``.env``-backed)."""
-    if env is None:
-        env = os.environ
-    warnings: List[str] = []
-
-    capital = _parse_optional(env, ENV_CAPITAL, warnings)
-    risk_fraction = _parse_optional(env, ENV_RISK_FRACTION, warnings)
-
-    reward = _parse_optional(env, ENV_REWARD_RISK, warnings)
-    if reward is None or reward <= 1.0:
-        if reward is not None:
-            warnings.append(
-                f"{ENV_REWARD_RISK}={reward:g} must be above 1 — using the "
-                f"default {DEFAULT_REWARD_RISK:g}"
-            )
-        reward = DEFAULT_REWARD_RISK
-
-    # Range sanity lives in the sizing engine (single source of refusal
-    # reasons); here we only guarantee "number or absent".
-    return SizingSettings(
-        capital=capital,
-        risk_fraction=risk_fraction,
-        reward_risk=reward,
-        warnings=tuple(warnings),
-    )
-
-
-#: Every run sizes (owner decision 2026-07-24): when neither the request
-#: nor the saved .env settings provide capital/risk, these — the web
-#: form's own defaults (100k capital, 1% risk) — fill in, so the API and
-#: scripted runs behave like a form submission. Precedence stays:
-#: per-run override > saved .env setting > this fallback.
-FALLBACK_CAPITAL = 100_000.0
-FALLBACK_RISK_FRACTION = 0.01
-
-
-def with_fallback_defaults(settings: SizingSettings) -> SizingSettings:
-    """A copy with the web-form fallback filling any missing sizing input."""
-    return replace(
-        settings,
-        capital=settings.capital if settings.capital is not None else FALLBACK_CAPITAL,
-        risk_fraction=(
-            settings.risk_fraction
-            if settings.risk_fraction is not None
-            else FALLBACK_RISK_FRACTION
-        ),
-    )
 
 
 def merge_overrides(
@@ -111,9 +45,11 @@ def merge_overrides(
     risk_fraction: Optional[float] = None,
     reward_risk: Optional[float] = None,
 ) -> SizingSettings:
-    """Per-run overrides (from the API request) on top of saved settings.
+    """Per-run values (from the API request) on top of ``settings``.
 
-    Returns a new object — settings are never mutated in place.
+    Returns a new object — settings are never mutated in place. A reward
+    ratio of 1 or below is ignored (the request model already rejects
+    it; this keeps direct callers honest too).
     """
     merged = settings
     if capital is not None:
