@@ -16,6 +16,10 @@
 This package serves one job for the tiered-analysis app: daily OHLCV bars
 for A-share (cn), Hong Kong (hk) and US symbols, plus the market-tag and
 symbol-classification helpers that ride along with it.
+
+US symbols (owner decision 2026-09-23): Yahoo is the one full-history
+source; Alpha Vantage only tops up the newest bars Yahoo has not published
+yet (``DataFetcherManager._fetch_us_daily``).
 """
 
 import logging
@@ -23,13 +27,14 @@ import random
 import time
 from threading import RLock
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, List, Tuple, Dict
 
 import pandas as pd
 from src.services.market_symbol_utils import is_suffix_market_symbol
 from .circuit_breaker import CircuitBreaker
 from .us_index_mapping import is_us_index_code, is_us_stock_code
+from .us_topup import is_lagging, merge_topup, newest_bar_date
 
 
 # 配置日志
@@ -431,7 +436,6 @@ class DataFetcherManager:
         "TencentFetcher": {"cn"},
         "AkshareFetcher": {"cn", "hk"},
         "YfinanceFetcher": {"cn", "hk", "us", "jp", "kr", "tw"},
-        "FinnhubFetcher": {"us"},
         "AlphaVantageFetcher": {"us"},
     }
     _daily_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
@@ -617,7 +621,7 @@ class DataFetcherManager:
           0. TencentFetcher (Priority 0) - 同优先级，排在 Efinance 之后
           1. AkshareFetcher (Priority 1)
           4. YfinanceFetcher (Priority 4)
-          可选：FinnhubFetcher (Priority 2)、AlphaVantageFetcher (Priority 3) — 仅美股
+          可选：AlphaVantageFetcher (Priority 3) — 仅美股，只用于补齐 Yahoo 缺的最新日线
         """
         from src.config import get_config
         from .efinance_fetcher import EfinanceFetcher
@@ -631,13 +635,6 @@ class DataFetcherManager:
         akshare = AkshareFetcher()
         yfinance = YfinanceFetcher()
         optional_fetchers: List[BaseFetcher] = []
-
-        finnhub_api_key = (getattr(config, "finnhub_api_key", None) or "").strip()
-        if finnhub_api_key:
-            from .finnhub_fetcher import FinnhubFetcher
-            optional_fetchers.append(FinnhubFetcher())
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 FinnhubFetcher")
 
         alphavantage_api_key = (getattr(config, "alphavantage_api_key", None) or "").strip()
         if alphavantage_api_key:
@@ -678,13 +675,16 @@ class DataFetcherManager:
         stock_code: str,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        days: int = 30
+        days: int = 30,
+        fresh_through: Optional[date] = None,
     ) -> Tuple[pd.DataFrame, str]:
         """
         获取日线数据（自动切换数据源）
 
         故障切换策略：
-        1. 美股指数/美股股票直接路由到专用美股数据源
+        1. 美股（含指数）走专用路由：Yahoo 为唯一完整历史来源；美股个股在
+           Yahoo 最新日线落后于 ``fresh_through`` 时，用 AlphaVantage 补齐缺的
+           最新几根（见 ``_fetch_us_daily``）
         2. 其他代码从最高优先级数据源开始尝试
         3. 捕获异常后自动切换到下一个
         4. 记录每个数据源的失败原因
@@ -695,6 +695,7 @@ class DataFetcherManager:
             start_date: 开始日期
             end_date: 结束日期
             days: 获取天数
+            fresh_through: 调用方期望的最新已完成交易日；为 None 时不做补齐
 
         Returns:
             Tuple[DataFrame, str]: (数据, 成功的数据源名称)
@@ -729,61 +730,16 @@ class DataFetcherManager:
             raise DataFetchError(error_summary)
 
         # 美股（含美股指数）使用专用路由；港股走下方通用数据源循环
-        # Failover chain: Finnhub(P2) -> AlphaVantage(P3) -> Yfinance(P4)
-        # US indices: Yfinance first (the API vendors do not serve index candles)
         if is_us:
-            if is_us_index:
-                source_order = ["YfinanceFetcher", "FinnhubFetcher"]
-            else:
-                source_order = ["FinnhubFetcher", "AlphaVantageFetcher", "YfinanceFetcher"]
-            market_label = "美股指数" if is_us_index else "美股"
-
-            for src_name in source_order:
-                for attempt, fetcher in enumerate(fetchers, start=1):
-                    if fetcher.name != src_name:
-                        continue
-                    if not self._is_daily_source_available(fetcher, market):
-                        errors.append(self._daily_source_unavailable_error(fetcher))
-                        break
-                    try:
-                        role = "首选" if src_name == source_order[0] else "兜底"
-                        logger.info(
-                            f"[数据源尝试 {attempt}/{total_fetchers}] [{fetcher.name}] "
-                            f"{market_label} {stock_code} {role}路由..."
-                        )
-                        df = self._call_fetcher_method(
-                            fetcher,
-                            "get_daily_data",
-                            stock_code=stock_code,
-                            start_date=start_date,
-                            end_date=end_date,
-                            days=days,
-                        )
-                        if df is not None and not df.empty:
-                            elapsed = time.time() - request_start
-                            logger.info(
-                                f"[数据源完成] {stock_code} 使用 [{fetcher.name}] 获取成功: "
-                                f"rows={len(df)}, elapsed={elapsed:.2f}s"
-                            )
-                            self._record_daily_source_success(fetcher, market)
-                            return df, fetcher.name
-                        if df is not None and df.empty:
-                            self._record_daily_source_success(fetcher, market)
-                    except Exception as e:
-                        error_type, error_reason = summarize_exception(e)
-                        error_msg = f"[{fetcher.name}] ({error_type}) {error_reason}"
-                        logger.warning(
-                            f"[数据源失败 {attempt}/{total_fetchers}] [{fetcher.name}] {stock_code}: "
-                            f"error_type={error_type}, reason={error_reason}"
-                        )
-                        self._record_daily_source_failure(fetcher, market, error_reason)
-                        errors.append(error_msg)
-                    break
-
-            error_summary = f"{market_label} {stock_code} 获取失败:\n" + "\n".join(errors)
-            elapsed = time.time() - request_start
-            logger.error(f"[数据源终止] {stock_code} 获取失败: elapsed={elapsed:.2f}s\n{error_summary}")
-            raise DataFetchError(error_summary)
+            return self._fetch_us_daily(
+                fetchers,
+                stock_code,
+                start_date=start_date,
+                end_date=end_date,
+                days=days,
+                fresh_through=fresh_through,
+                is_index=is_us_index,
+            )
 
         for attempt, fetcher in enumerate(fetchers, start=1):
             if not self._is_daily_source_available(fetcher, market):
@@ -831,6 +787,133 @@ class DataFetcherManager:
         elapsed = time.time() - request_start
         logger.error(f"[数据源终止] {stock_code} 获取失败: elapsed={elapsed:.2f}s\n{error_summary}")
         raise DataFetchError(error_summary)
+
+    def _fetch_us_daily(
+        self,
+        fetchers: List[BaseFetcher],
+        stock_code: str,
+        *,
+        start_date: Optional[str],
+        end_date: Optional[str],
+        days: int,
+        fresh_through: Optional[date],
+        is_index: bool,
+    ) -> Tuple[pd.DataFrame, str]:
+        """The US route (owner decision 2026-09-23).
+
+        Yahoo is the one full-history source. When its newest bar lags
+        ``fresh_through`` (Yahoo reconciles end-of-day rows hours late
+        now and then), Alpha Vantage's free 100-bar window tops up the
+        missing newest bars — for stocks only; the vendor serves no
+        index candles. Yahoo failing outright fails the request: 100
+        bars alone would silently starve the long-window indicators, and
+        a loud failure beats a quietly wrong analysis.
+        """
+        market = "us"
+        label = "美股指数" if is_index else "美股"
+        by_name = {fetcher.name: fetcher for fetcher in fetchers}
+        yahoo = by_name.get("YfinanceFetcher")
+        if yahoo is None:
+            raise DataFetchError(f"{label} {stock_code} 获取失败:\nYfinanceFetcher 不可用")
+        if not self._is_daily_source_available(yahoo, market):
+            raise DataFetchError(
+                f"{label} {stock_code} 获取失败:\n{self._daily_source_unavailable_error(yahoo)}"
+            )
+
+        request_start = time.time()
+        logger.info(f"[数据源尝试] [{yahoo.name}] {label} {stock_code} 首选路由...")
+        try:
+            df = self._call_fetcher_method(
+                yahoo,
+                "get_daily_data",
+                stock_code=stock_code,
+                start_date=start_date,
+                end_date=end_date,
+                days=days,
+            )
+        except Exception as e:
+            error_type, error_reason = summarize_exception(e)
+            self._record_daily_source_failure(yahoo, market, error_reason)
+            logger.error(
+                f"[数据源终止] {stock_code} 获取失败: elapsed={time.time() - request_start:.2f}s "
+                f"[{yahoo.name}] ({error_type}) {error_reason}"
+            )
+            raise DataFetchError(
+                f"{label} {stock_code} 获取失败:\n[{yahoo.name}] ({error_type}) {error_reason}"
+            ) from e
+
+        if df is None or df.empty:
+            self._record_daily_source_success(yahoo, market)
+            raise DataFetchError(f"{label} {stock_code} 获取失败:\n[{yahoo.name}] 未返回日线")
+        self._record_daily_source_success(yahoo, market)
+        logger.info(
+            f"[数据源完成] {stock_code} 使用 [{yahoo.name}] 获取成功: "
+            f"rows={len(df)}, elapsed={time.time() - request_start:.2f}s"
+        )
+
+        if is_index or not is_lagging(df, fresh_through):
+            return df, yahoo.name
+        topup = by_name.get("AlphaVantageFetcher")
+        if topup is None:
+            logger.warning(
+                f"[数据源补齐] {stock_code}: Yahoo 最新日线 {newest_bar_date(df)} 落后于 "
+                f"{fresh_through}，且未配置 AlphaVantageFetcher，无法补齐"
+            )
+            return df, yahoo.name
+        return self._top_up_us_daily(
+            df, yahoo.name, topup, stock_code,
+            start_date=start_date, end_date=end_date, days=days, fresh_through=fresh_through,
+        )
+
+    def _top_up_us_daily(
+        self,
+        df: pd.DataFrame,
+        primary_name: str,
+        topup: BaseFetcher,
+        stock_code: str,
+        *,
+        start_date: Optional[str],
+        end_date: Optional[str],
+        days: int,
+        fresh_through: Optional[date],
+    ) -> Tuple[pd.DataFrame, str]:
+        """Fetch the top-up vendor's bars and append the ones the primary
+        lacks. Any problem keeps the primary's bars — the staleness gate
+        downstream decides whether they are usable."""
+        market = "us"
+        logger.info(
+            f"[数据源补齐] {stock_code}: Yahoo 最新日线 {newest_bar_date(df)} 落后于 "
+            f"{fresh_through}，尝试用 [{topup.name}] 补齐"
+        )
+        if not self._is_daily_source_available(topup, market):
+            logger.warning(f"[数据源补齐放弃] {stock_code}: {self._daily_source_unavailable_error(topup)}")
+            return df, primary_name
+        try:
+            extra = self._call_fetcher_method(
+                topup,
+                "get_daily_data",
+                stock_code=stock_code,
+                start_date=start_date,
+                end_date=end_date,
+                days=days,
+            )
+        except Exception as e:
+            error_type, error_reason = summarize_exception(e)
+            self._record_daily_source_failure(topup, market, error_reason)
+            logger.warning(
+                f"[数据源补齐失败] [{topup.name}] {stock_code}: error_type={error_type}, reason={error_reason}"
+            )
+            return df, primary_name
+        self._record_daily_source_success(topup, market)
+
+        merged, reason = merge_topup(df, extra)
+        if reason is not None:
+            logger.warning(f"[数据源补齐放弃] {stock_code}: {reason}")
+            return df, primary_name
+        logger.info(
+            f"[数据源补齐完成] {stock_code}: 追加 {len(merged) - len(df)} 根日线，最新 {newest_bar_date(merged)}"
+        )
+        return merged, f"{primary_name}+{topup.name}"
 
     @property
     def available_fetchers(self) -> List[str]:

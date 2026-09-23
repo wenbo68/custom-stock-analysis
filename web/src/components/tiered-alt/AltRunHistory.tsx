@@ -1,9 +1,10 @@
 import { useState } from 'react';
+import { Trash2 } from 'lucide-react';
 import type { TieredResult, TieredRunSummary } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey } from '../../i18n/uiText';
 import { cn } from '../../utils/cn';
-import { isFromPreviousDay, plainNumber, queuePosition, riskPctText } from './altFormat';
+import { formatDateTime, isFromPreviousDay, parseUtc, plainNumber, queuePosition, riskPctText, rowKeyDown } from './altFormat';
 import { ALT_COLOR, OUTLOOK_TEXT } from './altStyles';
 import { AltPageSelector, AltPairField, AltPill, AltPillRow, AltSelect } from './AltFields';
 import { AltResult } from './AltResult';
@@ -31,9 +32,10 @@ const FILTER_HOLDS = ['1', '2', '3', '4'] as const;
 const FILTER_GRID =
   'grid w-full grid-cols-2 gap-2 text-sm sm:grid-cols-6 sm:gap-3 md:gap-4';
 // The column-name header and every run row share this template, so each
-// value sits under its column name.
+// value sits under its column name. The last, narrow column is the
+// trash button (owner request 2026-09-23).
 const ROW_GRID =
-  'grid w-full grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 lg:grid-cols-4 lg:gap-4 xl:grid-cols-9';
+  'grid w-full grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 lg:grid-cols-4 lg:gap-4 xl:grid-cols-[repeat(9,minmax(0,1fr))_auto]';
 
 // Filter colors follow the shared palette in field order; a range's Min
 // and Max share one color (ALT_COLOR).
@@ -73,24 +75,12 @@ const isRiskPct = (raw: string): boolean => {
 };
 
 function runTime(run: TieredRunSummary): Date | null {
-  if (!run.created_at) {
-    return null;
-  }
-  const date = new Date(run.created_at.endsWith('Z') ? run.created_at : `${run.created_at}Z`);
-  return Number.isNaN(date.getTime()) ? null : date;
+  return parseUtc(run.created_at);
 }
 
-// yyyy/mm/dd, hh:mm in the viewer's local time, 24-hour clock.
+// yyyy/mm/dd, hh:mm in the viewer's local time (altFormat.formatDateTime).
 function formatTime(run: TieredRunSummary): string {
-  const date = runTime(run);
-  if (!date) {
-    return '—';
-  }
-  const pad = (part: number) => String(part).padStart(2, '0');
-  return (
-    `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}, ` +
-    `${pad(date.getHours())}:${pad(date.getMinutes())}`
-  );
+  return formatDateTime(run.created_at);
 }
 
 // The run's risk input as the percent the user typed ('1%'), or a dash.
@@ -160,10 +150,12 @@ const isRemovable = (run: TieredRunSummary): boolean => run.status !== 'running'
 // page owns the filter and page state and asks the server for one page
 // at a time (2026-09-21); this component only draws it. Below, one row
 // per run (10 per page), each fact sitting directly under its filter:
-// ticker, capital, risk, reward, max hold, tier, status, outlook, date.
-// Clicking a row expands the full report inline. A freshly started run
-// appears at the top as Queued or Running with a dash for its outlook,
-// and turns into a Done row with its outlook when it finishes.
+// ticker, capital, risk, reward, max hold, tier, status, outlook, date,
+// and a trash button at the end of the row (owner request 2026-09-23:
+// no delete link inside the expanded row). Clicking a row expands the
+// full report inline. A freshly started run appears at the top as
+// Queued or Running with a dash for its outlook, and turns into a Done
+// row with its outlook when it finishes.
 export const AltRunHistory = ({
   runs,
   tickers,
@@ -183,8 +175,11 @@ export const AltRunHistory = ({
   const { t, language } = useUiLanguage();
   // The run whose amber date was clicked — its previous-day note is open.
   const [staleNoteTaskId, setStaleNoteTaskId] = useState<string | null>(null);
-  // The run whose remove button was clicked — its confirmation is open.
+  // The run whose trash button was clicked — its confirmation is open.
   const [confirmTaskId, setConfirmTaskId] = useState<string | null>(null);
+  // The run whose removal was last confirmed: the server's refusal, if
+  // any, shows under that row.
+  const [removedTaskId, setRemovedTaskId] = useState<string | null>(null);
 
   const hasFilters = hasAnyFilter(filters);
 
@@ -412,15 +407,20 @@ export const AltRunHistory = ({
                 {t(key)}
               </span>
             ))}
+            {/* The trash column has no name. */}
+            <span aria-hidden="true" className="w-6" />
           </div>
           <ul className="flex flex-col divide-y divide-gray-800">
           {runs.map((run) => {
             const isExpanded = run.task_id === expandedTaskId;
             return (
               <li key={run.task_id}>
-                <button
-                  type="button"
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={isExpanded}
                   onClick={() => onToggle(run.task_id)}
+                  onKeyDown={rowKeyDown(() => onToggle(run.task_id))}
                   className={cn(
                     ROW_GRID,
                     'cursor-pointer items-center rounded py-2.5 text-start text-sm hover:bg-gray-800/60',
@@ -501,7 +501,78 @@ export const AltRunHistory = ({
                       {formatTime(run)}
                     </span>
                   )}
-                </button>
+                  {isRemovable(run) ? (
+                    // A click here removes the run, never toggles the row.
+                    <button
+                      type="button"
+                      data-testid="alt-run-remove"
+                      aria-label={
+                        deletingTaskId === run.task_id
+                          ? t('tiered.altHistory.deleting')
+                          : run.status === 'queued'
+                            ? t('tiered.altHistory.cancel')
+                            : t('tiered.altHistory.delete')
+                      }
+                      title={
+                        deletingTaskId === run.task_id
+                          ? t('tiered.altHistory.deleting')
+                          : run.status === 'queued'
+                            ? t('tiered.altHistory.cancel')
+                            : t('tiered.altHistory.delete')
+                      }
+                      disabled={deletingTaskId === run.task_id}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setConfirmTaskId(run.task_id);
+                      }}
+                      className="cursor-pointer justify-self-end rounded p-1 text-gray-600 hover:text-red-300 disabled:cursor-default disabled:opacity-50 disabled:hover:text-gray-600"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  ) : (
+                    <span aria-hidden="true" className="w-6" />
+                  )}
+                </div>
+                {deleteError && removedTaskId === run.task_id ? (
+                  <p className="pb-2 text-xs text-amber-300" data-testid="alt-run-remove-error">
+                    {deleteError}
+                  </p>
+                ) : null}
+                <AltModal
+                  isOpen={confirmTaskId === run.task_id}
+                  onClose={() => setConfirmTaskId(null)}
+                >
+                  <div className={MODAL_BODY}>
+                    <p>
+                      {run.status === 'queued'
+                        ? t('tiered.altHistory.cancelAsk')
+                        : t('tiered.altHistory.deleteAsk')}
+                    </p>
+                    <div className="flex justify-end gap-4 pt-1">
+                      <button
+                        type="button"
+                        className="cursor-pointer text-gray-400 hover:text-gray-200"
+                        onClick={() => setConfirmTaskId(null)}
+                      >
+                        {t('tiered.altHistory.keep')}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="alt-run-remove-confirm"
+                        className="cursor-pointer font-semibold text-red-300 hover:text-red-200"
+                        onClick={() => {
+                          setConfirmTaskId(null);
+                          setRemovedTaskId(run.task_id);
+                          onDelete(run.task_id);
+                        }}
+                      >
+                        {run.status === 'queued'
+                          ? t('tiered.altHistory.confirmCancel')
+                          : t('tiered.altHistory.confirmDelete')}
+                      </button>
+                    </div>
+                  </div>
+                </AltModal>
                 <AltModal
                   isOpen={staleNoteTaskId === run.task_id}
                   onClose={() => setStaleNoteTaskId(null)}
@@ -512,65 +583,6 @@ export const AltRunHistory = ({
                 </AltModal>
                 {isExpanded ? (
                   <div className="pb-5 pt-3">
-                    {isRemovable(run) ? (
-                      // Removal lives inside the expanded row (2026-09-21):
-                      // one quiet link at the top, a confirmation popup, and
-                      // the reason under it if the server refused.
-                      <div className="mb-3 flex flex-col items-end gap-1">
-                        <button
-                          type="button"
-                          data-testid="alt-run-remove"
-                          disabled={deletingTaskId === run.task_id}
-                          onClick={() => setConfirmTaskId(run.task_id)}
-                          className="cursor-pointer text-xs text-gray-500 hover:text-red-300 disabled:cursor-default disabled:hover:text-gray-500"
-                        >
-                          {deletingTaskId === run.task_id
-                            ? t('tiered.altHistory.deleting')
-                            : run.status === 'queued'
-                              ? t('tiered.altHistory.cancel')
-                              : t('tiered.altHistory.delete')}
-                        </button>
-                        {deleteError ? (
-                          <p className="text-xs text-amber-300" data-testid="alt-run-remove-error">
-                            {deleteError}
-                          </p>
-                        ) : null}
-                        <AltModal
-                          isOpen={confirmTaskId === run.task_id}
-                          onClose={() => setConfirmTaskId(null)}
-                        >
-                          <div className={MODAL_BODY}>
-                            <p>
-                              {run.status === 'queued'
-                                ? t('tiered.altHistory.cancelAsk')
-                                : t('tiered.altHistory.deleteAsk')}
-                            </p>
-                            <div className="flex justify-end gap-4 pt-1">
-                              <button
-                                type="button"
-                                className="cursor-pointer text-gray-400 hover:text-gray-200"
-                                onClick={() => setConfirmTaskId(null)}
-                              >
-                                {t('tiered.altHistory.keep')}
-                              </button>
-                              <button
-                                type="button"
-                                data-testid="alt-run-remove-confirm"
-                                className="cursor-pointer font-semibold text-red-300 hover:text-red-200"
-                                onClick={() => {
-                                  setConfirmTaskId(null);
-                                  onDelete(run.task_id);
-                                }}
-                              >
-                                {run.status === 'queued'
-                                  ? t('tiered.altHistory.confirmCancel')
-                                  : t('tiered.altHistory.confirmDelete')}
-                              </button>
-                            </div>
-                          </div>
-                        </AltModal>
-                      </div>
-                    ) : null}
                     {run.status === 'failed' ? (
                       <p className="text-sm text-red-300">
                         {run.error ?? expandedError ?? t('tiered.error.title')}

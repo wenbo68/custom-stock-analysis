@@ -20,6 +20,34 @@ const vendorChunkByPackage: Record<string, string> = {
   'lucide-react': 'vendor-icons',
 }
 
+// The Markdown renderer for chat replies is loaded lazily (one page's
+// feature); its packages must not be swept into the shared vendor
+// chunk the analysis page downloads. Everything react-markdown and
+// remark-gfm depend on is left to Rollup, which keeps a module used by
+// one lazy chunk alone inside that chunk.
+const lazyOnlyPackages = (() => {
+  const seen = new Set<string>()
+  const queue = ['react-markdown', 'remark-gfm']
+  while (queue.length > 0) {
+    const name = queue.pop() as string
+    if (seen.has(name)) {
+      continue
+    }
+    seen.add(name)
+    try {
+      const manifest = JSON.parse(
+        readFileSync(new URL(`./node_modules/${name}/package.json`, import.meta.url), 'utf-8'),
+      ) as { dependencies?: Record<string, string> }
+      queue.push(...Object.keys(manifest.dependencies ?? {}))
+    } catch {
+      // not installed at the top level: nothing to walk
+    }
+  }
+  seen.delete('react')
+  seen.delete('react-dom')
+  return seen
+})()
+
 const getVendorChunkName = (id: string): string | undefined => {
   const normalizedId = id.replace(/\\/g, '/')
   const marker = '/node_modules/'
@@ -36,7 +64,7 @@ const getVendorChunkName = (id: string): string | undefined => {
   const packageName = firstSegment.startsWith('@')
     ? (secondSegment ? `${firstSegment}/${secondSegment}` : undefined)
     : firstSegment
-  if (!packageName) {
+  if (!packageName || lazyOnlyPackages.has(packageName)) {
     return undefined
   }
   return vendorChunkByPackage[packageName] ?? 'vendor'

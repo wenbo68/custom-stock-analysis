@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-AlphaVantageFetcher — US market data source (Priority 3)
+AlphaVantageFetcher — US top-up source (Priority 3)
 
-Data source: AlphaVantage REST API
+Data source: AlphaVantage REST API, TIME_SERIES_DAILY (as-traded prices)
 Rate limit: 25 calls/day, 5 calls/min (free tier)
-Markets: US only
+Markets: US stocks only (no index candles)
+
+Owner decision 2026-09-23: the free tier serves only the newest 100 bars
+(``outputsize=compact``; ``full`` is a paid feature and every such call
+was refused). 100 bars are too few to be an analysis' whole history, so
+this fetcher is never a standalone source — the manager calls it only to
+top up the newest bars Yahoo has not published yet.
 """
 
 import logging
@@ -44,15 +50,12 @@ class AlphaVantageFetcher(BaseFetcher):
         symbol = stock_code.strip().upper()
         start = datetime.strptime(start_date, '%Y-%m-%d').date()
         end = datetime.strptime(end_date, '%Y-%m-%d').date()
-        # compact returns only the newest 100 trading days (~140
-        # calendar days); a deeper request must ask for the full series
-        # or long-window indicators (200-day average, one-year
-        # high/low) silently starve on 100 bars.
-        outputsize = 'compact' if (end - start).days <= 120 else 'full'
+        # Always the free compact window (newest 100 trading days): the
+        # full series is a paid feature, and a top-up never needs more.
         params = {
             'function': 'TIME_SERIES_DAILY',
             'symbol': symbol,
-            'outputsize': outputsize,
+            'outputsize': 'compact',
             'apikey': self._api_key,
         }
 

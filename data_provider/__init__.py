@@ -13,11 +13,12 @@
 1. EfinanceFetcher (Priority 0) - 东方财富，A 股
 2. TencentFetcher (Priority 0) - 腾讯直连，A 股
 3. AkshareFetcher (Priority 1) - akshare 库，A 股 / 港股
-4. FinnhubFetcher (Priority 2) - 美股，需配置 FINNHUB_API_KEY
-5. AlphaVantageFetcher (Priority 3) - 美股，需配置 ALPHAVANTAGE_API_KEY
-6. YfinanceFetcher (Priority 4) - Yahoo Finance，全市场兜底
+4. AlphaVantageFetcher (Priority 3) - 美股补齐源，需配置 ALPHAVANTAGE_API_KEY
+5. YfinanceFetcher (Priority 4) - Yahoo Finance，全市场兜底
 
-美股走专用路由：Finnhub -> AlphaVantage -> Yfinance（美股指数：Yfinance -> Finnhub）。
+美股走专用路由（2026-09-23）：Yfinance 为唯一完整历史来源；美股个股在 Yahoo
+最新日线落后时，用 AlphaVantage 的免费 100 根窗口补齐缺的最新几根。美股指数只走
+Yfinance。Finnhub 的日线接口已转为付费，不再作为价格来源（公司新闻仍用 Finnhub）。
 """
 
 from .base import BaseFetcher, DataFetcherManager
@@ -25,7 +26,6 @@ from .efinance_fetcher import EfinanceFetcher
 from .tencent_fetcher import TencentFetcher
 from .akshare_fetcher import AkshareFetcher, is_hk_stock_code
 from .yfinance_fetcher import YfinanceFetcher
-from .finnhub_fetcher import FinnhubFetcher
 from .alphavantage_fetcher import AlphaVantageFetcher
 from .us_index_mapping import is_us_index_code, is_us_stock_code, get_us_index_yf_symbol, US_INDEX_MAPPING
 
@@ -36,7 +36,6 @@ __all__ = [
     'TencentFetcher',
     'AkshareFetcher',
     'YfinanceFetcher',
-    'FinnhubFetcher',
     'AlphaVantageFetcher',
     'is_us_index_code',
     'is_us_stock_code',

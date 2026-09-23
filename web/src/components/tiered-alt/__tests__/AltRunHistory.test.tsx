@@ -65,15 +65,17 @@ const commit = (box: HTMLElement, value: string) => {
 };
 
 describe('AltRunHistory', () => {
-  it('offers to delete an expanded finished run, after a confirmation', () => {
+  it('ends every row in a trash button that deletes after a confirmation, without opening the row', () => {
     const props = renderHistory({
       runs: [makeRun('t1'), makeRun('t2')],
-      expandedTaskId: 't1',
-      expandedError: 'not loaded',
     });
-    const remove = screen.getByTestId('alt-run-remove');
-    expect(remove).toHaveTextContent(/Delete this run|删除这次分析/);
+    // One trash per row, in the row itself (no delete link inside an expanded row).
+    const [remove] = screen.getAllByTestId('alt-run-remove');
+    expect(screen.getAllByTestId('alt-run-remove')).toHaveLength(2);
+    expect(remove).not.toHaveTextContent(/Delete/);
+    expect(remove.getAttribute('aria-label')).toMatch(/Delete this run|删除这次分析/);
     fireEvent.click(remove);
+    expect(props.onToggle).not.toHaveBeenCalled();
     expect(props.onDelete).not.toHaveBeenCalled();
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveTextContent(/cannot be undone|无法撤销/);
@@ -89,10 +91,9 @@ describe('AltRunHistory', () => {
   it('words removal of a queued run as cancelling it, and offers none for a running one', () => {
     const props = renderHistory({
       runs: [makeRun('q1', { status: 'queued', outlook: undefined })],
-      expandedTaskId: 'q1',
     });
     const remove = screen.getByTestId('alt-run-remove');
-    expect(remove).toHaveTextContent(/Cancel this run|取消排队/);
+    expect(remove.getAttribute('aria-label')).toMatch(/Cancel this run|取消排队/);
     fireEvent.click(remove);
     expect(screen.getByRole('dialog')).toHaveTextContent(/will not start|不会开始/);
     fireEvent.click(screen.getByTestId('alt-run-remove-confirm'));
@@ -109,14 +110,25 @@ describe('AltRunHistory', () => {
   it('shows the removal in flight and the server’s refusal under the row', () => {
     renderHistory({
       runs: [makeRun('t1')],
-      expandedTaskId: 't1',
       deletingTaskId: 't1',
-      deleteError: 'This run is in progress and cannot be removed.',
     });
     const remove = screen.getByTestId('alt-run-remove');
     expect(remove).toBeDisabled();
-    expect(remove).toHaveTextContent(/Deleting…|删除中…/);
-    expect(screen.getByTestId('alt-run-remove-error')).toHaveTextContent(/in progress/);
+    expect(remove.getAttribute('aria-label')).toMatch(/Deleting…|删除中…/);
+
+    cleanup();
+    renderHistory({
+      runs: [makeRun('t1'), makeRun('t2')],
+      deleteError: 'This run is in progress and cannot be removed.',
+    });
+    // The refusal belongs to the row whose removal was confirmed.
+    expect(screen.queryByTestId('alt-run-remove-error')).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByTestId('alt-run-remove')[1]);
+    fireEvent.click(screen.getByTestId('alt-run-remove-confirm'));
+    const error = screen.getByTestId('alt-run-remove-error');
+    expect(error).toHaveTextContent(/in progress/);
+    const rows = Array.from(document.querySelectorAll('[role="button"][aria-expanded]'));
+    expect(rows[1].compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('shows a queued row with its place in line and explains it when expanded', () => {

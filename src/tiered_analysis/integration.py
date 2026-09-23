@@ -82,7 +82,10 @@ def dsa_bars_loader(symbol: str, manager: Any = None) -> List[Bar]:
 
         manager = DataFetcherManager()
 
-    df, _source = manager.get_daily_data(symbol, days=BARS_CALENDAR_DAYS)
+    # The last completed session: the manager tops up a lagging vendor
+    # toward it, and the bars are trimmed to it below.
+    expected = expected_bar_date(market_for_symbol(symbol))
+    df, _source = manager.get_daily_data(symbol, days=BARS_CALENDAR_DAYS, fresh_through=expected)
     if df is None or df.empty:
         return []
 
@@ -102,7 +105,6 @@ def dsa_bars_loader(symbol: str, manager: Any = None) -> List[Bar]:
     # Some vendors include today's half-finished bar during the trading
     # day; the analysis must only ever see completed sessions (run-gate
     # design, 2026-08-08). Unknown markets are left untrimmed.
-    expected = expected_bar_date(market_for_symbol(symbol))
     return trim_incomplete_bars(bars, expected)
 
 

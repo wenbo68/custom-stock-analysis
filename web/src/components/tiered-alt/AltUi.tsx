@@ -84,7 +84,7 @@ export const AltFold = ({
 }) => {
   const [open, setOpen] = useState(false);
   return (
-    <details open={open} className={`${className} rounded bg-gray-900/60 px-4 py-3`.trim()}>
+    <details open={open} className={`${className} min-w-0 rounded bg-gray-900/60 px-4 py-3`.trim()}>
       <summary
         className="cursor-pointer text-xs font-semibold text-gray-300"
         onClick={(event) => {
@@ -98,7 +98,7 @@ export const AltFold = ({
       >
         {title}
       </summary>
-      <div className="mt-3 flex flex-col gap-3">{children}</div>
+      <div className="mt-3 flex min-w-0 flex-col gap-3">{children}</div>
     </details>
   );
 };

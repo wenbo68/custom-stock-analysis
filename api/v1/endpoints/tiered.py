@@ -225,15 +225,77 @@ def _effective_run_inputs(request: TieredAnalyzeRequest) -> Dict[str, Any]:
     }
 
 
+class RunRefused(Exception):
+    """A run request the server will not take: the HTTP status and the
+    structured detail the route answers with. Raised by ``submit_run`` so
+    the second client (the chatbot, which calls it directly rather than
+    over HTTP) gets the same refusals as readable results."""
+
+    def __init__(self, status_code: int, detail: Dict[str, Any]) -> None:
+        super().__init__(detail.get("message") or detail.get("code") or str(detail))
+        self.status_code = status_code
+        self.detail = detail
+
+
 def _require_llm_configured() -> None:
-    """400 when no model is configured (the run would only fail minutes
-    later otherwise). The key (``LLM_API_KEY``) is only checked at call
-    time, since litellm can also read the provider's own variable."""
+    """Refuse (400) when no model is configured — the run would only
+    fail minutes later otherwise. The key (``LLM_API_KEY``) is only
+    checked at call time, since litellm can also read the provider's
+    own variable."""
     if llm_model() is None:
-        raise HTTPException(status_code=400, detail={
+        raise RunRefused(400, {
             "error": "llm_not_configured",
             "message": "set MAIN_LLM and LLM_API_KEY in .env first",
         })
+
+
+def submit_run(request: TieredAnalyzeRequest) -> Dict[str, Any]:
+    """Store a run and hand it to the queue — the whole of what
+    ``POST /analyze`` does, as a function, so every client (the web
+    page over HTTP, the chatbot in-process) starts runs through one
+    path: the model check, the market clock gate, the duplicate refusal
+    and the queue. Returns the accepted document (task_id, stock_code,
+    depth, status); raises ``RunRefused`` with the route's status and
+    detail for every refusal."""
+    from src.tiered_analysis.run_gate import clock_gate
+
+    _require_llm_configured()
+    gate = clock_gate(request.stock_code, override=request.run_anyway)
+    if gate.blocked:
+        logger.info(
+            "tiered run blocked by clock gate for %s (%s)",
+            request.stock_code, gate.detail,
+        )
+        # Session bounds ride along (ISO, market-local offset embedded) so
+        # the popup can word the hours in market time AND the user's time.
+        detail: Dict[str, Any] = {"code": "market_open", "market": gate.market}
+        if gate.session_open is not None and gate.session_close is not None:
+            detail["session_open"] = gate.session_open.isoformat()
+            detail["session_close"] = gate.session_close.isoformat()
+        raise RunRefused(409, detail)
+
+    inputs = _effective_run_inputs(request)
+    if request.sizing is not None:
+        overrides = request.sizing.model_dump(exclude_none=True)
+        if overrides:
+            inputs["sizing_overrides"] = overrides
+
+    with _submit_lock:
+        duplicate = history.find_active_duplicate(request.stock_code, inputs)
+        if duplicate is not None:
+            logger.info("tiered run refused as a duplicate of %s for %s",
+                        duplicate["task_id"], request.stock_code)
+            raise RunRefused(409, {
+                "code": "duplicate_run",
+                "task_id": duplicate["task_id"],
+                "status": duplicate["status"],
+            })
+        task_id = uuid.uuid4().hex
+        history.create_run(task_id, request.stock_code, inputs=inputs,
+                           status=history.STATUS_QUEUED)
+    status = run_queue.submit(task_id)
+    return {"task_id": task_id, "stock_code": request.stock_code,
+            "depth": request.depth, "status": status}
 
 
 @router.post("/analyze", status_code=202, response_model=AnalyzeAccepted)
@@ -251,45 +313,10 @@ def start_tiered_analysis(request: TieredAnalyzeRequest) -> Dict[str, Any]:
     - 409 `duplicate_run`: a queued or running run has the same ticker
       and inputs; the body names it (`task_id`, `status`).
     """
-    from src.tiered_analysis.run_gate import clock_gate
-
-    _require_llm_configured()
-    gate = clock_gate(request.stock_code, override=request.run_anyway)
-    if gate.blocked:
-        logger.info(
-            "tiered run blocked by clock gate for %s (%s)",
-            request.stock_code, gate.detail,
-        )
-        # Session bounds ride along (ISO, market-local offset embedded) so
-        # the popup can word the hours in market time AND the user's time.
-        detail: Dict[str, Any] = {"code": "market_open", "market": gate.market}
-        if gate.session_open is not None and gate.session_close is not None:
-            detail["session_open"] = gate.session_open.isoformat()
-            detail["session_close"] = gate.session_close.isoformat()
-        raise HTTPException(status_code=409, detail=detail)
-
-    inputs = _effective_run_inputs(request)
-    if request.sizing is not None:
-        overrides = request.sizing.model_dump(exclude_none=True)
-        if overrides:
-            inputs["sizing_overrides"] = overrides
-
-    with _submit_lock:
-        duplicate = history.find_active_duplicate(request.stock_code, inputs)
-        if duplicate is not None:
-            logger.info("tiered run refused as a duplicate of %s for %s",
-                        duplicate["task_id"], request.stock_code)
-            raise HTTPException(status_code=409, detail={
-                "code": "duplicate_run",
-                "task_id": duplicate["task_id"],
-                "status": duplicate["status"],
-            })
-        task_id = uuid.uuid4().hex
-        history.create_run(task_id, request.stock_code, inputs=inputs,
-                           status=history.STATUS_QUEUED)
-    status = run_queue.submit(task_id)
-    return {"task_id": task_id, "stock_code": request.stock_code,
-            "depth": request.depth, "status": status}
+    try:
+        return submit_run(request)
+    except RunRefused as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 @router.get("/status", response_model=ServerStatus)

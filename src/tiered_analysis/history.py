@@ -527,6 +527,21 @@ def run_exists(task_id: str) -> bool:
         ).scalar()
 
 
+def get_run_summary(task_id: str) -> Optional[Dict[str, Any]]:
+    """The run's history row alone (no report, no queue position) — what
+    a client needs to name a run before acting on it. None for an
+    unknown task id."""
+    from src.storage import TieredRunRecord
+
+    with _session() as session:
+        row = (
+            session.query(TieredRunRecord)
+            .filter_by(task_id=task_id)
+            .one_or_none()
+        )
+        return _row_summary(row) if row is not None else None
+
+
 def _inputs_of(row: Any) -> Dict[str, Any]:
     """The row's stored inputs as a dict, {} when absent/unreadable — old
     rows never break the queue."""

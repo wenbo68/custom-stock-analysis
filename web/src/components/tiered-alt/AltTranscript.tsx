@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import {
   tieredApi,
   type TieredTranscriptCall,
+  type TieredTranscriptCallFacts,
   type TieredTranscriptCallSummary,
 } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
@@ -96,7 +97,7 @@ export const AltTranscript = ({
           ) : null}
           {state.kind === 'ready'
             ? state.items.map((item) => (
-                <TranscriptEntry
+                <AltTranscriptCall
                   key={item.seq}
                   item={item}
                   load={() => callLoader(taskId, item.seq)}
@@ -118,27 +119,33 @@ type CallState =
   | { kind: 'error'; message: string }
   | { kind: 'ready'; call: TieredTranscriptCall };
 
-// One exchange: the call number, then four fact lines (what it was
-// for, the model, time, tokens) in the same quiet-label / bright-value
-// styling as the outlook and score facts, then the prompt and the reply
-// on the same fold surface the deep-analysis card uses — both folded by
-// default and shown whole when opened, no inner scroll box (owner
-// requests 2026-09-18). The text arrives when either fold first opens.
-const TranscriptEntry = ({
+// One exchange: "LLM call N" (or a caller's own title), then four
+// fact lines (what it was for, the model, time, tokens) in the same
+// quiet-label / bright-value styling as the outlook and score facts,
+// then the prompt and the reply on the same fold surface the
+// deep-analysis card uses — both folded by default and shown whole when
+// opened, no inner scroll box (owner requests 2026-09-18). The text
+// arrives when either fold first opens. Shared with the chat page,
+// which shows one of these under a reply's token line (2026-09-23).
+export const AltTranscriptCall = ({
   item,
   load,
+  title,
 }: {
-  item: TieredTranscriptCallSummary;
+  item: TieredTranscriptCallFacts;
   load: () => Promise<TieredTranscriptCall>;
+  title?: string;
 }) => {
   const { t } = useUiLanguage();
   const [call, setCall] = useState<CallState>({ kind: 'idle' });
-  const tokens = (item.prompt_tokens ?? 0) + (item.completion_tokens ?? 0);
+  const input = item.prompt_tokens ?? 0;
+  const output = item.completion_tokens ?? 0;
   const facts: [string, string][] = [
     [t('tiered.transcript.for'), stageWords(item.stage)],
     [t('tiered.transcript.llm'), item.model ?? '—'],
     [t('tiered.transcript.time'), item.duration_ms == null ? '—' : `${item.duration_ms}ms`],
-    [t('tiered.transcript.tokens'), String(tokens)],
+    // "tokens: 4000 (3000 in + 1000 out)" (owner request 2026-09-23).
+    [t('tiered.transcript.tokens'), t('tiered.transcript.tokensDetail', { total: input + output, input, output })],
   ];
 
   const ensureLoaded = (opened: boolean) => {
@@ -168,9 +175,9 @@ const TranscriptEntry = ({
   };
 
   return (
-    <article className="flex flex-col gap-2 border-t border-gray-700 pt-4 first:border-t-0 first:pt-0">
+    <article className="flex min-w-0 flex-col gap-2 border-t border-gray-700 pt-4 first:border-t-0 first:pt-0">
       <div className="flex flex-col gap-1">
-        <p className="font-semibold text-gray-300">{t('tiered.transcript.call', { n: item.seq })}</p>
+        <p className="font-semibold text-gray-300">{title ?? t('tiered.transcript.call', { n: item.seq })}</p>
         <p className="flex flex-col gap-0.5" data-testid="alt-transcript-facts">
           {facts.map(([label, value]) => (
             <span key={label} className="text-gray-500">
@@ -185,12 +192,12 @@ const TranscriptEntry = ({
         <p className="text-amber-300">{t('tiered.transcript.failed', { error: item.error })}</p>
       ) : null}
       <AltFold title={t('tiered.transcript.prompt')} className="" onToggle={ensureLoaded}>
-        <pre className="whitespace-pre-wrap break-words text-[11px] text-gray-400">
+        <pre className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] text-gray-400">
           {text((loaded) => loaded.prompt, '')}
         </pre>
       </AltFold>
       <AltFold title={t('tiered.transcript.reply')} className="" onToggle={ensureLoaded}>
-        <pre className="whitespace-pre-wrap break-words text-[11px] text-gray-300">
+        <pre className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] text-gray-300">
           {text((loaded) => loaded.reply, t('tiered.transcript.noReply'))}
         </pre>
       </AltFold>

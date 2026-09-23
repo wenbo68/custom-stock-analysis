@@ -205,6 +205,39 @@ class TieredCacheRecord(Base):
     updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
 
 
+class ChatConversationRecord(Base):
+    """One chatbot conversation (src/chatbot, 2026-09-21): a title and,
+    while the bot waits for the user's yes or no on an action, the tool
+    calls being held (``pending_json``). The messages are the rows of
+    ChatMessageRecord in ``seq`` order."""
+
+    __tablename__ = 'chat_conversations'
+
+    id = Column(String(64), primary_key=True)
+    title = Column(String(120))
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+    pending_json = Column(Text)
+
+
+class ChatMessageRecord(Base):
+    """One message of a chatbot conversation, stored in the shape the
+    model exchange uses (``content_json``: role, text, the tool calls the
+    model asked for, or one tool's result) plus the facts the chat page
+    shows beside it (token usage, sizes, errors). The bot's own memory
+    is exactly these rows, so a conversation survives a restart."""
+
+    __tablename__ = 'chat_messages'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(String(64), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+    #: user, assistant, or tool.
+    role = Column(String(16), nullable=False)
+    content_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now)
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 

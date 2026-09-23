@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { queuePosition } from '../altFormat';
+import { formatDateTime, parseUtc, queuePosition } from '../altFormat';
 
 describe('queuePosition', () => {
   it('turns the count ahead into an English ordinal position', () => {
@@ -20,5 +20,26 @@ describe('queuePosition', () => {
   it('writes the position in Chinese', () => {
     expect(queuePosition(0, 'zh')).toBe('第 1 位');
     expect(queuePosition(2, 'zh')).toBe('第 3 位');
+  });
+});
+
+describe('formatDateTime', () => {
+  it('writes a stored UTC stamp as yyyy/mm/dd, hh:mm in local time', () => {
+    const stamp = '2026-09-18T23:30:00';
+    const local = parseUtc(stamp)!;
+    const pad = (part: number) => String(part).padStart(2, '0');
+    expect(formatDateTime(stamp)).toBe(
+      `${local.getFullYear()}/${pad(local.getMonth() + 1)}/${pad(local.getDate())}, ` +
+        `${pad(local.getHours())}:${pad(local.getMinutes())}`,
+    );
+    // The same instant whether or not the stamp carries its zone.
+    expect(formatDateTime('2026-09-18T23:30:00Z')).toBe(formatDateTime(stamp));
+  });
+
+  it('shows a dash for a missing or unreadable stamp', () => {
+    expect(formatDateTime(null)).toBe('—');
+    expect(formatDateTime(undefined)).toBe('—');
+    expect(formatDateTime('junk')).toBe('—');
+    expect(parseUtc('junk')).toBeNull();
   });
 });

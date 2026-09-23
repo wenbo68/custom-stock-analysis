@@ -82,9 +82,9 @@ describe('AltTranscript', () => {
     expect(screen.getByText(/boom/)).toBeInTheDocument();
     // The call number, then one row of label/value facts: the label
     // stays muted, the value is bright and bold.
-    expect(screen.getByText(/^(Call 1|第 1 次调用)$/)).toBeInTheDocument();
+    expect(screen.getByText(/^(LLM call 1|第 1 次 LLM 调用)$/)).toBeInTheDocument();
     expect(screen.getAllByTestId('alt-transcript-facts')).toHaveLength(2);
-    expect(factLines(/^tokens: 15$/)).toHaveLength(2);
+    expect(factLines(/^tokens: 15 (total: 10 in \+ 5 out|总计：10 输入 \+ 5 输出)$/)).toHaveLength(2);
     expect(factLines(/^(for|用于): trade plan$/)).toHaveLength(1);
     expect(factLines(/^(time|耗时): 120ms$/)).toHaveLength(2);
     expect(screen.getByText('trade plan')).toHaveClass('font-semibold', 'text-gray-200');

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Slim FastAPI app for the standalone tiered-analysis service.
 
-Compared with the parent project this serves exactly three things:
+Compared with the parent project this serves exactly four things:
 - the tiered API under ``/api/v1/tiered``
+- the chatbot API under ``/api/v1/chat``
 - a health probe at ``/api/health``
 - the built frontend (``web/`` -> ``static/``) as a single-page app
 
@@ -27,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.middlewares.error_handler import add_error_handlers
-from api.v1.endpoints import tiered
+from api.v1.endpoints import chat, tiered
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ def create_app() -> FastAPI:
     add_error_handlers(app)
 
     app.include_router(tiered.router, prefix="/api/v1/tiered", tags=["TieredAnalysis"])
+    app.include_router(chat.router, prefix="/api/v1/chat", tags=["Chat"])
 
     @app.get("/api/health", include_in_schema=False)
     def health() -> dict:

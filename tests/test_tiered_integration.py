@@ -44,8 +44,9 @@ class FakeManager:
         self._df = df
         self.calls = []
 
-    def get_daily_data(self, stock_code, days=30):
+    def get_daily_data(self, stock_code, days=30, fresh_through=None):
         self.calls.append((stock_code, days))
+        self.fresh_through = fresh_through
         return self._df, "fake-source"
 
 

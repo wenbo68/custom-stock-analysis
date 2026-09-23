@@ -96,6 +96,42 @@ show what comes back as well as what goes in.
 | `GET /runs/{task_id}/transcript` | The run's LLM calls without their text (facts plus prompt/reply sizes). |
 | `GET /runs/{task_id}/transcript/{seq}` | One LLM call with its full prompt and raw reply. |
 
+## Chatbot
+
+`/chatbot` is a chat page whose bot can read and act on the run history
+through the app's own API — and nothing else. It uses the same model and
+key as the analysis (`MAIN_LLM`, `LLM_API_KEY`).
+
+- **Tools, not SQL.** The model picks from a menu of named actions
+  (`src/chatbot/tools.py`) that call the same Python functions the routes
+  above call: list and read runs, read one data report or one AI call,
+  page the vote items, check the server status, start a run, delete or
+  cancel a run. It never sees the database, the source code, or the key.
+- **You confirm every action and every large read.** Starting or
+  deleting a run, and reading a full data report or an AI call's text
+  into the model, pause the bot and ask you first — the question shows
+  the exact inputs, or the size and a rough token count.
+- **Everything is on the record.** Each tool call and its result is a
+  line in the conversation you can open. Every reply is one model call
+  and ends with its token usage and a rule; a reply that only chose
+  tools says which. Tool calls and your yes/no answers cost no tokens
+  and show none. Clicking a token line opens that call's transcript —
+  the exact prompt and raw reply — in the same format as a run's AI
+  transcript. Past conversations sit in a history table like the run
+  history — how many messages you sent, the tokens all its LLM calls
+  cost together, when it started and when you last asked — and each
+  row opens in place. Conversations are stored in the database and
+  survive a restart.
+- **Guardrails** (`src/chatbot/harness.py`): at most 8 rounds of tool
+  calls per message, refusals come back to the model as readable results,
+  oversized results are cut before the model sees them, and only the
+  last 40 messages are sent each turn.
+
+The chat API lives under `/api/v1/chat` (conversations, messages,
+confirm, and one message's model-call transcript at
+`GET /conversations/{id}/messages/{seq}/transcript`) and is documented
+at `/docs` beside the tiered routes.
+
 ## LLM transcripts
 
 Every analysis run stores a transcript of its AI exchanges in the

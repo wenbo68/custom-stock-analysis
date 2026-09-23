@@ -1,4 +1,5 @@
 // Number-to-text helpers shared across the alt page.
+import type { KeyboardEvent } from 'react';
 import type { TieredDebateLink } from '../../api/tiered';
 import type { UiLanguage } from '../../i18n/uiText';
 import { formatValue } from '../tiered/termHelpers';
@@ -101,6 +102,40 @@ const METRIC_UNIT: Record<string, string> = {
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export const slashDate = (value: string): string =>
   ISO_DATE_RE.test(value) ? value.split('-').join('/') : value;
+
+// A stored UTC timestamp as a Date in the viewer's zone; null when
+// missing or unreadable.
+export const parseUtc = (value: string | null | undefined): Date | null => {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value.endsWith('Z') || value.includes('+') ? value : `${value}Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+// yyyy/mm/dd, hh:mm in the viewer's local time, 24-hour clock — the
+// run history's date column, shared with the chat history (2026-09-23).
+export const formatDateTime = (value: string | null | undefined): string => {
+  const date = parseUtc(value);
+  if (!date) {
+    return '—';
+  }
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return (
+    `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}, ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+};
+
+// A history row is a div with the button role, not a <button>, so the
+// trash button inside it can be a real button (a button may not hold
+// another). This makes Enter and Space open the row as a button would.
+export const rowKeyDown = (toggle: () => void) => (event: KeyboardEvent<HTMLElement>) => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    toggle();
+  }
+};
 
 // A metric value with its unit appended when it has one.
 export const formatMetricValue = (key: string, value: unknown): string => {
