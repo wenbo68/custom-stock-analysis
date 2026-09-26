@@ -1,0 +1,722 @@
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { describe, expect, it } from 'vitest';
+import type {
+  TieredDeepAnalysisDetail,
+  TieredResult,
+} from '../../../api/tiered';
+import type { TieredPlanWarnings } from '../../../api/tiered';
+import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
+import { Report } from '../Report';
+
+// Outlook-redesign rendering: the conclusion block, the conditional plan
+// display, the staleness note, the plan-review warnings row, and the
+// v10/v11 vote trees.
+
+const LEVELS = { entry: 96, stop_loss: 90, target: 108 };
+
+function makeDimension(name: string): TieredResult['data_reports'][number] {
+  return {
+    name,
+    kind: 'numeric',
+    counted: true,
+    payload: { close: 100 },
+    summary: null,
+    warnings: [],
+    citations: [],
+  };
+}
+
+// A full 13-entry card: one flagged, one n/a, the rest ok.
+function makeOutlookResult(overrides: Partial<TieredResult> = {}): TieredResult {
+  return {
+    ticker: 'AAPL',
+    market: 'us',
+    tier: 1,
+    score: 72,
+    confidence: null,
+    levels: LEVELS,
+    levels_detail: null,
+    summary: null,
+    warnings: [],
+    data_reports: ['technicals', 'fundamentals', 'macro_economy', 'positioning'].map(makeDimension),
+    outlook: 'bullish',
+    action: 'buy_now',
+    earnings: null,
+    ...overrides,
+  };
+}
+
+// A v10 weighted vote tree: T1 rated 3 by both listers (score 3), S1
+// single-lister score 2.5 (lister 3 + checker 2). Final pool: bullish
+// score 3 of 5.5 total → 10 × 3 / 5.5 = 5.45.
+function makeWeightedDebate(): TieredDeepAnalysisDetail {
+  return {
+    format: 10,
+    items: [
+      {
+        id: 'T1',
+        data_report: 'technicals',
+        item_outlook: 'bullish',
+        claim: 'The 14-day RSI (71.20) is above 70.',
+        links: [{ ref: 'technicals.rsi_14', value: '71.20' }],
+        struck: false,
+        problems: [],
+        lister_count: 2,
+        lister_scores: [3, 3],
+        score: 3,
+        votes: [],
+        final_status: 'counted',
+        exclusion_reason: null,
+      },
+      {
+        id: 'S1',
+        data_report: 'positioning',
+        item_outlook: 'bearish',
+        claim: 'The deal is not closed yet.',
+        links: [{ ref: 'citation:2', value: null }],
+        struck: false,
+        problems: [],
+        lister_count: 1,
+        lister_scores: [3],
+        score: 2.5,
+        votes: [
+          {
+            role: 'checker',
+            validity: 'valid',
+            reason: 'Supported by the source.',
+            links: [{ ref: 'citation:2', value: null }],
+            score: 2,
+          },
+        ],
+        final_status: 'counted',
+        exclusion_reason: null,
+      },
+    ],
+    outlook: {
+      outlook: 'neutral',
+      summary: 'Weighted to hold.',
+      final_score: 5.45,
+      initial_score: 5.45,
+      pools: {
+        initial: {
+          data_reports: {
+            technicals: {
+              bullish: 1, bearish: 0, total: 1,
+              bullish_score_sum: 3, bearish_score_sum: 0, total_score_sum: 3,
+            },
+            positioning: {
+              bullish: 0, bearish: 1, total: 1,
+              bullish_score_sum: 0, bearish_score_sum: 3, total_score_sum: 3,
+            },
+          },
+          bullish: 1, bearish: 1, total: 2,
+          bullish_score_sum: 3, bearish_score_sum: 3, total_score_sum: 6,
+          score: 5.0,
+        },
+        final: {
+          data_reports: {
+            technicals: {
+              bullish: 1, bearish: 0, total: 1,
+              bullish_score_sum: 3, bearish_score_sum: 0, total_score_sum: 3,
+            },
+            positioning: {
+              bullish: 0, bearish: 1, total: 1,
+              bullish_score_sum: 0, bearish_score_sum: 2.5, total_score_sum: 2.5,
+            },
+          },
+          bullish: 1, bearish: 1, total: 2,
+          bullish_score_sum: 3, bearish_score_sum: 2.5, total_score_sum: 5.5,
+          score: 5.45,
+        },
+      },
+    },
+    warnings: [],
+  };
+}
+
+// A tier-2 section wrapping the given stored detail.
+function makeTier2(detail: TieredDeepAnalysisDetail): NonNullable<TieredResult['deep_analysis']> {
+  return {
+    tier: 2,
+    outlook: 'neutral',
+    confidence: null,
+    score: null,
+    levels: LEVELS,
+    summary: 'Weighted to hold.',
+    warnings: [],
+    detail: detail,
+  };
+}
+
+// A v11 tree: T1 both-listed (lister ratings 4 and 5 → median 4.5); S1
+// single-lister (lister 2 rated 3) checked invalid (2) and ruled valid
+// by the decider (2) → median 2. Every rating carries its reason.
+function makeRichDebate(): TieredDeepAnalysisDetail {
+  const detail = makeWeightedDebate();
+  return {
+    ...detail,
+    format: 11,
+    items: [
+      {
+        ...detail.items![0],
+        lister_scores: [4, 5],
+        lister_votes: [
+          { lister: 1, score: 4, score_reason: 'Strong but not decisive.' },
+          { lister: 2, score: 5, score_reason: 'Momentum drives the thesis.' },
+        ],
+        score: 4.5,
+      },
+      {
+        ...detail.items![1],
+        lister_scores: [3],
+        lister_votes: [
+          { lister: 2, score: 3, score_reason: 'Sentiment is soft evidence.' },
+        ],
+        score: 2,
+        votes: [
+          {
+            role: 'checker',
+            validity: 'invalid',
+            reason: 'The deal risk is already priced in.',
+            links: [],
+            score: 2,
+            score_reason: 'A minor point either way.',
+          },
+          {
+            role: 'decider',
+            validity: 'valid',
+            reason: 'The objection is speculation.',
+            links: [],
+            score: 2,
+            score_reason: 'Still a side note.',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+// The vote tree fetches its items when its fold opens (2026-09-21);
+// here they come from the fixture's own record.
+function renderResult(result: TieredResult) {
+  render(
+    <MemoryRouter>
+      <UiLanguageProvider>
+        <Report
+          result={result}
+          runId="task-9"
+          debateItemsLoader={async () => result.deep_analysis?.detail?.items ?? []}
+        />
+      </UiLanguageProvider>
+    </MemoryRouter>,
+  );
+}
+
+// Open the vote tree's fold and wait for its items.
+async function openTree() {
+  fireEvent.click(screen.getByText(/Vote items|投票项/));
+  await waitFor(() =>
+    expect(screen.getByTestId('vote-tree').querySelector('[data-testid^="tree-item-"]')).not.toBeNull(),
+  );
+}
+
+describe('Report outlook conclusion', () => {
+  it('leads with outlook and action; enter keeps the full levels table', () => {
+    renderResult(makeOutlookResult());
+    const conclusion = screen.getByTestId('preliminary-analysis');
+    expect(conclusion).toHaveTextContent(/(展望|Outlook): (看多|Bullish)/);
+    expect(conclusion).toHaveTextContent(/(操作|Action): (现在买入|Buy now)/);
+    expect(screen.getByTestId('levels-table')).toBeInTheDocument();
+  });
+
+  it('enter_later says buy later and keeps the full levels table', () => {
+    renderResult(makeOutlookResult({ action: 'buy_later' }));
+    const conclusion = screen.getByTestId('preliminary-analysis');
+    expect(conclusion).toHaveTextContent(/(操作|Action): (稍后再买|Buy later)/);
+    expect(screen.getByTestId('levels-table')).toBeInTheDocument();
+  });
+
+  it('buy_later shows the current reward ratio, clickable for its arithmetic', () => {
+    // The plan review's numbers win over the raw levels.
+    const planWarnings: TieredPlanWarnings = {
+      entry: [],
+      stop_loss: [],
+      target: [
+        {
+          id: 'reward_below_goal',
+          values: { entry: 330, stop_loss: 314.9, target: 334.7, ratio: 0.3112, goal: 2 },
+        },
+      ],
+      shares: [],
+    };
+    renderResult(makeOutlookResult({ action: 'buy_later', plan_warnings: planWarnings }));
+    const reason = screen.getByTestId('action-reason');
+    expect(reason).toHaveTextContent(/\((当前盈亏比为|current reward ratio is) 0\.31\)/);
+    fireEvent.click(within(reason).getByRole('button', { name: '0.31' }));
+    // The formula popup: words, this run's prices, the result.
+    expect(screen.getByText('= 0.31')).toBeInTheDocument();
+    expect(screen.getAllByText('334.70').length).toBeGreaterThan(0);
+  });
+
+  it('enter_later without a plan review computes the ratio from the levels', () => {
+    // LEVELS: (108 − 96) ÷ (96 − 90) = 2
+    renderResult(makeOutlookResult({ action: 'buy_later', plan_warnings: null }));
+    expect(screen.getByTestId('action-reason')).toHaveTextContent(/ 2\)/);
+  });
+
+  it('enter shows no reason suffix', () => {
+    renderResult(makeOutlookResult({ action: 'buy_now' }));
+    expect(screen.queryByTestId('action-reason')).not.toBeInTheDocument();
+  });
+
+  it('no_trade shows no trade-plan section at all', () => {
+    renderResult(
+      makeOutlookResult({
+        outlook: 'neutral',
+        action: 'no_trade',
+        warnings: [
+          'trend warning: close 303.42 is at or below the 50-day average ' +
+            '309.52 (downtrend) — a pullback buy against the trend carries ' +
+            'extra downside risk',
+        ],
+      }),
+    );
+    // A non-bullish outlook removes the whole plan section (owner
+    // decision 2026-08-05) — no card, no levels, no notes mark.
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('levels-table')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('structural-stop')).not.toBeInTheDocument();
+  });
+
+  it('plan warnings stay off the analysis card and vanish with the plan', () => {
+    // Owner report 2026-08-09: a bearish run showed plan-level and
+    // reward warnings outside the (hidden) plan card. Plan-flavored
+    // notes now live on the plan card only; the analysis card carries
+    // the analysis/data notes.
+    renderResult(
+      makeOutlookResult({
+        outlook: 'bearish',
+        action: 'no_trade',
+        warnings: [
+          'no usable ATR — no volatility stop, and no target without a stop',
+          "reward below goal: overhead resistance at 316.94 caps the plan's " +
+            'reward-to-risk at 0.28, below your 2× goal',
+          'no collected evidence to vote on — no outlook (re-run)',
+        ],
+      }),
+    );
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+    const conclusion = screen.getByTestId('preliminary-analysis');
+    fireEvent.click(within(conclusion).getByTestId('warnings-button'));
+    const dialog = screen.getByRole('dialog');
+    // The analysis note stays; both plan notes are gone with the plan.
+    expect(dialog).toHaveTextContent(/No outlook|无展望/);
+    expect(dialog).not.toHaveTextContent(/0\.28/);
+    expect(within(dialog).getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  it('a bearish run with only plan warnings shows no notes mark at all', () => {
+    renderResult(
+      makeOutlookResult({
+        outlook: 'bearish',
+        action: 'no_trade',
+        warnings: ['no usable ATR — no volatility stop, and no target without a stop'],
+      }),
+    );
+    const conclusion = screen.getByTestId('preliminary-analysis');
+    expect(within(conclusion).queryByTestId('warnings-button')).not.toBeInTheDocument();
+  });
+
+  it('an unknown outlook (failed run) shows no trade-plan section either', () => {
+    renderResult(makeOutlookResult({ outlook: 'no_outlook', action: 'unknown' }));
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('levels-table')).not.toBeInTheDocument();
+  });
+
+  it('keeps the max hold time off the conclusion (it lives on the run row)', () => {
+    // Owner request 2026-08-09: the conclusion is outlook + action only;
+    // the max hold shows as its own run-history column instead.
+    renderResult(makeOutlookResult({ max_hold_weeks: 3 }));
+    const conclusion = screen.getByTestId('preliminary-analysis');
+    expect(conclusion).not.toHaveTextContent(/(最长持有|Max maxHoldWeeks)/);
+  });
+
+  it('a bearish no_trade hides the plan and sizes nothing', () => {
+    renderResult(
+      makeOutlookResult({
+        outlook: 'bearish',
+        action: 'no_trade',
+        sizing: {
+          enabled: true,
+          shares: null,
+          position_value: null,
+          risk_amount: null,
+          loss_per_share: null,
+          lot_size: 1,
+          reason_code: 'not_bullish',
+          refusal_reason: null,
+          warnings: [],
+          inputs: {
+            capital: 100000,
+            risk_pct: 1,
+            entry: null,
+            stop_loss: null,
+          },
+        },
+      }),
+    );
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+    // The shares-computation card is retired (2026-07-22) — the action
+    // line already says the whole holding goes.
+    expect(screen.queryByTestId('sell-formula')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('shares-computation')).not.toBeInTheDocument();
+  });
+
+  it('never shows an earnings warning in the conclusion (moved to fundamentals)', () => {
+    renderResult(
+      makeOutlookResult({
+        earnings: {
+          next_date: '2026-07-24',
+          days_until: 4,
+          warning_days: 7,
+          is_near: true,
+          note: null,
+        },
+      }),
+    );
+    expect(screen.queryByTestId('earnings-warning')).not.toBeInTheDocument();
+  });
+
+  it('carries no previous-day note itself (that lives on the history row date)', () => {
+    renderResult(makeOutlookResult());
+    expect(screen.queryByTestId('stale-note')).not.toBeInTheDocument();
+    expect(screen.queryByText(/重跑|re-run/)).not.toBeInTheDocument();
+  });
+
+  it('a tier-1 run shows the preliminary-analysis card with outlook and action, no conclusion card', () => {
+    renderResult(makeOutlookResult());
+    expect(screen.getByText(/^(初步分析|Preliminary analysis)$/)).toBeInTheDocument();
+    expect(screen.queryByTestId('conclusion')).not.toBeInTheDocument();
+    const card = screen.getByTestId('preliminary-analysis');
+    expect(card).toHaveTextContent(/(展望|Outlook): (看多|Bullish)/);
+    expect(card).toHaveTextContent(/(操作|Action): (现在买入|Buy now)/);
+  });
+
+  it('a tier-2 run puts the action on the deep-analysis card, after the score', () => {
+    renderResult(makeOutlookResult({ tier: 2, deep_analysis: makeTier2(makeWeightedDebate()) }));
+    expect(screen.queryByTestId('preliminary-analysis')).not.toBeInTheDocument();
+    const card = screen.getByTestId('deep_analysis');
+    const text = card.textContent ?? '';
+    expect(text).toMatch(/(操作|Action): (现在买入|Buy now)/);
+    const scoreAt = text.search(/(评分|Score): /);
+    const actionAt = text.search(/(操作|Action): /);
+    expect(scoreAt).toBeGreaterThan(-1);
+    expect(actionAt).toBeGreaterThan(scoreAt);
+  });
+
+});
+
+describe('Report plan-card data notes vs the warnings row', () => {
+  it('drops notes the structured warnings row already carries, keeps the rest', () => {
+    const staleReward =
+      "reward below goal: overhead resistance at 106 caps the plan's " +
+      'reward-to-risk at 1.67, below your 2× goal';
+    const trendNote =
+      'trend warning: close 100 is at or below the 60-day average 102 ' +
+      '(downtrend) — a pullback buy against the trend carries extra downside risk';
+    renderResult(
+      makeOutlookResult({
+        warnings: [staleReward, trendNote, 'no usable entry price — cannot place a stop'],
+        plan_warnings: {
+          entry: [{ id: 'downtrend', values: { close: 100, sma_60: 102 } }],
+          stop_loss: [],
+          target: [
+            {
+              id: 'reward_below_goal',
+              values: { entry: 96, stop_loss: 90, target: 98, ratio: 0.33, goal: 2 },
+            },
+          ],
+          shares: [],
+        },
+      }),
+    );
+    fireEvent.click(within(screen.getByTestId('plan')).getByTestId('warnings-button'));
+    const dialog = screen.getByRole('dialog');
+    // The row's facts (reward shortfall, downtrend) don't repeat as notes —
+    // the row recomputes them from the final levels, so the note copy is stale.
+    expect(dialog).not.toHaveTextContent(/1\.67/);
+    expect(dialog).not.toHaveTextContent(/downtrend|逆势低吸/);
+    // Unrelated notes stay.
+    expect(dialog).toHaveTextContent(/price level problem|价位问题/i);
+  });
+});
+
+describe('Report weighted vote formula', () => {
+  function renderWeighted() {
+    const result = makeOutlookResult({
+      tier: 2,
+      deep_analysis: {
+        tier: 2,
+        outlook: 'neutral',
+        confidence: null,
+        score: null,
+        levels: LEVELS,
+        summary: 'Weighted to hold.',
+        warnings: [],
+        detail: makeWeightedDebate(),
+      },
+    });
+    renderResult(result);
+  }
+
+  it('renders a structured summary as the fixed outline instead of the paragraph', () => {
+    const result = makeOutlookResult({
+      tier: 2,
+      deep_analysis: {
+        tier: 2,
+        outlook: 'neutral',
+        confidence: null,
+        score: null,
+        levels: LEVELS,
+        summary: 'Summary: flat text fallback.',
+        warnings: [],
+        detail: {
+          ...makeWeightedDebate(),
+          outlook: {
+            ...makeWeightedDebate().outlook!,
+            summary_structure: {
+              summary: [{ text: 'The outlook is neutral.', links: [], children: [] }],
+              technicals: [
+                {
+                  text: 'Momentum is mixed.',
+                  links: [],
+                  children: [{ text: 'RSI sits mid-range.', links: [] }],
+                },
+              ],
+              fundamentals: [],
+              positioning: [
+                {
+                  text: 'Short interest is low at 3.10% of float.',
+                  links: [
+                    {
+                      ref: 'positioning.short_interest.short_pct_of_float',
+                      value: '3.10',
+                    },
+                  ],
+                  children: [],
+                },
+              ],
+              macro_economy: [],
+            },
+          },
+        },
+      },
+    });
+    renderResult(result);
+    const outline = screen.getByTestId('summary-outline');
+    // Groups render in the fixed order; empty groups are skipped.
+    const groupLabels = within(outline)
+      .getAllByRole('listitem')
+      .map((item) => item.textContent ?? '');
+    expect(outline).toHaveTextContent(/Summary|总结/);
+    expect(groupLabels.join(' ')).toContain('The outlook is neutral.');
+    expect(outline).toHaveTextContent('RSI sits mid-range.');
+    expect(outline).not.toHaveTextContent('flat text fallback');
+    // The flat paragraph does not render alongside the outline.
+    expect(screen.queryByText('Summary: flat text fallback.')).not.toBeInTheDocument();
+    // A cited value renders as a jump link — the same claim contract as
+    // the vote items in the details fold.
+    const valueLink = within(outline).getByRole('button', { name: '3.10' });
+    expect(valueLink.className).toContain('text-blue-300');
+  });
+
+  it('the header score opens the score formula in a modal', () => {
+    renderWeighted();
+    // The arithmetic no longer sits inside the transcript fold.
+    expect(screen.queryByTestId('tree-scores')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('deep-analysis-score'));
+    const scores = screen.getByTestId('tree-scores');
+    expect(scores).toHaveTextContent(/看多权重和|bullish score/);
+    expect(screen.getByTestId('tree-final-formula')).toHaveTextContent('= 10 × 3 / 5.5');
+    expect(scores).toHaveTextContent('= 5.45');
+  });
+});
+
+describe('Report deep-analysis layout', () => {
+  it('hides the tier-1 card on a new deep run and shows the trade plan instead', () => {
+    renderResult(
+      makeOutlookResult({ tier: 2, deep_analysis: makeTier2(makeWeightedDebate()) }),
+    );
+    expect(screen.queryByTestId('preliminary-analysis')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/层级 1：初步分析|Tier 1: preliminary analysis/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/交易计划|Trade plan/)).toBeInTheDocument();
+    // action = enter → the plan block carries the full levels table.
+    expect(
+      within(screen.getByTestId('plan')).getByTestId('levels-table'),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId('deep_analysis')).toBeInTheDocument();
+  });
+});
+
+describe('Report v11 detail tree', () => {
+  async function renderRich() {
+    renderResult(makeOutlookResult({ tier: 2, deep_analysis: makeTier2(makeRichDebate()) }));
+    await openTree();
+  }
+
+  it('shows the median as a bare number whose modal lists every score', async () => {
+    await renderRich();
+    const badge = screen.getByTestId('tree-score-T1');
+    expect(badge).toHaveTextContent(/^4\.5$/);
+    fireEvent.click(badge);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(/^评分|^Score/);
+    expect(dialog).toHaveTextContent(/各方评分：4 \| 5|Scores: 4 \| 5/);
+    expect(dialog).toHaveTextContent(/中位数：4\.5|Median: 4\.5/);
+  });
+
+  it('shows one check per lister; its modal carries validity, score and reason', async () => {
+    await renderRich();
+    const marks = within(screen.getByTestId('tree-item-T1')).getAllByRole('button', {
+      name: '✓',
+    });
+    expect(marks).toHaveLength(2); // both listers, no longer hidden
+    fireEvent.click(marks[0]);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(/列出者 1|Lister 1/);
+    expect(dialog).toHaveTextContent(/结果：有效|result: valid/);
+    expect(dialog).toHaveTextContent('The 14-day RSI (71.20) is above 70.');
+    expect(dialog).toHaveTextContent(/评分：4|score: 4/);
+    expect(dialog).toHaveTextContent('Strong but not decisive.');
+  });
+
+  it('a checker ✗ modal shows the objection, then the score and its reason', async () => {
+    await renderRich();
+    fireEvent.click(
+      within(screen.getByTestId('tree-item-S1')).getByRole('button', { name: '✗' }),
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(/核查员 1|Checker 1/);
+    expect(dialog).toHaveTextContent(/结果：无效|result: invalid/);
+    expect(dialog).toHaveTextContent('The deal risk is already priced in.');
+    expect(dialog).toHaveTextContent(/评分：2|score: 2/);
+    expect(dialog).toHaveTextContent('A minor point either way.');
+  });
+
+  it('the second vote is Checker 2 — never a decider word', async () => {
+    await renderRich();
+    const marks = within(screen.getByTestId('tree-item-S1')).getAllByRole('button', {
+      name: '✓',
+    });
+    // lister mark first, then the deciding vote's ✓.
+    fireEvent.click(marks[marks.length - 1]);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(/核查员 2|Checker 2/);
+    expect(dialog).not.toHaveTextContent(/裁决者|Decider/);
+  });
+
+  it('the how-it-works list explains the 1-5 scale', async () => {
+    await renderRich();
+    expect(screen.getByTestId('tree-explain')).toHaveTextContent(/1-5/);
+  });
+});
+
+describe('Report trade-plan warnings row and shares column', () => {
+  const sharesDetail = {
+    base: 166,
+    formula: 'capital × risk_pct ÷ 100 ÷ (entry − stop_loss)',
+    inputs: { capital: 100000, risk_pct: 1, entry: 96, stop_loss: 90 },
+    adjusted: 50,
+    reasons: [{ check: 'liquidity', text: 'The planned order is far above the 5% liquidity limit.' }],
+    evidence: [],
+    rejection: null,
+    final: 50,
+  };
+  const levelDetail = (base: number) => ({
+    base,
+    formula: 'f',
+    inputs: {},
+    adjusted: null,
+    reason: null,
+    evidence: [],
+    rejection: null,
+    final: base,
+  });
+  const planWarnings: TieredPlanWarnings = {
+    entry: [],
+    stop_loss: [
+      {
+        id: 'gap_atr',
+        values: { atr_open: 87, atr_loss: 450, atr_extra: 150, loss_at_stop: 300 },
+      },
+      {
+        id: 'gap_worst',
+        values: {
+          worst_day_1y: -0.1, worst_open: 86.4, worst_loss: 480,
+          worst_extra: 180, loss_at_stop: 300,
+        },
+      },
+    ],
+    target: [{ id: 'reward_below_goal', values: { ratio: 1.67, goal: 2 } }],
+    shares: [],
+  };
+
+  function renderPlan() {
+    renderResult(
+      makeOutlookResult({
+        plan_warnings: planWarnings,
+        levels_detail: {
+          levels: {
+            entry: levelDetail(96),
+            stop_loss: levelDetail(90),
+            target: levelDetail(108),
+            shares: sharesDetail,
+          },
+          warnings: [],
+        },
+      }),
+    );
+  }
+
+  it('renders none / counts per column; the count lists the warnings', () => {
+    renderPlan();
+    expect(screen.getByTestId('plan-warnings-entry')).toHaveTextContent(/无|none/);
+    const stop = screen.getByTestId('plan-warnings-stop_loss');
+    expect(stop).toHaveTextContent('2');
+    fireEvent.click(stop);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('87'); // forced-sell price
+    expect(dialog).toHaveTextContent('450'); // total loss
+    expect(dialog).toHaveTextContent('150'); // extra vs planned
+    expect(dialog).toHaveTextContent('86.4'); // worst-day open
+  });
+
+  it('the target column carries the reward-below-goal warning', () => {
+    renderPlan();
+    const target = screen.getByTestId('plan-warnings-target');
+    expect(target).toHaveTextContent('1');
+    fireEvent.click(target);
+    expect(screen.getByRole('dialog')).toHaveTextContent('1.67');
+  });
+
+  it('the shares column shows computed and AI-adjusted counts', () => {
+    renderPlan();
+    expect(screen.getByTestId('level-computed-shares')).toHaveTextContent('166');
+    const adjusted = screen.getByTestId('level-adjusted-shares');
+    expect(adjusted).toHaveTextContent('50');
+    fireEvent.click(adjusted);
+    expect(screen.getByRole('dialog')).toHaveTextContent(/liquidity limit/);
+  });
+
+  it('the computed shares modal shows the arithmetic receipt', () => {
+    renderPlan();
+    fireEvent.click(screen.getByTestId('level-computed-shares'));
+    const receipt = screen.getByTestId('shares-receipt');
+    expect(receipt).toHaveTextContent('100000');
+    expect(receipt).toHaveTextContent('1%');
+    expect(receipt).toHaveTextContent('166');
+  });
+});

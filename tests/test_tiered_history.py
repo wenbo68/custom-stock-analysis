@@ -19,7 +19,7 @@ from src.tiered_analysis.history import (
     RunInProgressError,
     create_run,
     delete_run,
-    get_debate_items,
+    get_vote_items,
     get_run,
     get_transcript_call,
     list_runs,
@@ -58,13 +58,13 @@ def isolated_db(tmp_path):
 # (2026-08-19) and new runs never write the key, but rows persisted
 # before the retirement still carry it — history must reload such
 # results verbatim, never choke on the stray key.
-RESULT = {"symbol": "AAPL", "outlook": "neutral", "score": 56,
-          "dimensions": [{"dimension": "technicals", "coverage": "full"}]}
+RESULT = {"ticker": "AAPL", "outlook": "neutral", "score": 56,
+          "data_reports": [{"data_report": "technicals", "coverage": "full"}]}
 
 
 def _rows(**kwargs):
-    """The rows of one list page, keyed by task id."""
-    return {row["task_id"]: row for row in list_runs(**kwargs)["items"]}
+    """The rows of one list page, keyed by run id."""
+    return {row["run_id"]: row for row in list_runs(**kwargs)["items"]}
 
 
 class TestTieredRunHistory:
@@ -72,7 +72,7 @@ class TestTieredRunHistory:
         create_run("task-1", "AAPL")
         run = get_run("task-1")
         assert run["status"] == "running"
-        assert run["stock_code"] == "AAPL"
+        assert run["ticker"] == "AAPL"
         assert run["result"] is None
         assert run["created_at"]
         assert run_exists("task-1") and not run_exists("nope")
@@ -83,8 +83,8 @@ class TestTieredRunHistory:
         run = get_run("task-1")
         assert run["status"] == "done"
         assert run["result"]["outlook"] == "neutral"
-        assert run["result"]["dimensions"][0]["coverage"] == "full"
-        assert run["sections"] == ["core", "dimensions", "debate", "plan"]
+        assert run["result"]["data_reports"][0]["coverage"] == "full"
+        assert run["sections"] == ["core", "data_reports", "deep_analysis", "plan"]
 
     def test_mark_failed_stores_error(self, isolated_db):
         create_run("task-1", "AAPL")
@@ -102,7 +102,7 @@ class TestTieredRunHistory:
         create_run("task-2", "NVDA")
         page = list_runs()
         runs = page["items"]
-        assert [r["task_id"] for r in runs] == ["task-2", "task-1"]
+        assert [r["run_id"] for r in runs] == ["task-2", "task-1"]
         assert runs[0]["status"] == "running"
         assert runs[1]["status"] == "done"
         # list is lightweight: no full result payloads
@@ -112,63 +112,65 @@ class TestTieredRunHistory:
     def test_list_digest_has_outlook_shares_and_tier(self, isolated_db):
         create_run("task-1", "AAPL")
         mark_done("task-1", {**RESULT,
-                             "depth": 2,
+                             "tier": 2,
                              "outlook": "bullish",
                              "final": {"outlook": "bullish", "tier": 2},
                              "sizing": {"shares": 41,
                                         "inputs": {"capital": 100000,
-                                                   "risk_fraction": 0.01,
-                                                   "reward_risk": 2.0}}})
+                                                   "risk_pct": 1.0,
+                                                   "reward_ratio": 2.0}}})
         create_run("task-2", "NVDA")  # still running — no digest yet
         runs = _rows()
         assert runs["task-1"]["outlook"] == "bullish"
         assert runs["task-1"]["shares"] == 41
         assert runs["task-1"]["tier"] == 2
         assert runs["task-1"]["capital"] == 100000
-        assert runs["task-1"]["risk_fraction"] == 0.01
-        assert runs["task-1"]["reward_risk"] == 2.0
+        # Rows speak the run form's words: risk as a percent, the reward
+        # as a ratio (2026-09-24); the columns keep the engine's names.
+        assert runs["task-1"]["risk_pct"] == 1.0
+        assert runs["task-1"]["reward_ratio"] == 2.0
         assert runs["task-2"]["outlook"] is None
         assert runs["task-2"]["shares"] is None
         assert runs["task-2"]["tier"] is None
         assert runs["task-2"]["capital"] is None
-        assert runs["task-2"]["risk_fraction"] is None
-        assert runs["task-2"]["reward_risk"] is None
+        assert runs["task-2"]["risk_pct"] is None
+        assert runs["task-2"]["reward_ratio"] is None
 
     def test_running_rows_show_the_inputs_recorded_at_creation(self, isolated_db):
         # Owner decision 2026-07-24: capital/risk/reward/tier are visible
-        # on the history row while the run is still in flight. hold_weeks
+        # on the history row while the run is still in flight. max_hold_weeks
         # joined the digest 2026-08-09 (the run-history max-hold column).
         create_run("task-1", "NVDA", inputs={
             "tier": 2, "capital": 100000,
-            "risk_fraction": 0.01, "reward_risk": 2.0, "hold_weeks": 3,
+            "risk_pct": 1.0, "reward_ratio": 2.0, "max_hold_weeks": 3,
         })
         row = _rows()["task-1"]
         assert row["status"] == "running"
         assert row["tier"] == 2
         assert row["capital"] == 100000
-        assert row["risk_fraction"] == 0.01
-        assert row["reward_risk"] == 2.0
-        assert row["hold_weeks"] == 3
+        assert row["risk_pct"] == 1.0
+        assert row["reward_ratio"] == 2.0
+        assert row["max_hold_weeks"] == 3
 
     def test_finished_report_values_beat_the_creation_inputs(self, isolated_db):
         create_run("task-1", "NVDA", inputs={
             "tier": 2, "capital": 100000,
-            "risk_fraction": 0.01, "reward_risk": 2.0, "hold_weeks": 3,
+            "risk_pct": 1.0, "reward_ratio": 2.0, "max_hold_weeks": 3,
         })
         mark_done("task-1", {**RESULT,
-                             "depth": 2,
+                             "tier": 2,
                              "outlook": "bullish",
                              "final": {"outlook": "bullish", "tier": 2},
-                             "hold_weeks": 2,
+                             "max_hold_weeks": 2,
                              "sizing": {"shares": 51,
                                         "inputs": {"capital": 50000,
-                                                   "risk_fraction": 0.02,
-                                                   "reward_risk": 3.0}}})
+                                                   "risk_pct": 2.0,
+                                                   "reward_ratio": 3.0}}})
         row = _rows()["task-1"]
         assert row["capital"] == 50000
-        assert row["risk_fraction"] == 0.02
-        assert row["reward_risk"] == 3.0
-        assert row["hold_weeks"] == 2
+        assert row["risk_pct"] == 2.0
+        assert row["reward_ratio"] == 3.0
+        assert row["max_hold_weeks"] == 2
 
     def test_failed_rows_keep_the_creation_inputs(self, isolated_db):
         create_run("task-1", "NVDA", inputs={"tier": 1, "capital": 5000})
@@ -180,11 +182,11 @@ class TestTieredRunHistory:
     def test_list_digest_degrades_on_refused_runs(self, isolated_db):
         # no sizing block at all -> dash shares
         create_run("task-1", "AAPL")
-        mark_done("task-1", {**RESULT, "depth": 1})
+        mark_done("task-1", {**RESULT, "tier": 1})
         # sizing ran but refused to buy (shares None) -> 0, like the report
         # card
         create_run("task-2", "MSFT")
-        mark_done("task-2", {**RESULT, "depth": 2,
+        mark_done("task-2", {**RESULT, "tier": 2,
                              "final": {"outlook": "neutral", "tier": 2},
                              "sizing": {"shares": None}})
         runs = _rows()
@@ -200,7 +202,7 @@ class TestTieredRunHistory:
         create_run("task-1", "AAPL")
         mark_done("task-1", RESULT)
         with DatabaseManager.get_instance().get_session() as session:
-            row = session.query(TieredRunRecord).filter_by(task_id="task-1").one()
+            row = session.query(TieredRunRecord).filter_by(run_id="task-1").one()
             row.result_json = "{not json"
             session.commit()
         run = get_run("task-1")
@@ -213,10 +215,10 @@ class TestPaging:
         for index in range(7):
             create_run(f"task-{index}", "AAPL")
         first = list_runs(page=1, page_size=3)
-        assert [r["task_id"] for r in first["items"]] == ["task-6", "task-5", "task-4"]
+        assert [r["run_id"] for r in first["items"]] == ["task-6", "task-5", "task-4"]
         assert (first["total"], first["page_count"]) == (7, 3)
         last = list_runs(page=3, page_size=3)
-        assert [r["task_id"] for r in last["items"]] == ["task-0"]
+        assert [r["run_id"] for r in last["items"]] == ["task-0"]
         # Past the end: empty, not an error.
         assert list_runs(page=4, page_size=3)["items"] == []
 
@@ -234,17 +236,17 @@ class TestPaging:
 class TestFilters:
     def _seed(self):
         create_run("bull", "AAPL", inputs={
-            "tier": 2, "capital": 100000, "risk_fraction": 0.01,
-            "reward_risk": 2.0, "hold_weeks": 2,
+            "tier": 2, "capital": 100000, "risk_pct": 1.0,
+            "reward_ratio": 2.0, "max_hold_weeks": 2,
         })
-        mark_done("bull", {**RESULT, "outlook": "bullish", "depth": 2})
+        mark_done("bull", {**RESULT, "outlook": "bullish", "tier": 2})
         create_run("bear", "nvda", inputs={
-            "tier": 1, "capital": 50000, "risk_fraction": 0.02,
-            "reward_risk": 3.0, "hold_weeks": 4,
+            "tier": 1, "capital": 50000, "risk_pct": 2.0,
+            "reward_ratio": 3.0, "max_hold_weeks": 4,
         })
-        mark_done("bear", {**RESULT, "outlook": "bearish", "depth": 1})
+        mark_done("bear", {**RESULT, "outlook": "bearish", "tier": 1})
         create_run("blank", "MSFT", inputs={"tier": 1, "capital": 20000})
-        mark_done("blank", {**RESULT, "outlook": "unknown", "depth": 1})
+        mark_done("blank", {**RESULT, "outlook": "no_outlook", "tier": 1})
         create_run("dead", "AAPL", inputs={"tier": 1, "capital": 100000})
         mark_failed("dead", "boom")
         create_run("live", "TSLA", inputs={"tier": 2, "capital": 100000})
@@ -266,31 +268,31 @@ class TestFilters:
         self._seed()
         assert self._ids(outlooks=["bullish"]) == ["bull"]
         assert self._ids(outlooks=["bullish", "bearish"]) == ["bear", "bull"]
-        # "none": unfinished, failed, and finished-with-no-opinion rows.
-        assert self._ids(outlooks=["none"]) == ["blank", "dead", "live"]
-        assert self._ids(outlooks=["none", "bearish"]) == ["bear", "blank", "dead", "live"]
+        # "no_outlook": unfinished, failed, and finished-with-no-outlook rows.
+        assert self._ids(outlooks=["no_outlook"]) == ["blank", "dead", "live"]
+        assert self._ids(outlooks=["no_outlook", "bearish"]) == ["bear", "blank", "dead", "live"]
 
     def test_tier_and_hold_filters(self, isolated_db):
         self._seed()
         assert self._ids(tiers=[2]) == ["bull", "live"]
-        assert self._ids(hold_weeks=[4]) == ["bear"]
-        assert self._ids(hold_weeks=[2, 4]) == ["bear", "bull"]
+        assert self._ids(max_hold_weeks=[4]) == ["bear"]
+        assert self._ids(max_hold_weeks=[2, 4]) == ["bear", "bull"]
 
     def test_ranges_are_inclusive_and_skip_rows_without_the_value(self, isolated_db):
         self._seed()
         assert self._ids(capital_min=100000) == ["bull", "dead", "live"]
         assert self._ids(capital_max=50000) == ["bear", "blank"]
         assert self._ids(capital_min=20000, capital_max=50000) == ["bear", "blank"]
-        assert self._ids(risk_min=0.02) == ["bear"]
-        assert self._ids(risk_max=0.01) == ["bull"]
+        assert self._ids(risk_pct_min=2.0) == ["bear"]
+        assert self._ids(risk_pct_max=1.0) == ["bull"]
         # Rows with no reward recorded never match a reward range.
-        assert self._ids(reward_min=2.0) == ["bear", "bull"]
-        assert self._ids(reward_max=2.5) == ["bull"]
+        assert self._ids(reward_ratio_min=2.0) == ["bear", "bull"]
+        assert self._ids(reward_ratio_max=2.5) == ["bull"]
 
     def test_filters_combine_with_and(self, isolated_db):
         self._seed()
         assert self._ids(tickers=["AAPL"], statuses=["done"]) == ["bull"]
-        assert self._ids(tiers=[1], outlooks=["none"]) == ["blank", "dead"]
+        assert self._ids(tiers=[1], outlooks=["no_outlook"]) == ["blank", "dead"]
 
     def test_date_range_compares_in_utc(self, isolated_db):
         from src.storage import DatabaseManager, TieredRunRecord
@@ -298,7 +300,7 @@ class TestFilters:
         create_run("old", "AAPL")
         create_run("new", "AAPL")
         with DatabaseManager.get_instance().get_session() as session:
-            row = session.query(TieredRunRecord).filter_by(task_id="old").one()
+            row = session.query(TieredRunRecord).filter_by(run_id="old").one()
             row.created_at = datetime(2026, 1, 1, 12, 0, 0)  # UTC-naive
             session.commit()
         # An aware bound in another zone is converted before comparing.
@@ -325,30 +327,30 @@ class TestFilters:
 
 class TestSections:
     FULL = {
-        "symbol": "AAPL", "outlook": "bullish", "levels": {"entry": 1},
-        "dimensions": [
-            {"dimension": "technicals", "payload": {"rsi": 70}},
-            {"dimension": "fundamentals", "payload": {"pe": 20}},
+        "ticker": "AAPL", "outlook": "bullish", "levels": {"entry": 1},
+        "data_reports": [
+            {"name": "technicals", "payload": {"rsi": 70}},
+            {"name": "fundamentals", "payload": {"pe": 20}},
         ],
         "levels_detail": {"levels": {}}, "sizing": {"shares": 3},
         "plan_warnings": {},
-        "tier2": {"outlook": "bullish", "score": 7.5,
-                  "debate_detail": {"items": [{"id": "t1"}]}},
+        "deep_analysis": {"outlook": "bullish", "score": 7.5,
+                  "detail": {"items": [{"id": "t1"}]}},
     }
 
     INDEX = [
-        {"dimension": "technicals", "kind": None, "is_actionable": False, "warnings": []},
-        {"dimension": "fundamentals", "kind": None, "is_actionable": False, "warnings": []},
+        {"name": "technicals", "kind": None, "counted": False, "warnings": []},
+        {"name": "fundamentals", "kind": None, "counted": False, "warnings": []},
     ]
 
-    def test_default_is_everything_with_the_debate_as_overview(self, isolated_db):
+    def test_default_is_everything_with_the_deep_analysis_as_overview(self, isolated_db):
         create_run("task-1", "AAPL")
         mark_done("task-1", self.FULL)
         assert get_run("task-1")["result"] == {
             **self.FULL,
-            "tier2": {"outlook": "bullish", "score": 7.5,
-                      "debate_detail": {"item_count": 1}},
-            "dimension_index": self.INDEX,
+            "deep_analysis": {"outlook": "bullish", "score": 7.5,
+                      "detail": {"item_count": 1}},
+            "data_report_index": self.INDEX,
         }
 
     def test_core_only_drops_the_heavy_parts_but_keeps_tier2_headline(self, isolated_db):
@@ -357,23 +359,23 @@ class TestSections:
         run = get_run("task-1", sections=("core",))
         assert run["sections"] == ["core"]
         assert run["result"] == {
-            "symbol": "AAPL", "outlook": "bullish", "levels": {"entry": 1},
-            "tier2": {"outlook": "bullish", "score": 7.5},
-            "dimension_index": self.INDEX,
+            "ticker": "AAPL", "outlook": "bullish", "levels": {"entry": 1},
+            "deep_analysis": {"outlook": "bullish", "score": 7.5},
+            "data_report_index": self.INDEX,
         }
 
-    def test_one_section_plus_a_named_dimension(self, isolated_db):
+    def test_one_section_plus_a_named_data_report(self, isolated_db):
         create_run("task-1", "AAPL")
         mark_done("task-1", self.FULL)
-        run = get_run("task-1", sections=("core", "dimensions"),
-                      dimensions=["Fundamentals"])
-        assert run["result"]["dimensions"] == [
-            {"dimension": "fundamentals", "payload": {"pe": 20}}]
+        run = get_run("task-1", sections=("core", "data_reports"),
+                      data_reports=["Fundamentals"])
+        assert run["result"]["data_reports"] == [
+            {"name": "fundamentals", "payload": {"pe": 20}}]
         assert "sizing" not in run["result"]
         plan = get_run("task-1", sections=("core", "plan"))["result"]
-        assert plan["sizing"] == {"shares": 3} and "dimensions" not in plan
-        debate = get_run("task-1", sections=("core", "debate"))["result"]
-        assert debate["tier2"]["debate_detail"] == {"item_count": 1}
+        assert plan["sizing"] == {"shares": 3} and "data_reports" not in plan
+        debate = get_run("task-1", sections=("core", "deep_analysis"))["result"]
+        assert debate["deep_analysis"]["detail"] == {"item_count": 1}
 
     def test_unfinished_run_has_null_result_whatever_is_asked(self, isolated_db):
         create_run("task-1", "AAPL")
@@ -383,37 +385,37 @@ class TestSections:
 
 class TestDebateItems:
     def test_unknown_run_is_none_and_a_run_without_a_record_is_empty(self, isolated_db):
-        assert get_debate_items("nope") is None
+        assert get_vote_items("nope") is None
         create_run("task-1", "AAPL")
-        assert get_debate_items("task-1")["total"] == 0
+        assert get_vote_items("task-1")["total"] == 0
         mark_done("task-1", RESULT)  # tier 1: no debate record
-        assert get_debate_items("task-1") == {
+        assert get_vote_items("task-1") == {
             "items": [], "page": 1, "page_size": 20, "total": 0, "page_count": 1,
         }
 
     def test_pages_and_filters_the_stored_items(self, isolated_db):
         items = [
-            {"id": "T1", "dimension": "technicals", "final_status": "counted"},
-            {"id": "T2", "dimension": "technicals", "final_status": "excluded"},
-            {"id": "F1", "dimension": "fundamentals", "final_status": "counted"},
+            {"id": "T1", "data_report": "technicals", "final_status": "counted"},
+            {"id": "T2", "data_report": "technicals", "final_status": "excluded"},
+            {"id": "F1", "data_report": "fundamentals", "final_status": "counted"},
         ]
         create_run("task-1", "AAPL")
-        mark_done("task-1", {**RESULT, "tier2": {"debate_detail": {"items": items}}})
-        page = get_debate_items("task-1", statuses=["counted"], page=2, page_size=1)
+        mark_done("task-1", {**RESULT, "deep_analysis": {"detail": {"items": items}}})
+        page = get_vote_items("task-1", statuses=["counted"], page=2, page_size=1)
         assert [i["id"] for i in page["items"]] == ["F1"]
         assert page["total"] == 2 and page["page_count"] == 2
-        assert get_debate_items("task-1", dimensions=["technicals"])["total"] == 2
+        assert get_vote_items("task-1", data_reports=["technicals"])["total"] == 2
 
 
-def _record_call(task_id, seq, prompt="hello there", reply="ok", error=None):
+def _record_call(run_id, seq, prompt="hello there", reply="ok", error=None):
     from src.storage import DatabaseManager, TieredRunTranscriptRecord
 
     with DatabaseManager.get_instance().get_session() as session:
         session.add(TieredRunTranscriptRecord(
-            task_id=task_id, seq=seq, stage="tier1_analysis",
-            model="gemini/flash", temperature=0.0, duration_ms=120,
-            prompt_tokens=10, completion_tokens=5, structured="schema",
-            error=error, prompt=prompt, reply=reply,
+            run_id=run_id, call_number=seq, stage="preliminary_analysis",
+            llm="gemini/flash", temperature=0.0, time_ms=120,
+            input_tokens=10, output_tokens=5, structured="schema",
+            error=error, input=prompt, output=reply,
         ))
         session.commit()
 
@@ -431,8 +433,8 @@ class TestDeleteRun:
 
         deleted = delete_run("task-1")
 
-        assert deleted["task_id"] == "task-1" and deleted["status"] == "done"
-        assert deleted["stock_code"] == "AAPL" and deleted["tier"] == 2
+        assert deleted["run_id"] == "task-1" and deleted["status"] == "done"
+        assert deleted["ticker"] == "AAPL" and deleted["tier"] == 2
         assert not run_exists("task-1")
         assert list_transcript("task-1") == []
         # The neighbour and its transcript are untouched.
@@ -448,7 +450,7 @@ class TestDeleteRun:
         assert delete_run("failed")["status"] == "failed"
         with pytest.raises(RunInProgressError) as caught:
             delete_run("running")
-        assert caught.value.task_id == "running"
+        assert caught.value.run_id == "running"
         assert run_exists("running")
 
 
@@ -464,30 +466,30 @@ class TestStatusCounts:
 
 
 class TestTranscript:
-    def _record(self, task_id, seq, prompt="hello there", reply="ok", error=None):
-        _record_call(task_id, seq, prompt=prompt, reply=reply, error=error)
+    def _record(self, run_id, seq, prompt="hello there", reply="ok", error=None):
+        _record_call(run_id, seq, prompt=prompt, reply=reply, error=error)
 
     def test_index_has_facts_and_sizes_but_no_text(self, isolated_db):
         create_run("task-1", "AAPL")
         self._record("task-1", 2, prompt="second", reply=None, error="boom")
         self._record("task-1", 1)
         rows = list_transcript("task-1")
-        assert [row["seq"] for row in rows] == [1, 2]
+        assert [row["call_number"] for row in rows] == [1, 2]
         first = rows[0]
-        assert "prompt" not in first and "reply" not in first
-        assert first["prompt_chars"] == len("hello there")
-        assert first["reply_chars"] == 2
-        assert first["stage"] == "tier1_analysis" and first["model"] == "gemini/flash"
-        assert first["duration_ms"] == 120 and first["prompt_tokens"] == 10
-        assert rows[1]["reply_chars"] == 0 and rows[1]["error"] == "boom"
+        assert "input" not in first and "output" not in first
+        assert first["input_chars"] == len("hello there")
+        assert first["output_chars"] == 2
+        assert first["stage"] == "preliminary_analysis" and first["llm"] == "gemini/flash"
+        assert first["time_ms"] == 120 and first["input_tokens"] == 10
+        assert rows[1]["output_chars"] == 0 and rows[1]["error"] == "boom"
         assert list_transcript("unknown") == []
 
     def test_one_call_carries_its_text(self, isolated_db):
         create_run("task-1", "AAPL")
         self._record("task-1", 1)
         call = get_transcript_call("task-1", 1)
-        assert call["prompt"] == "hello there" and call["reply"] == "ok"
-        assert call["seq"] == 1 and call["stage"] == "tier1_analysis"
-        assert "prompt_chars" not in call
+        assert call["input"] == "hello there" and call["output"] == "ok"
+        assert call["call_number"] == 1 and call["stage"] == "preliminary_analysis"
+        assert "input_chars" not in call
         assert get_transcript_call("task-1", 2) is None
         assert get_transcript_call("nope", 1) is None

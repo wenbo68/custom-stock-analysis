@@ -6,7 +6,7 @@ import { UI_TEXT, formatUiText, type UiTextKey } from '../uiText';
 // test that renders only one language. It surfaces at RUNTIME as
 // "Cannot read properties of undefined (reading 'replace')" inside
 // formatUiText — which is how a title key deleted during the 2026-08-08
-// modal rework took down the legacy /tiered page while the whole alt-page
+// modal rework took down the legacy /tiered page while the whole page
 // suite stayed green.
 describe('UI_TEXT — the two languages stay in step', () => {
   const en = Object.keys(UI_TEXT.en) as UiTextKey[];

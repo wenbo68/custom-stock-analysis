@@ -5,7 +5,7 @@ Who holds the stock and who can be forced to transact — the questions a
 trade thesis always has to answer: who is on the other side, how crowded
 the trade is, who can be squeezed, and what the informed parties are
 doing. Every number is a published figure (yfinance for the disclosure
-blocks, CBOE for options); no LLM anywhere in this dimension.
+blocks, CBOE for options); no LLM anywhere in this data_report.
 
 Groups and field names follow the TODO.md final-truth list: ``meta``
 (the three dates that scope the lagged/forward blocks), ``ownership``
@@ -13,7 +13,7 @@ Groups and field names follow the TODO.md final-truth list: ``meta``
 ``options``. Every published metric ships as a
 ``{name, explanation, interpretation, value}`` envelope — the same
 contract as technicals/fundamentals v2 — and computed metrics carry UI
-formula receipts in ``DimensionResult.formulas``. Fields that cannot be
+formula receipts in ``DataReport.formulas``. Fields that cannot be
 computed stay present with ``value: null`` (blank), never omitted.
 
 Sources:
@@ -67,18 +67,18 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .base import (
     Citation,
-    DimensionProvider,
-    DimensionResult,
+    DataReportProvider,
+    DataReport,
     Market,
     SourceKind,
-    note_fields,
+    warn_fields,
 )
 from .technicals import make_metric, metric_value
 
 #: The Yahoo Finance page showing each block's numbers: yfinance itself
 #: has no per-request page, but every block's figures are published on a
 #: quote subpage — cited so readers can verify the data at the source.
-YAHOO_QUOTE_URL = "https://finance.yahoo.com/quote/{symbol}"
+YAHOO_QUOTE_URL = "https://finance.yahoo.com/quote/{ticker}"
 
 #: Near-dated expirations are where positioning information concentrates;
 #: the puts-to-calls sums cover the nearest ones only (the implied
@@ -460,18 +460,18 @@ def _quote_mid(
 # ---------------------------------------------------------------------------
 
 
-def _default_info_loader(symbol: str) -> Mapping[str, Any]:
+def _default_info_loader(ticker: str) -> Mapping[str, Any]:
     import yfinance as yf
 
-    ticker = yf.Ticker(symbol)
+    ticker = yf.Ticker(ticker)
     info = ticker.get_info() if hasattr(ticker, "get_info") else (ticker.info or {})
     return info if isinstance(info, Mapping) else {}
 
 
-def _default_holders_loader(symbol: str) -> List[Dict[str, Any]]:
+def _default_holders_loader(ticker: str) -> List[Dict[str, Any]]:
     import yfinance as yf
 
-    frame = yf.Ticker(symbol).institutional_holders
+    frame = yf.Ticker(ticker).institutional_holders
     if frame is None or getattr(frame, "empty", True):
         return []
     rows: List[Dict[str, Any]] = []
@@ -485,10 +485,10 @@ def _default_holders_loader(symbol: str) -> List[Dict[str, Any]]:
     return rows
 
 
-def _default_insider_loader(symbol: str) -> List[Dict[str, Any]]:
+def _default_insider_loader(ticker: str) -> List[Dict[str, Any]]:
     import yfinance as yf
 
-    frame = yf.Ticker(symbol).insider_transactions
+    frame = yf.Ticker(ticker).insider_transactions
     if frame is None or getattr(frame, "empty", True):
         return []
     rows: List[Dict[str, Any]] = []
@@ -520,11 +520,11 @@ def _default_insider_loader(symbol: str) -> List[Dict[str, Any]]:
 #: Yahoo for the options block (owner decision 2026-07-24: Yahoo's
 #: intraday chains carry zero/absent OI until their overnight update,
 #: which a real NVDA run surfaced as a bogus "put/call OI ratio 0").
-CBOE_OPTIONS_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
-CBOE_QUOTE_PAGE = "https://www.cboe.com/delayed_quotes/{symbol}/quote_table"
+CBOE_OPTIONS_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{ticker}.json"
+CBOE_QUOTE_PAGE = "https://www.cboe.com/delayed_quotes/{ticker}/quote_table"
 _CBOE_TIMEOUT_SECONDS = 20
 
-#: OCC option symbol: root + YYMMDD expiration + C/P + strike×1000.
+#: OCC option ticker: root + YYMMDD expiration + C/P + strike×1000.
 _OPTION_SYMBOL_RE = re.compile(r"^[A-Z.]+(\d{6})([CP])(\d{8})$")
 
 _CBOE_SIDE_KEYS = {"C": ("call_oi", "call_volume"), "P": ("put_oi", "put_volume")}
@@ -534,7 +534,7 @@ def _expiration_iso(yymmdd: str) -> str:
     return f"20{yymmdd[:2]}-{yymmdd[2:4]}-{yymmdd[4:6]}"
 
 
-def _default_options_loader(symbol: str) -> Dict[str, Any]:
+def _default_options_loader(ticker: str) -> Dict[str, Any]:
     """The CBOE board: underlying price + 30-day ATM implied volatility
     + per-expiration OI/volume totals and at-the-money quotes for ALL
     listed expirations (one request carries the whole board). A side's
@@ -543,7 +543,7 @@ def _default_options_loader(symbol: str) -> Dict[str, Any]:
     import requests
 
     response = requests.get(
-        CBOE_OPTIONS_URL.format(symbol=symbol.upper()),
+        CBOE_OPTIONS_URL.format(ticker=ticker.upper()),
         timeout=_CBOE_TIMEOUT_SECONDS,
         headers={"User-Agent": "daily-stock-analysis"},
     )
@@ -608,12 +608,12 @@ def _atm_quote(
     }
 
 
-def _default_earnings_lookup(symbol: str) -> Optional[str]:
+def _default_earnings_lookup(ticker: str) -> Optional[str]:
     """Next report date (ISO) for the implied report-day move; None when
     no report is scheduled or the calendar lookup failed."""
     from ..earnings import next_earnings_info
 
-    return next_earnings_info(symbol, Market.US).next_date
+    return next_earnings_info(ticker, Market.US).next_date
 
 
 def _default_today() -> date:
@@ -625,10 +625,10 @@ def _default_today() -> date:
 # ---------------------------------------------------------------------------
 
 
-class PositioningUSProvider(DimensionProvider):
+class PositioningUSProvider(DataReportProvider):
     """NUMERIC US positioning: short interest, ownership, insiders, options."""
 
-    dimension = "positioning"
+    name = "positioning"
     kind = SourceKind.NUMERIC
 
     def __init__(
@@ -652,21 +652,21 @@ class PositioningUSProvider(DimensionProvider):
         # A-share margin balances / HK short positions are separate designs.
         return market == Market.US
 
-    def collect(self, symbol: str) -> DimensionResult:
+    def collect(self, ticker: str) -> DataReport:
         citations: List[Citation] = []
         warnings: List[str] = []
-        field_notes: Dict[str, List[str]] = {}
+        field_warnings: Dict[str, List[str]] = {}
         formulas: Dict[str, Any] = {}
 
-        info = self._load_info(symbol, warnings, field_notes)
+        info = self._load_info(ticker, warnings, field_warnings)
         short = short_interest_metrics(info or {})
         ownership = ownership_metrics(
-            info or {}, self._load_holders(symbol, info, warnings, field_notes)
+            info or {}, self._load_holders(ticker, info, warnings, field_warnings)
         )
-        insiders = self._load_insiders(symbol, warnings, field_notes)
-        board = self._load_board(symbol, warnings, field_notes)
+        insiders = self._load_insiders(ticker, warnings, field_warnings)
+        board = self._load_board(ticker, warnings, field_warnings)
         options, report_move = self._options_blocks(
-            symbol, board, warnings, field_notes
+            ticker, board, warnings, field_warnings
         )
         # Group order = display order (TODO.md final-truth list).
         payload: Dict[str, Any] = {
@@ -679,82 +679,82 @@ class PositioningUSProvider(DimensionProvider):
 
         # These checks attach the sources' citations and blank-field
         # notes as side effects.
-        self._short_ok(symbol, info, short, citations, warnings, field_notes)
+        self._short_ok(ticker, info, short, citations, warnings, field_warnings)
         self._ownership_ok(
-            symbol, info, ownership, citations, warnings, field_notes
+            ticker, info, ownership, citations, warnings, field_warnings
         )
         options_ok = bool(board and board.get("chains"))
         if options_ok:
             citations.append(
                 Citation(
                     source_name="CBOE delayed quotes (options chain)",
-                    url=CBOE_QUOTE_PAGE.format(symbol=symbol.lower()),
+                    url=CBOE_QUOTE_PAGE.format(ticker=ticker.lower()),
                 )
             )
 
         # Even with every block down the payload ships (all fields
         # blank, each with its note) — degradation lives on the fields,
         # never on a card-level grade (2026-08-19).
-        return DimensionResult(
-            dimension=self.dimension,
+        return DataReport(
+            name=self.name,
             kind=self.kind,
             payload=payload,
             citations=citations,
             warnings=warnings,
             formulas=formulas or None,
-            field_notes=field_notes or None,
+            field_warnings=field_warnings or None,
         )
 
     # ---- source fetches -------------------------------------------------
 
     def _load_info(
         self,
-        symbol: str,
+        ticker: str,
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Optional[Mapping[str, Any]]:
         try:
-            return self._info_loader(symbol) or {}
+            return self._info_loader(ticker) or {}
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
-                f"Yahoo summary failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"Yahoo summary failed for {ticker}: {exc}",
                 SHORT_INTEREST_FIELDS + OWNERSHIP_FIELDS,
             )
             return None
 
     def _load_holders(
         self,
-        symbol: str,
+        ticker: str,
         info: Optional[Mapping[str, Any]],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Optional[Sequence[Mapping[str, Any]]]:
         if info is None:
             return None  # the shared fetch failure is already on the warnings
         try:
-            return self._holders_loader(symbol)
+            return self._holders_loader(ticker)
         except Exception as exc:
             # Concentration + as-of alone degrade; the summary fields count.
-            note_fields(
-                warnings, field_notes,
-                f"institutional holders failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"institutional holders failed for {ticker}: {exc}",
                 ("ownership.top10_institutions_pct", "meta.ownership_as_of"),
             )
             return None
 
     def _load_insiders(
         self,
-        symbol: str,
+        ticker: str,
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Optional[Dict[str, Any]]:
         try:
-            rows = self._insider_loader(symbol)
+            rows = self._insider_loader(ticker)
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
-                f"insider transactions failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"insider transactions failed for {ticker}: {exc}",
                 INSIDER_FIELDS,
             )
             return None
@@ -762,9 +762,9 @@ class PositioningUSProvider(DimensionProvider):
             # An empty table is indistinguishable from a source outage —
             # zero counts are only real when computed from actual rows
             # (no defaults on missing data, owner rule 2026-07-24).
-            note_fields(
-                warnings, field_notes,
-                f"Yahoo returned no insider transaction rows for {symbol} — "
+            warn_fields(
+                warnings, field_warnings,
+                f"Yahoo returned no insider transaction rows for {ticker} — "
                 "insider trades omitted",
                 INSIDER_FIELDS,
             )
@@ -773,23 +773,23 @@ class PositioningUSProvider(DimensionProvider):
 
     def _load_board(
         self,
-        symbol: str,
+        ticker: str,
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Optional[Mapping[str, Any]]:
         try:
-            board = self._options_loader(symbol)
+            board = self._options_loader(ticker)
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
-                f"options chain failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"options chain failed for {ticker}: {exc}",
                 OPTIONS_FIELDS,
             )
             return None
         if not board or not board.get("chains"):
-            note_fields(
-                warnings, field_notes,
-                f"no listed options found for {symbol}",
+            warn_fields(
+                warnings, field_warnings,
+                f"no listed options found for {ticker}",
                 OPTIONS_FIELDS,
             )
             return None
@@ -797,41 +797,41 @@ class PositioningUSProvider(DimensionProvider):
 
     def _options_blocks(
         self,
-        symbol: str,
+        ticker: str,
         board: Optional[Mapping[str, Any]],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         if board is None:
             return {}, None
         metrics, option_notes = options_metrics(board)
         for message, paths in option_notes:
-            note_fields(warnings, field_notes, message, paths)
+            warn_fields(warnings, field_warnings, message, paths)
 
         earnings_date: Optional[str] = None
         try:
-            earnings_date = self._earnings_lookup(symbol)
+            earnings_date = self._earnings_lookup(ticker)
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
-                f"earnings date lookup failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"earnings date lookup failed for {ticker}: {exc}",
                 (REPORT_MOVE_FIELD,),
             )
         move, move_warning = implied_report_move(board, earnings_date, self._today())
         if move_warning:
-            note_fields(
-                warnings, field_notes, move_warning, (REPORT_MOVE_FIELD,)
+            warn_fields(
+                warnings, field_warnings, move_warning, (REPORT_MOVE_FIELD,)
             )
         return metrics, move
 
     def _short_ok(
         self,
-        symbol: str,
+        ticker: str,
         info: Optional[Mapping[str, Any]],
         short: Mapping[str, Any],
         citations: List[Citation],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> bool:
         if info is None:
             return False  # the fetch failure is already on the warnings
@@ -842,42 +842,42 @@ class PositioningUSProvider(DimensionProvider):
         }
         if not any(value is not None for value in published.values()):
             # ok-but-empty is the silent-blank trap: surface it explicitly.
-            note_fields(
-                warnings, field_notes,
-                f"Yahoo returned no short-interest fields for {symbol}",
+            warn_fields(
+                warnings, field_warnings,
+                f"Yahoo returned no short-interest fields for {ticker}",
                 SHORT_INTEREST_FIELDS,
             )
             return False
         citations.append(
             Citation(
                 source_name="FINRA short interest via Yahoo Finance (yfinance)",
-                url=f"{YAHOO_QUOTE_URL.format(symbol=symbol)}/key-statistics",
+                url=f"{YAHOO_QUOTE_URL.format(ticker=ticker)}/key-statistics",
             )
         )
         return True
 
     def _ownership_ok(
         self,
-        symbol: str,
+        ticker: str,
         info: Optional[Mapping[str, Any]],
         ownership: Mapping[str, Any],
         citations: List[Citation],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> bool:
         if info is None:
             return False
         if not any(value is not None for value in ownership.values()):
-            note_fields(
-                warnings, field_notes,
-                f"Yahoo returned no ownership fields for {symbol}",
+            warn_fields(
+                warnings, field_warnings,
+                f"Yahoo returned no ownership fields for {ticker}",
                 OWNERSHIP_FIELDS,
             )
             return False
         citations.append(
             Citation(
                 source_name="13F institutional holdings via Yahoo Finance (yfinance)",
-                url=f"{YAHOO_QUOTE_URL.format(symbol=symbol)}/holders",
+                url=f"{YAHOO_QUOTE_URL.format(ticker=ticker)}/holders",
             )
         )
         return True

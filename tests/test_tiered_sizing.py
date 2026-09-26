@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Offline tests for the deterministic position-sizing engine (v2 slice 1).
 
-Fixed-fractional sizing: shares = (capital * risk_fraction) / loss_per_share,
+Fixed-fractional sizing: shares = (capital * risk_pct) / loss_per_share,
 where loss_per_share = entry - stop. Every refusal path must carry an
 explicit reason code — never a silent zero. (Fee rate and the position
 cap were removed 2026-07-22; they return as user inputs later.)
@@ -30,7 +30,7 @@ def _inputs(**overrides) -> SizingInputs:
     """A valid US buy that sizes cleanly; tests override one field at a time."""
     base = dict(
         capital=100_000.0,
-        risk_fraction=0.005,
+        risk_pct=0.5,
         entry=210.0,
         stop_loss=202.0,
         outlook=Outlook.BULLISH,
@@ -61,7 +61,7 @@ class TestFormula(unittest.TestCase):
     def test_fraction_floors_to_a_thousandth_of_a_share(self):
         # Budget 1; loss/share 3 -> 0.3333… -> 0.333.
         result = size_position(
-            _inputs(capital=100.0, risk_fraction=0.01, entry=10.0, stop_loss=7.0)
+            _inputs(capital=100.0, risk_pct=1, entry=10.0, stop_loss=7.0)
         )
         self.assertEqual(result.shares, 0.333)
 
@@ -80,7 +80,7 @@ class TestFormula(unittest.TestCase):
     def test_loss_per_share_is_the_entry_stop_distance(self):
         # Budget 300, loss/share 2 -> exactly 150 shares (no fee term).
         result = size_position(
-            _inputs(capital=120_000.0, risk_fraction=0.0025, entry=100.0, stop_loss=98.0)
+            _inputs(capital=120_000.0, risk_pct=0.25, entry=100.0, stop_loss=98.0)
         )
         self.assertEqual(result.shares, 150)
         self.assertAlmostEqual(result.loss_per_share, 2.0)
@@ -92,7 +92,7 @@ class TestGuardrails(unittest.TestCase):
         # loss/share 1 -> 500 shares = a 50k position on 50k capital; the
         # old 25% cap would have cut this to 125 — removed 2026-07-22.
         result = size_position(
-            _inputs(capital=50_000.0, risk_fraction=0.01, entry=100.0, stop_loss=99.0)
+            _inputs(capital=50_000.0, risk_pct=1, entry=100.0, stop_loss=99.0)
         )
         self.assertEqual(result.shares, 500)
 
@@ -101,7 +101,7 @@ class TestGuardrails(unittest.TestCase):
         result = size_position(
             _inputs(
                 capital=100_000.0,
-                risk_fraction=0.01,
+                risk_pct=1,
                 entry=10.0,
                 stop_loss=9.45,
                 market=Market.CN,
@@ -115,14 +115,14 @@ class TestGuardrails(unittest.TestCase):
 
     def test_hk_board_lot_unknown_gets_a_note(self):
         result = size_position(_inputs(market=Market.HK))
-        self.assertTrue(any("board lot" in note.lower() for note in result.notes))
+        self.assertTrue(any("board lot" in note.lower() for note in result.warnings))
 
     def test_rounds_down_to_zero_is_a_refusal_not_a_zero(self):
         # Budget 5 / loss 0.1 = 50 raw shares -> CN lot 100 floor -> 0 -> refuse.
         result = size_position(
             _inputs(
                 capital=500.0,
-                risk_fraction=0.01,
+                risk_pct=1,
                 entry=10.0,
                 stop_loss=9.9,
                 market=Market.CN,
@@ -135,15 +135,15 @@ class TestGuardrails(unittest.TestCase):
         # Budget 0.01 / loss 20 = 0.0005 shares -> below the fractional
         # step -> refuse, and the message names the step.
         result = size_position(
-            _inputs(capital=1.0, risk_fraction=0.01, entry=100.0, stop_loss=80.0)
+            _inputs(capital=1.0, risk_pct=1, entry=100.0, stop_loss=80.0)
         )
         self.assertIsNone(result.shares)
         self.assertEqual(result.reason_code, RefusalReason.TOO_SMALL)
         self.assertIn("0.001 of a share", result.refusal_reason)
 
     def test_high_risk_fraction_gets_a_note(self):
-        result = size_position(_inputs(risk_fraction=0.08))
-        self.assertTrue(any("risk" in note.lower() for note in result.notes))
+        result = size_position(_inputs(risk_pct=8))
+        self.assertTrue(any("risk" in note.lower() for note in result.warnings))
 
 
 class TestRefusals(unittest.TestCase):
@@ -154,7 +154,7 @@ class TestRefusals(unittest.TestCase):
         self.assertTrue(result.refusal_reason)
 
     def test_hold_and_sell_and_unknown_are_not_sized(self):
-        for outlook in (Outlook.NEUTRAL, Outlook.BEARISH, Outlook.UNKNOWN):
+        for outlook in (Outlook.NEUTRAL, Outlook.BEARISH, Outlook.NO_OUTLOOK):
             self._assert_refused(
                 size_position(_inputs(outlook=outlook)), RefusalReason.NOT_BULLISH
             )
@@ -162,11 +162,11 @@ class TestRefusals(unittest.TestCase):
     def test_missing_capital_or_risk_means_sizing_off(self):
         self._assert_refused(size_position(_inputs(capital=None)), RefusalReason.SIZING_OFF)
         self._assert_refused(
-            size_position(_inputs(risk_fraction=None)), RefusalReason.SIZING_OFF
+            size_position(_inputs(risk_pct=None)), RefusalReason.SIZING_OFF
         )
 
     def test_sizing_off_message_names_only_the_missing_input(self):
-        only_risk_missing = size_position(_inputs(risk_fraction=None))
+        only_risk_missing = size_position(_inputs(risk_pct=None))
         self.assertEqual(
             only_risk_missing.refusal_reason,
             "Sizing is off: risk per trade was not provided.",
@@ -176,7 +176,7 @@ class TestRefusals(unittest.TestCase):
             only_capital_missing.refusal_reason,
             "Sizing is off: capital was not provided.",
         )
-        both_missing = size_position(_inputs(capital=None, risk_fraction=None))
+        both_missing = size_position(_inputs(capital=None, risk_pct=None))
         self.assertEqual(
             both_missing.refusal_reason,
             "Sizing is off: capital and risk per trade were not provided.",
@@ -198,8 +198,8 @@ class TestRefusals(unittest.TestCase):
         for overrides in (
             {"capital": 0.0},
             {"capital": -1.0},
-            {"risk_fraction": 0.0},
-            {"risk_fraction": 1.0},
+            {"risk_pct": 0.0},
+            {"risk_pct": 100.0},
             {"entry": 0.0},
         ):
             self._assert_refused(
@@ -213,7 +213,7 @@ class TestSizingSlots(unittest.TestCase):
         slots = to_sizing_slots(inputs, size_position(inputs))
         self.assertFalse(slots.is_empty)
         self.assertEqual(slots.capital, inputs.capital)
-        self.assertEqual(slots.risk_fraction, inputs.risk_fraction)
+        self.assertEqual(slots.risk_pct, inputs.risk_pct)
         self.assertEqual(slots.shares, 62.5)
 
     def test_refused_result_keeps_slots_empty(self):

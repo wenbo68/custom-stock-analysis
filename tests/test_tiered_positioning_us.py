@@ -271,18 +271,18 @@ class ImpliedReportMoveTest(unittest.TestCase):
 
 def _provider(**overrides):
     loaders = {
-        "info_loader": lambda symbol: _INFO,
-        "holders_loader": lambda symbol: _HOLDERS,
-        "insider_loader": lambda symbol: _INSIDER_ROWS,
-        "options_loader": lambda symbol: _BOARD,
-        "earnings_lookup": lambda symbol: "2026-08-10",
+        "info_loader": lambda ticker: _INFO,
+        "holders_loader": lambda ticker: _HOLDERS,
+        "insider_loader": lambda ticker: _INSIDER_ROWS,
+        "options_loader": lambda ticker: _BOARD,
+        "earnings_lookup": lambda ticker: "2026-08-10",
         "today": lambda: _TODAY,
     }
     loaders.update(overrides)
     return PositioningUSProvider(**loaders)
 
 
-def _boom(symbol):
+def _boom(ticker):
     raise RuntimeError("boom")
 
 
@@ -298,9 +298,9 @@ class ProviderTest(unittest.TestCase):
 
     def test_all_blocks_up_carries_all_groups_envelopes_and_citations(self):
         result = _provider().collect("AAPL")
-        self.assertEqual(result.dimension, "positioning")
+        self.assertEqual(result.name, "positioning")
         self.assertEqual(result.kind, SourceKind.NUMERIC)
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
         self.assertEqual(sorted(result.payload), _GROUPS)
         self.assertEqual(len(result.citations), 3)
         self.assertEqual(result.warnings, [])
@@ -338,7 +338,7 @@ class ProviderTest(unittest.TestCase):
 
     def test_one_failing_block_blanks_its_envelopes_with_notes(self):
         result = _provider(options_loader=_boom).collect("AAPL")
-        self.assertTrue(result.is_actionable)  # payload still ships
+        self.assertTrue(result.counted)  # payload still ships
         # The group stays present; every field is a blank envelope.
         options = result.payload["options"]
         self.assertTrue(all(metric_value(node) is None for node in options.values()))
@@ -352,7 +352,7 @@ class ProviderTest(unittest.TestCase):
 
     def test_no_listed_options_is_an_explicit_warning(self):
         result = _provider(
-            options_loader=lambda symbol: {"chains": []}
+            options_loader=lambda ticker: {"chains": []}
         ).collect("AAPL")
         options = result.payload["options"]
         self.assertTrue(all(metric_value(node) is None for node in options.values()))
@@ -373,8 +373,8 @@ class ProviderTest(unittest.TestCase):
 
     def test_empty_info_is_surfaced_never_a_silent_blank(self):
         result = _provider(
-            info_loader=lambda symbol: {},
-            holders_loader=lambda symbol: [],
+            info_loader=lambda ticker: {},
+            holders_loader=lambda ticker: [],
         ).collect("AAPL")
         self.assertTrue(
             any("no short-interest fields" in w for w in result.warnings)
@@ -385,8 +385,8 @@ class ProviderTest(unittest.TestCase):
         # An empty table could be a Yahoo outage — never claim "0 buys,
         # 0 sells" from it (owner rule 2026-07-24). Zeros stay real only
         # when computed from actual rows.
-        result = _provider(insider_loader=lambda symbol: []).collect("AAPL")
-        self.assertTrue(result.is_actionable)  # payload still ships
+        result = _provider(insider_loader=lambda ticker: []).collect("AAPL")
+        self.assertTrue(result.counted)  # payload still ships
         insiders = result.payload["insider_activity_6m"]
         self.assertTrue(all(metric_value(node) is None for node in insiders.values()))
         self.assertTrue(
@@ -422,10 +422,10 @@ class ProviderTest(unittest.TestCase):
         # the map misses falls back to the card-level list.
         result = _provider(
             info_loader=_boom,
-            insider_loader=lambda symbol: [],
-            earnings_lookup=lambda symbol: "2026-12-01",  # >21 days out
+            insider_loader=lambda ticker: [],
+            earnings_lookup=lambda ticker: "2026-12-01",  # >21 days out
         ).collect("AAPL")
-        notes = result.field_notes
+        notes = result.field_warnings
         self.assertIsNotNone(notes)
         # The far-away report note sits on the implied-move field only.
         self.assertTrue(
@@ -464,7 +464,7 @@ class ProviderTest(unittest.TestCase):
                 )
         # An all-blank NUMERIC payload is still present, so downstream
         # numeric consumers gate per-field, not on the card.
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
         # Every block's failure lands as a warning with per-field notes.
         for message in (
             "Yahoo summary failed",
@@ -474,7 +474,7 @@ class ProviderTest(unittest.TestCase):
             self.assertTrue(any(message in w for w in result.warnings), message)
         self.assertTrue(
             any("options chain failed" in note
-                for note in result.field_notes["options.put_call_oi_ratio"])
+                for note in result.field_warnings["options.put_call_oi_ratio"])
         )
 
 

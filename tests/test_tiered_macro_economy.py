@@ -225,7 +225,7 @@ class TestMacroEconomyProvider(unittest.TestCase):
         self.assertTrue(
             any(
                 "VIXCLS" in note
-                for note in (result.field_notes or {}).get("markets.vix", [])
+                for note in (result.field_warnings or {}).get("markets.vix", [])
             )
         )
 
@@ -267,13 +267,13 @@ class TestMacroEconomyProvider(unittest.TestCase):
             self.assertIsNone(
                 metric_value(result.payload[group][key]), f"{group}.{key}"
             )
-            self.assertIn(f"{group}.{key}", result.field_notes or {})
+            self.assertIn(f"{group}.{key}", result.field_warnings or {})
         self.assertTrue(
             any("macro fields lacking data" in w for w in result.warnings)
         )
         # A NUMERIC card with a payload stays actionable — gating moved
         # to the field level (each blank value is its own gate).
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
         # A total failure is never day-cached: the next run must retry.
         self.assertEqual(self.cache.keys(), [])
 
@@ -334,7 +334,7 @@ class TestMacroEconomyProvider(unittest.TestCase):
     def test_same_day_cache_missing_payload_is_refetched(self):
         # The reader requires "payload"; a v2-keyed entry without it is
         # ignored and the data refetched, never misread.
-        self.cache.data[f"macro_economy_us_v2_{TODAY.isoformat()}"] = '{"warnings": []}'
+        self.cache.data[f"macro_economy_us_v3_{TODAY.isoformat()}"] = '{"warnings": []}'
         calls = []
         result = self._provider(fetcher=_fake_fetcher(calls)).collect("AAPL")
         self.assertEqual(len(calls), len(SERIES_IDS))  # refetched
@@ -344,7 +344,7 @@ class TestMacroEconomyProvider(unittest.TestCase):
         calls = []
         provider = self._provider(fetcher=_fake_fetcher(calls))
         provider.collect("AAPL")
-        key = next(k for k in self.cache.keys() if "_v2_" in k)
+        key = next(k for k in self.cache.keys() if "_v3_" in k)
         self.cache.data[key] = "{not json"
         fresh = self._provider(fetcher=_fake_fetcher(calls))
         result = fresh.collect("AAPL")
@@ -375,8 +375,8 @@ class TestRegistryIncludesMacro(unittest.TestCase):
         from src.tiered_analysis.providers.registry import get_providers
 
         for market in (Market.US, Market.CN, Market.KR):
-            dimensions = [p.dimension for p in get_providers(market)]
-            self.assertIn("macro_economy", dimensions)
+            data_reports = [p.name for p in get_providers(market)]
+            self.assertIn("macro_economy", data_reports)
 
 
 @pytest.mark.network

@@ -8,13 +8,13 @@ from typing import List, Optional
 
 from src.tiered_analysis.cross_fields import RATIO_KEY, enrich_cross_fields
 from src.tiered_analysis.providers.base import (
-    DimensionResult,
+    DataReport,
     SourceKind,
 )
 from src.tiered_analysis.providers.technicals import Bar, make_metric, metric_value
 
 
-def _technicals(with_benchmark: bool = True) -> DimensionResult:
+def _technicals(with_benchmark: bool = True) -> DataReport:
     payload = {
         "market": {
             "regime": make_metric("market trend", "x", "bullish"),
@@ -36,8 +36,8 @@ def _technicals(with_benchmark: bool = True) -> DimensionResult:
             "inputs": {"stock_return_3m": 12.0, "index_return_3m": 6.0},
         },
     } if with_benchmark else {}
-    return DimensionResult(
-        dimension="technicals",
+    return DataReport(
+        name="technicals",
         kind=SourceKind.NUMERIC,
         payload=payload,
         formulas=formulas or None,
@@ -47,9 +47,9 @@ def _technicals(with_benchmark: bool = True) -> DimensionResult:
 def _fundamentals(
     sector: Optional[str] = "Technology",
     reaction_avg: Optional[float] = 4.0,
-) -> DimensionResult:
-    return DimensionResult(
-        dimension="fundamentals",
+) -> DataReport:
+    return DataReport(
+        name="fundamentals",
         kind=SourceKind.NUMERIC,
         payload={
             "meta": {"sector": make_metric("sector", "x", sector)},
@@ -63,9 +63,9 @@ def _fundamentals(
     )
 
 
-def _positioning(implied: Optional[float] = 6.2) -> DimensionResult:
-    return DimensionResult(
-        dimension="positioning",
+def _positioning(implied: Optional[float] = 6.2) -> DataReport:
+    return DataReport(
+        name="positioning",
         kind=SourceKind.NUMERIC,
         payload={
             "options": {
@@ -83,9 +83,9 @@ def _etf_loader(calls: Optional[List[str]] = None):
     # windows -> sector return 10.0 in both.
     closes = [100.0] * 43 + [110.0] * 21
 
-    def load(symbol: str):
+    def load(ticker: str):
         if calls is not None:
-            calls.append(symbol)
+            calls.append(ticker)
         return [Bar(high=c, low=c, close=c) for c in closes]
 
     return load
@@ -176,7 +176,7 @@ class TestSectorEnrichment(unittest.TestCase):
         )
 
     def test_etf_fetch_failure_degrades_with_warning(self):
-        def boom(symbol: str):
+        def boom(ticker: str):
             raise RuntimeError("etf source down")
 
         enriched = self._run(loader=boom)
@@ -233,7 +233,7 @@ class TestReportMoveRatio(unittest.TestCase):
         self.assertNotIn(f"options.{RATIO_KEY}", enriched[2].formulas or {})
         # The blank names its missing ingredient (2026-08-23) so the
         # report page can link straight to the blank ingredient row.
-        notes = enriched[2].field_notes[f"options.{RATIO_KEY}"]
+        notes = enriched[2].field_warnings[f"options.{RATIO_KEY}"]
         self.assertTrue(
             any(note.startswith("implied report-day move missing")
                 for note in notes)
@@ -247,7 +247,7 @@ class TestReportMoveRatio(unittest.TestCase):
         self.assertIsNone(
             metric_value(enriched[2].payload["options"][RATIO_KEY])
         )
-        notes = enriched[2].field_notes[f"options.{RATIO_KEY}"]
+        notes = enriched[2].field_warnings[f"options.{RATIO_KEY}"]
         self.assertTrue(
             any(note.startswith("realized 4q average report-day move")
                 for note in notes)
@@ -262,12 +262,12 @@ class TestReportMoveRatio(unittest.TestCase):
             positioning=_positioning(implied=None),
             fundamentals=_fundamentals(reaction_avg=None),
         )
-        notes = enriched[2].field_notes[f"options.{RATIO_KEY}"]
+        notes = enriched[2].field_warnings[f"options.{RATIO_KEY}"]
         self.assertEqual(len(notes), 2)
 
     def test_published_ratio_adds_no_ingredient_notes(self):
         enriched = self._run()
-        notes = (enriched[2].field_notes or {}).get(
+        notes = (enriched[2].field_warnings or {}).get(
             f"options.{RATIO_KEY}", []
         )
         self.assertEqual(notes, [])

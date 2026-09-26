@@ -20,7 +20,7 @@ source of truth per field. Groups follow the truth spec:
 Valid context for every market, so the provider supports all markets
 and its result is cached **once per region per day and never fetched
 per ticker** (economic data is low-frequency and shared by every
-symbol; the payload is deliberately stock-independent).
+ticker; the payload is deliberately stock-independent).
 
 Requires a free FRED API key: set ``FRED_API_KEY`` (see .env.example).
 """
@@ -34,11 +34,11 @@ from ..run_context import data_key
 
 from .base import (
     Citation,
-    DimensionProvider,
-    DimensionResult,
+    DataReportProvider,
+    DataReport,
     Market,
     SourceKind,
-    note_fields,
+    warn_fields,
 )
 from .technicals import make_metric, metric_value
 
@@ -299,15 +299,16 @@ def _default_release_dates_fetcher(release_id: int) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-class MacroEconomyProvider(DimensionProvider):
+class MacroEconomyProvider(DataReportProvider):
     """NUMERIC shared macro background, cached once per region per day."""
 
-    dimension = "macro_economy"
+    name = "macro_economy"
     kind = SourceKind.NUMERIC
     region = "us"
     #: Cache format marker — bump when the payload shape changes so a
     #: same-day cache written by older code is refetched, not misread.
-    cache_version = "v2"
+    # v3: the blob says field_warnings, not field_notes (2026-09-24 rename).
+    cache_version = "v3"
 
     def __init__(
         self,
@@ -324,18 +325,18 @@ class MacroEconomyProvider(DimensionProvider):
     def supports(self, market: Market) -> bool:
         return True
 
-    # The symbol is intentionally ignored: macro data is per-region.
-    def collect(self, symbol: str) -> DimensionResult:
+    # The ticker is intentionally ignored: macro data is per-region.
+    def collect(self, ticker: str) -> DataReport:
         cached = self._read_cache()
         if cached is not None:
             return cached
 
-        series, warnings, field_notes = self._fetch_series()
+        series, warnings, field_warnings = self._fetch_series()
         # A total fetch failure still ships the full payload shape (all
         # fields blank; the missing-fields sweep below pins a note on
         # every one) — degradation lives on the fields, never on a
         # card-level grade (2026-08-19).
-        payload, formulas = self._build_payload(series or {}, warnings, field_notes)
+        payload, formulas = self._build_payload(series or {}, warnings, field_warnings)
         missing = [
             f"{group}.{key}"
             for group, key in _REQUIRED_FIELDS
@@ -350,16 +351,16 @@ class MacroEconomyProvider(DimensionProvider):
                 # A missing field whose series note already explains it
                 # keeps that specific note; the aggregate covers the rest
                 # (e.g. a YoY needing more history than the series has).
-                if path not in field_notes:
-                    field_notes[path] = [message]
-        result = DimensionResult(
-            dimension=self.dimension,
+                if path not in field_warnings:
+                    field_warnings[path] = [message]
+        result = DataReport(
+            name=self.name,
             kind=self.kind,
             payload=payload,
             citations=[self._citation()],
             warnings=warnings,
             formulas=formulas or None,
-            field_notes=field_notes or None,
+            field_warnings=field_warnings or None,
         )
         # A total failure is never day-cached — the next run must retry
         # the fetch, not reread an all-blank card.
@@ -383,7 +384,7 @@ class MacroEconomyProvider(DimensionProvider):
     ]:
         series: Dict[str, List[Observation]] = {}
         warnings: List[str] = []
-        field_notes: Dict[str, List[str]] = {}
+        field_warnings: Dict[str, List[str]] = {}
         got_any = False
         for name, series_id in SERIES_IDS.items():
             try:
@@ -392,16 +393,16 @@ class MacroEconomyProvider(DimensionProvider):
                 # Not configured at all: one clear warning, no partial noise.
                 return None, [str(exc)], {}
             except Exception as exc:
-                note_fields(
-                    warnings, field_notes,
+                warn_fields(
+                    warnings, field_warnings,
                     f"FRED series {series_id} failed: {exc}",
                     SERIES_FIELDS.get(name, ()),
                 )
                 observations = []
             if not observations:
                 if not any(series_id in w for w in warnings):
-                    note_fields(
-                        warnings, field_notes,
+                    warn_fields(
+                        warnings, field_warnings,
                         f"FRED series {series_id} returned no data",
                         SERIES_FIELDS.get(name, ()),
                     )
@@ -409,14 +410,14 @@ class MacroEconomyProvider(DimensionProvider):
             got_any = got_any or bool(observations)
         if not got_any:
             return None, warnings, {}
-        return series, warnings, field_notes
+        return series, warnings, field_warnings
 
     def _next_release_date(
         self,
         release_id: int,
         label: str,
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
         field_path: str,
     ) -> Optional[str]:
         try:
@@ -424,16 +425,16 @@ class MacroEconomyProvider(DimensionProvider):
         except MacroConfigError:
             return None
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 f"FRED release calendar for {label} failed: {exc}",
                 (field_path,),
             )
             return None
         upcoming = next_date_after(dates, self._today())
         if upcoming is None:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 f"no upcoming {label} release date found",
                 (field_path,),
             )
@@ -445,7 +446,7 @@ class MacroEconomyProvider(DimensionProvider):
         self,
         series: Dict[str, List[Observation]],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def obs(name: str) -> List[Observation]:
             return series.get(name, [])
@@ -493,19 +494,19 @@ class MacroEconomyProvider(DimensionProvider):
 
         # Events.
         next_cpi = self._next_release_date(
-            CPI_RELEASE_ID, "inflation data (CPI)", warnings, field_notes,
+            CPI_RELEASE_ID, "inflation data (CPI)", warnings, field_warnings,
             "events.next_cpi_release_date",
         )
         next_jobs = self._next_release_date(
             JOBS_RELEASE_ID, "employment data (jobs report)", warnings,
-            field_notes, "events.next_jobs_release_date",
+            field_warnings, "events.next_jobs_release_date",
         )
         next_decision = next_date_after(
             list(FOMC_DECISION_DATES), self._today()
         )
         if next_decision is None:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 "FOMC decision-date table exhausted; extend "
                 "FOMC_DECISION_DATES from the Fed's published calendar",
                 ("events.next_rate_decision_date",),
@@ -934,24 +935,24 @@ class MacroEconomyProvider(DimensionProvider):
             f"{self._today().isoformat()}"
         )
 
-    def _read_cache(self) -> Optional[DimensionResult]:
+    def _read_cache(self) -> Optional[DataReport]:
         raw = self._cache.read(self._cache_key())
         if not isinstance(raw, dict):
             return None
         try:
-            return DimensionResult(
-                dimension=self.dimension,
+            return DataReport(
+                name=self.name,
                 kind=self.kind,
                 payload=raw["payload"],
                 citations=[self._citation()],
                 warnings=list(raw.get("warnings", [])),
                 formulas=raw.get("formulas"),
-                field_notes=raw.get("field_notes"),
+                field_warnings=raw.get("field_warnings"),
             )
         except Exception:
             return None  # corrupt cache: refetch, never fail on cache
 
-    def _write_cache(self, result: DimensionResult) -> None:
+    def _write_cache(self, result: DataReport) -> None:
         # The store never raises: a cold cache tomorrow is acceptable,
         # failing the run is not.
         self._cache.write(
@@ -960,6 +961,6 @@ class MacroEconomyProvider(DimensionProvider):
                 "payload": result.payload,
                 "warnings": result.warnings,
                 "formulas": result.formulas,
-                "field_notes": result.field_notes,
+                "field_warnings": result.field_warnings,
             },
         )

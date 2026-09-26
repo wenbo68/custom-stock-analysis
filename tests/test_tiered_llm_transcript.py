@@ -37,23 +37,23 @@ class TestLlmTranscript(unittest.TestCase):
         transcript, entries = _capturing_transcript()
         transcript.record(
             stage="world_news",
-            model="gemini/x",
+            llm="gemini/x",
             temperature=0.0,
-            prompt="the prompt",
-            reply='{"groups": [[1]]}',
-            prompt_tokens=10,
-            completion_tokens=5,
-            duration_ms=120,
+            input="the prompt",
+            output='{"groups": [[1]]}',
+            input_tokens=10,
+            output_tokens=5,
+            time_ms=120,
         )
         self.assertEqual(len(entries), 1)
         entry = entries[0]
-        self.assertEqual(entry["task_id"], "task-1")
-        self.assertEqual(entry["seq"], 1)
+        self.assertEqual(entry["run_id"], "task-1")
+        self.assertEqual(entry["call_number"], 1)
         self.assertEqual(entry["stage"], "world_news")
-        self.assertEqual(entry["model"], "gemini/x")
-        self.assertEqual(entry["prompt"], "the prompt")
-        self.assertEqual(entry["reply"], '{"groups": [[1]]}')
-        self.assertEqual(entry["prompt_tokens"], 10)
+        self.assertEqual(entry["llm"], "gemini/x")
+        self.assertEqual(entry["input"], "the prompt")
+        self.assertEqual(entry["output"], '{"groups": [[1]]}')
+        self.assertEqual(entry["input_tokens"], 10)
         self.assertIsNone(entry["error"])
         self.assertEqual(transcript.entries, 1)
 
@@ -61,9 +61,9 @@ class TestLlmTranscript(unittest.TestCase):
         transcript, entries = _capturing_transcript()
         for _ in range(3):
             transcript.record(
-                stage="s", model="m", temperature=0.0, prompt="p", reply="r"
+                stage="s", llm="m", temperature=0.0, input="p", output="r"
             )
-        self.assertEqual([e["seq"] for e in entries], [1, 2, 3])
+        self.assertEqual([e["call_number"] for e in entries], [1, 2, 3])
 
     def test_broken_writer_disables_quietly(self):
         def broken(entry):
@@ -71,17 +71,17 @@ class TestLlmTranscript(unittest.TestCase):
 
         transcript = LlmTranscript("task-1", writer=broken)
         transcript.record(  # must not raise — a transcript never fails a run
-            stage="s", model="m", temperature=0.0, prompt="p", reply="r"
+            stage="s", llm="m", temperature=0.0, input="p", output="r"
         )
         transcript.record(
-            stage="s", model="m", temperature=0.0, prompt="p", reply="r"
+            stage="s", llm="m", temperature=0.0, input="p", output="r"
         )
         self.assertEqual(transcript.entries, 0)
 
     def test_discard_counts_but_stores_nothing(self):
         transcript = LlmTranscript.discard()
         transcript.record(
-            stage="s", model="m", temperature=0.0, prompt="p", reply="r"
+            stage="s", llm="m", temperature=0.0, input="p", output="r"
         )
         self.assertEqual(transcript.entries, 1)
 
@@ -91,7 +91,7 @@ class TestLlmTranscript(unittest.TestCase):
         self.assertNotIn("transcript_entries", tracker.to_detail())
 
         transcript.record(
-            stage="s", model="m", temperature=0.0, prompt="p", reply="r"
+            stage="s", llm="m", temperature=0.0, input="p", output="r"
         )
         self.assertEqual(tracker.to_detail()["transcript_entries"], 1)
 
@@ -140,9 +140,9 @@ class TestSummarizerTranscript(unittest.TestCase):
         self.assertEqual(reply, '{"order": [1]}')
         [entry] = self.entries
         self.assertEqual(entry["stage"], "world_news")
-        self.assertEqual(entry["model"], "fake/model")
-        self.assertEqual(entry["reply"], '{"order": [1]}')
-        self.assertEqual(entry["prompt_tokens"], 7)
+        self.assertEqual(entry["llm"], "fake/model")
+        self.assertEqual(entry["output"], '{"order": [1]}')
+        self.assertEqual(entry["input_tokens"], 7)
         self.assertIsNone(entry["error"])
 
     def test_crashed_call_records_the_error_and_still_raises(self):
@@ -152,7 +152,7 @@ class TestSummarizerTranscript(unittest.TestCase):
                 self._summarize_with(fake)
 
         [entry] = self.entries
-        self.assertIsNone(entry["reply"])
+        self.assertIsNone(entry["output"])
         self.assertIn("boom", entry["error"])
         self.assertEqual(entry["stage"], "unknown")
 

@@ -45,14 +45,14 @@ story with unusual wording. ``filtered_out`` counts that free cut;
 ``off_topic`` counts what the LLM judge then dropped.
 
 The backdrop is the same for every ticker, so the screened result is
-cached ONCE PER DAY (macro_economy convention) and every symbol in a run
-reuses it — the symbol argument is intentionally ignored, and cost
+cached ONCE PER DAY (macro_economy convention) and every ticker in a run
+reuses it — the ticker argument is intentionally ignored, and cost
 stays flat no matter how many stocks a run covers. Citations ride in
 the day cache so a cache hit rebuilds them verbatim.
 
 Payload shape — same ``news_coverage`` contract as company news (the
-debate's news-row enumeration and the alt page's events renderer are
-keyed on kind/payload, not the dimension name)::
+deep analysis's news-row enumeration and the alt page's events renderer are
+keyed on kind/payload, not the data_report name)::
 
     {
       "news_coverage": {
@@ -75,11 +75,14 @@ import time
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from src.languages import DEFAULT_LANGUAGE
+
 from ..news_screen import WORLD_PROMPTS, NewsJudgmentCache, screen_news
+from ..llm_support import run_language
 from .base import (
     Citation,
-    DimensionProvider,
-    DimensionResult,
+    DataReportProvider,
+    DataReport,
     Market,
     SourceKind,
 )
@@ -114,8 +117,9 @@ WORLD_TOPICS = (
 #: launched at 7 business days; cut after the volume tests showed the
 #: extra days' events mostly die at the top-MAX_EVENTS rank anyway.
 #: 2 -> 3 calendar days (owner decision 2026-09-18, alongside the
-#: 20 -> 30 event cap and the 6-business-day company window).
-WORLD_WINDOW_DAYS = 3
+#: 20 -> 30 event cap and the 6-business-day company window); back to
+#: 2 (owner decision 2026-09-26).
+WORLD_WINDOW_DAYS = 2
 
 #: The index whose Yahoo news tab serves as the keyless backup feed —
 #: S&P 500 coverage is the closest thing Yahoo has to a general
@@ -137,7 +141,7 @@ MAX_SCREEN_ARTICLES = 3000
 ARTICLE_RETENTION_DAYS = 14
 
 #: The judgment cache's file key — one shared world file, not
-#: per-symbol (the feed is symbol-independent).
+#: per-ticker (the feed is ticker-independent).
 WORLD_CACHE_KEY = "WORLD"
 
 #: The label the screen prompts use where company news uses the ticker.
@@ -313,18 +317,19 @@ def _default_world_news_loader() -> Tuple[
     return _yahoo_world_news_loader(), []
 
 
-class WorldNewsProvider(DimensionProvider):
+class WorldNewsProvider(DataReportProvider):
     """World/macro news: AlphaVantage (Yahoo backup), screened, cited."""
 
-    dimension = "world_news"
+    name = "world_news"
     kind = SourceKind.TEXTUAL
     #: Day-cache format marker — bump when the payload shape or the
     #: collection behavior changes so a same-day cache written by older
     #: code is refetched, not misread (v2: the rolling article pool;
     #: v3: AlphaVantage/Yahoo sources + the business-day window;
     #: v4: the 2-calendar-day window, sampling off; v5: the
-    #: deterministic spam prefilter + its filtered_out counter).
-    cache_version = "v5"
+    #: deterministic spam prefilter + its filtered_out counter; v6: the
+    #: window back from 3 to 2 calendar days).
+    cache_version = "v6"
 
     def __init__(
         self,
@@ -360,9 +365,9 @@ class WorldNewsProvider(DimensionProvider):
     def supports(self, market: Market) -> bool:
         return True
 
-    # The symbol is intentionally ignored: world news is per-day, not
+    # The ticker is intentionally ignored: world news is per-day, not
     # per-stock — the day cache makes a multi-ticker run screen once.
-    def collect(self, symbol: str) -> DimensionResult:
+    def collect(self, ticker: str) -> DataReport:
         cached = self._read_cache()
         if cached is not None:
             return cached
@@ -436,8 +441,8 @@ class WorldNewsProvider(DimensionProvider):
             # shape — an empty timeline with the warning saying why
             # (degradation lives on the card notes, never on a
             # card-level grade, 2026-08-19).
-            return DimensionResult(
-                dimension=self.dimension,
+            return DataReport(
+                name=self.name,
                 kind=self.kind,
                 payload={
                     "news_coverage": {
@@ -559,8 +564,8 @@ class WorldNewsProvider(DimensionProvider):
                 item["articles_covering_event"] = event["group_size"]
             items.append(item)
 
-        result = DimensionResult(
-            dimension=self.dimension,
+        result = DataReport(
+            name=self.name,
             kind=self.kind,
             payload={
                 "news_coverage": {
@@ -618,15 +623,20 @@ class WorldNewsProvider(DimensionProvider):
     # ---- per-day cache (macro_economy convention) ----
 
     def _cache_key(self) -> str:
-        return f"world_news_{self.cache_version}_{self._today().isoformat()}"
+        # The card's sentences are written in the run's language, so each
+        # language has its own day cache; English keeps the pre-2026-09-26
+        # key so a same-day English card is not refetched.
+        language = run_language()
+        tag = "" if language == DEFAULT_LANGUAGE else f"_{language}"
+        return f"world_news_{self.cache_version}{tag}_{self._today().isoformat()}"
 
-    def _read_cache(self) -> Optional[DimensionResult]:
+    def _read_cache(self) -> Optional[DataReport]:
         raw = self._cache.read(self._cache_key())
         if not isinstance(raw, Mapping):
             return None
         try:
-            return DimensionResult(
-                dimension=self.dimension,
+            return DataReport(
+                name=self.name,
                 kind=self.kind,
                 payload=raw["payload"],
                 citations=[
@@ -643,7 +653,7 @@ class WorldNewsProvider(DimensionProvider):
         except Exception:
             return None  # corrupt cache: refetch, never fail on cache
 
-    def _write_cache(self, result: DimensionResult) -> None:
+    def _write_cache(self, result: DataReport) -> None:
         self._cache.write(
             self._cache_key(),
             {

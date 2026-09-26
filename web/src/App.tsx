@@ -1,51 +1,36 @@
-import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import './App.css';
-import { UiLanguageToggle } from './components/i18n/UiLanguageToggle';
-import { ThemeToggle } from './components/theme/ThemeToggle';
-import { UiLanguageProvider, useUiLanguage } from './contexts/UiLanguageContext';
-import { cn } from './utils/cn';
-import ChatbotPage from './pages/ChatbotPage';
-import TieredAltPage from './pages/TieredAltPage';
+import { HeaderControls } from './components/common/HeaderControls';
+import { UiLanguageProvider } from './contexts/UiLanguageContext';
+import ChatPage from './pages/ChatPage';
+import AnalysisPage from './pages/AnalysisPage';
 
-const navClass = ({ isActive }: { isActive: boolean }) =>
-  cn('text-sm transition', isActive ? 'font-semibold text-gray-200' : 'text-gray-500 hover:text-gray-300');
-
-// The two pages side by side in the header: the analysis page and the
-// chat about it.
-const HeaderNav = () => {
-  const { t } = useUiLanguage();
-  return (
-    <nav aria-label="Pages" className="flex items-center gap-4">
-      <NavLink to="/" end className={navClass}>
-        {t('chat.nav.analysis')}
-      </NavLink>
-      <NavLink to="/chatbot" className={navClass}>
-        {t('chat.nav.chat')}
-      </NavLink>
-    </nav>
-  );
-};
+// The analysis page sits under a header row holding the three menus
+// (mode, language, theme) at the right. The chat page draws the same
+// menus itself, at the top of its conversation column, so its history
+// column can start at the very top (owner request 2026-09-26).
+const HeaderLayout = () => (
+  <>
+    <header className="mx-auto flex w-full max-w-7xl items-center justify-end px-4 pt-4 md:px-6 lg:px-8">
+      <HeaderControls />
+    </header>
+    <Outlet />
+  </>
+);
 
 function App() {
   return (
     <UiLanguageProvider>
       <BrowserRouter>
-        <div className="min-h-screen bg-background text-foreground">
-          <header className="mx-auto flex w-full max-w-7xl items-center justify-between px-4 pt-4 md:px-6 lg:px-8">
-            <div className="flex items-center gap-6">
-              <span className="text-sm font-semibold tracking-wide text-gray-400">
-                Custom Stock Analysis
-              </span>
-              <HeaderNav />
-            </div>
-            <div className="flex items-center gap-2">
-              <UiLanguageToggle />
-              <ThemeToggle />
-            </div>
-          </header>
+        {/* A window-high column that scrolls as a whole: the analysis page
+            grows past it and scrolls; the chat page fills it and scrolls
+            inside its own two panels (owner request 2026-09-23). */}
+        <div className="flex h-dvh flex-col overflow-y-auto bg-background text-foreground">
           <Routes>
-            <Route path="/" element={<TieredAltPage />} />
-            <Route path="/chatbot" element={<ChatbotPage />} />
+            <Route element={<HeaderLayout />}>
+              <Route path="/" element={<AnalysisPage />} />
+            </Route>
+            <Route path="/chat" element={<ChatPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

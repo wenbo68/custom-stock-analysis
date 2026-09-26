@@ -3,24 +3,24 @@
 
 Two gates keep every tiered run anchored on completed daily bars:
 
-- The CLOCK gate (interactive runs): a run is rejected from market open
+- The MARKET-OPEN check (interactive runs): a run is rejected from market open
   until ``RUN_BUFFER_MINUTES`` past the close, in the exchange's own
   timezone. Weekends and pre-open mornings are allowed; holidays are only
   known when exchange-calendars is installed (without it a holiday
   daytime is a false block — accepted for now). The web popup offers a
-  "run anyway" override, which the API honors.
+  "run anyway" choice, which the API honors as ``run_anyway``.
 - The STALENESS gate (all runs, enforced inside the pipeline): after the
   bars are fetched and BEFORE any LLM call, the run stops when the
   newest completed bar is older than the most recent completed trading
   session. A stopped run FAILS (``StaleDataError``, owner decision
   2026-09-17 — it used to finish with a "stopped" outlook) with a plain
   message naming the two dates; the detailed reason also goes to the
-  log. There is deliberately NO override here — a clock-gate "run
+  log. There is deliberately NO run-anyway here — a market-open "run
   anyway" during the trading day expects YESTERDAY's bar and passes;
   only a genuinely lagging vendor stops a run.
 
 Calendar duty is delegated to ``src.core.trading_calendar``
-(exchange-calendars under the hood). Without that library the clock gate
+(exchange-calendars under the hood). Without that library the market-open check
 fails OPEN (a run is never blocked on a guess) and the expected-session
 calculation falls back to weekday arithmetic over fixed session times —
 the constants below are that fallback only, never the primary source.
@@ -63,8 +63,8 @@ _SATURDAY = 5  # date.weekday() >= 5 → weekend
 
 
 @dataclass(frozen=True)
-class ClockGateResult:
-    """Outcome of the clock gate for one symbol."""
+class MarketOpenCheck:
+    """Outcome of the market-open check for one ticker."""
 
     blocked: bool
     market: Optional[str]
@@ -72,7 +72,7 @@ class ClockGateResult:
     detail: str
     #: Today's regular session bounds, market-local and tz-aware — always
     #: set when blocked (the popup words the hours from them), None when
-    #: the gate never got as far as a session (unknown market, override,
+    #: the gate never got as far as a session (unknown market, run anyway,
     #: weekend/no-session days).
     session_open: Optional[datetime] = None
     session_close: Optional[datetime] = None
@@ -81,7 +81,7 @@ class ClockGateResult:
 @dataclass(frozen=True)
 class MarketClock:
     """Where one market's clock stands right now: what the status route
-    reports per market, and what the clock gate reads for a symbol."""
+    reports per market, and what the market-open check reads for a ticker."""
 
     market: str
     #: IANA zone name, e.g. America/New_York.
@@ -101,15 +101,15 @@ class MarketClock:
     detail: str
 
 
-def market_for_symbol(symbol: str) -> Optional[str]:
-    """Market key ('cn'/'hk'/'us'/...) for a symbol, None when unknown."""
+def market_for_symbol(ticker: str) -> Optional[str]:
+    """Market key ('cn'/'hk'/'us'/...) for a ticker, None when unknown."""
     from src.core.trading_calendar import get_market_for_stock
 
-    return get_market_for_stock(symbol)
+    return get_market_for_stock(ticker)
 
 
 def known_markets() -> Tuple[str, ...]:
-    """Every market the clock gate knows, in a fixed order."""
+    """Every market the market-open check knows, in a fixed order."""
     from src.core.trading_calendar import MARKET_TIMEZONE
 
     return tuple(MARKET_TIMEZONE)
@@ -169,19 +169,19 @@ def market_clock(market: str, now: Optional[datetime] = None) -> MarketClock:
     )
 
 
-def clock_gate(
-    symbol: str, now: Optional[datetime] = None, override: bool = False
-) -> ClockGateResult:
+def market_open_check(
+    ticker: str, now: Optional[datetime] = None, run_anyway: bool = False
+) -> MarketOpenCheck:
     """Decide whether an interactive tiered run may start right now: the
-    symbol's market clock (``market_clock``), unless the caller overrode
+    ticker's market clock (``market_clock``), unless the caller overrode
     the gate or the market is unknown, both of which fail OPEN."""
-    market = market_for_symbol(symbol)
-    if override:
-        return ClockGateResult(False, market, "override accepted")
+    market = market_for_symbol(ticker)
+    if run_anyway:
+        return MarketOpenCheck(False, market, "run anyway accepted")
     if market is None:
-        return ClockGateResult(False, None, f"unknown market for {symbol!r}")
+        return MarketOpenCheck(False, None, f"unknown market for {ticker!r}")
     clock = market_clock(market, now=now)
-    return ClockGateResult(
+    return MarketOpenCheck(
         clock.blocked,
         market,
         clock.detail,
@@ -196,7 +196,7 @@ def expected_bar_date(
     """The most recent COMPLETED trading session's date for a market.
 
     This is the date the newest daily bar must carry for a run to be
-    fresh. A run during the trading day (clock-gate override) expects
+    fresh. A run during the trading day ("run anyway") expects
     yesterday's session — today's bar does not exist yet. None when the
     market is unknown.
     """

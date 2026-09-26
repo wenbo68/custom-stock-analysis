@@ -1,6 +1,6 @@
 import type { UiLanguage } from './uiText';
 
-// Vocabulary for tiered-analysis dimension payloads (backend keys stay
+// Vocabulary for tiered-analysis data_report payloads (backend keys stay
 // snake_case on purpose — see api/tiered.ts). Each entry has the compact
 // label shown in the table (`short`) and the plain-language definition
 // shown in the hover/click popup (`full`). Entries may also carry

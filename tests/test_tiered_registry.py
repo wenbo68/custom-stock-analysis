@@ -2,7 +2,7 @@
 """Offline tests for tiered-analysis market detection and provider routing.
 
 detect_market must delegate to data_provider.base._market_tag (single source
-of truth) rather than re-implementing symbol rules.
+of truth) rather than re-implementing ticker rules.
 """
 from __future__ import annotations
 
@@ -31,13 +31,13 @@ class TestProviderRouting(unittest.TestCase):
     def test_technicals_registered_for_all_markets(self):
         for market in (Market.US, Market.CN, Market.HK, Market.JP, Market.KR, Market.TW):
             providers = get_providers(market)
-            dimensions = [p.dimension for p in providers]
-            self.assertIn("technicals", dimensions)
+            data_reports = [p.name for p in providers]
+            self.assertIn("technicals", data_reports)
 
-    def test_us_gets_all_six_dimensions(self):
-        dimensions = [p.dimension for p in get_providers(Market.US)]
+    def test_us_gets_all_six_data_reports(self):
+        data_reports = [p.name for p in get_providers(Market.US)]
         self.assertEqual(
-            sorted(dimensions),
+            sorted(data_reports),
             [
                 "company_news",
                 "fundamentals",
@@ -50,9 +50,9 @@ class TestProviderRouting(unittest.TestCase):
 
     def test_us_display_order_follows_the_report_pages(self):
         # List order is display order on the report pages.
-        dimensions = [p.dimension for p in get_providers(Market.US)]
+        data_reports = [p.name for p in get_providers(Market.US)]
         self.assertEqual(
-            dimensions,
+            data_reports,
             [
                 "technicals",
                 "fundamentals",
@@ -65,14 +65,14 @@ class TestProviderRouting(unittest.TestCase):
 
     def test_positioning_and_company_news_are_us_only(self):
         for market in (Market.CN, Market.HK, Market.JP, Market.KR, Market.TW):
-            dimensions = [p.dimension for p in get_providers(market)]
-            self.assertNotIn("positioning", dimensions)
-            self.assertNotIn("company_news", dimensions)
+            data_reports = [p.name for p in get_providers(market)]
+            self.assertNotIn("positioning", data_reports)
+            self.assertNotIn("company_news", data_reports)
 
     def test_world_news_registered_for_all_markets(self):
         for market in (Market.US, Market.CN, Market.HK, Market.JP, Market.KR, Market.TW):
-            dimensions = [p.dimension for p in get_providers(market)]
-            self.assertIn("world_news", dimensions)
+            data_reports = [p.name for p in get_providers(market)]
+            self.assertIn("world_news", data_reports)
 
     def test_registered_providers_declare_kind(self):
         for provider in get_providers(Market.US):

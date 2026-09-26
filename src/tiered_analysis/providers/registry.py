@@ -2,7 +2,7 @@
 """Market detection and provider routing for tiered analysis.
 
 Market detection delegates to ``data_provider.base._market_tag`` — the
-repo's single source of truth for symbol->market rules — imported lazily so
+repo's single source of truth for ticker->market rules — imported lazily so
 that the pure-math indicator modules stay importable without the heavy
 data_provider dependency tree.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional
 
-from .base import DimensionProvider, Market
+from .base import DataReportProvider, Market
 from .company_news import CompanyNewsProvider
 from .fundamentals_us import FundamentalsUSProvider
 from .macro_economy import MacroEconomyProvider
@@ -20,11 +20,11 @@ from .world_news import WorldNewsProvider
 
 
 
-def detect_market(symbol: str) -> Market:
-    """Map a symbol to its market family via the existing _market_tag rules."""
+def detect_market(ticker: str) -> Market:
+    """Map a ticker to its market family via the existing _market_tag rules."""
     from data_provider.base import _market_tag
 
-    tag = _market_tag(symbol)
+    tag = _market_tag(ticker)
     try:
         return Market(tag)
     except ValueError:
@@ -54,10 +54,10 @@ def benchmark_for(market: Market) -> Optional[tuple]:
 def get_providers(
     market: Market,
     bars_loader: Optional[Callable] = None,
-) -> List[DimensionProvider]:
-    """All dimension providers covering the given market.
+) -> List[DataReportProvider]:
+    """All data_report providers covering the given market.
 
-    Six dimensions are registered: technicals (all markets),
+    Six data_reports are registered: technicals (all markets),
     fundamentals (US), macro_economy (all markets, shared per-day cache),
     positioning (US: short interest / ownership / insiders / options),
     company_news (US: recent news coverage, textual), world_news
@@ -97,7 +97,7 @@ def get_providers(
         if bars_loader is not None
         else FundamentalsUSProvider()
     )
-    candidates: List[DimensionProvider] = [
+    candidates: List[DataReportProvider] = [
         technicals,
         fundamentals,
         PositioningUSProvider(),

@@ -66,8 +66,8 @@ class _GatedRunner:
     def __call__(self, run: QueuedRun) -> None:
         self.started.append(run)
         self.release.wait(timeout=5)
-        history.mark_done(run.task_id, {"symbol": run.stock_code})
-        self.finished.append(run.task_id)
+        history.mark_done(run.run_id, {"ticker": run.ticker})
+        self.finished.append(run.run_id)
 
 
 class TestMaxConcurrentRuns:
@@ -91,14 +91,14 @@ class TestRunQueue:
         runner = _GatedRunner()
         queue = RunQueue(runner)
         history.create_run("first", "AAPL", status=history.STATUS_QUEUED,
-                           inputs={"tier": 2, "hold_weeks": 3})
+                           inputs={"tier": 2, "max_hold_weeks": 3})
         history.create_run("second", "MSFT", status=history.STATUS_QUEUED)
 
         assert queue.submit("first") == "running"
         assert queue.submit("second") == "queued"
         _wait_until(lambda: len(runner.started) == 1)
         assert runner.started[0] == QueuedRun(
-            task_id="first", stock_code="AAPL", inputs={"tier": 2, "hold_weeks": 3},
+            run_id="first", ticker="AAPL", inputs={"tier": 2, "max_hold_weeks": 3},
         )
         assert history.get_run("first")["status"] == "running"
         assert history.get_run("second")["status"] == "queued"
@@ -113,13 +113,13 @@ class TestRunQueue:
         monkeypatch.setenv(MAX_CONCURRENT_RUNS_ENV, "2")
         runner = _GatedRunner()
         queue = RunQueue(runner)
-        for task_id in ("a", "b", "c"):
-            history.create_run(task_id, "AAPL", status=history.STATUS_QUEUED)
+        for run_id in ("a", "b", "c"):
+            history.create_run(run_id, "AAPL", status=history.STATUS_QUEUED)
 
         assert queue.dispatch() == ["a", "b"]
         _wait_until(lambda: len(runner.started) == 2)
         assert history.get_run("c")["status"] == "queued"
-        assert history.get_run("c")["queue_ahead"] == 0
+        assert history.get_run("c")["queue_position"] == 1
 
         runner.release.set()
         _wait_until(lambda: len(runner.finished) == 3)
@@ -140,7 +140,7 @@ class TestRunQueue:
         seen = []
 
         def bad_runner(run: QueuedRun) -> None:
-            seen.append(run.task_id)
+            seen.append(run.run_id)
             raise RuntimeError("boom")
 
         queue = RunQueue(bad_runner)
@@ -172,7 +172,7 @@ class TestRunQueue:
         runner.release.set()
         _wait_until(lambda: runner.finished == ["first"])
         _wait_until(lambda: queue.active_count == 0)
-        assert [run.task_id for run in runner.started] == ["first"]
+        assert [run.run_id for run in runner.started] == ["first"]
         # And a finished run can go.
         assert queue.remove("first")["status"] == "done"
 
@@ -180,24 +180,24 @@ class TestRunQueue:
         history.create_run("p", "AAPL", status=history.STATUS_QUEUED)
         history.create_run("q", "MSFT", status=history.STATUS_QUEUED)
         history.create_run("r", "NVDA", status=history.STATUS_QUEUED)
-        by_id = {row["task_id"]: row for row in history.list_runs()["items"]}
-        assert by_id["p"]["queue_ahead"] == 0
-        assert by_id["q"]["queue_ahead"] == 1
-        assert by_id["r"]["queue_ahead"] == 2
-        assert history.get_run("q")["queue_ahead"] == 1
+        by_id = {row["run_id"]: row for row in history.list_runs()["items"]}
+        assert by_id["p"]["queue_position"] == 1
+        assert by_id["q"]["queue_position"] == 2
+        assert by_id["r"]["queue_position"] == 3
+        assert history.get_run("q")["queue_position"] == 2
         history.mark_done("p", {})
-        assert history.get_run("p")["queue_ahead"] is None
+        assert history.get_run("p")["queue_position"] is None
 
 
 class TestActiveDuplicate:
-    INPUTS = {"tier": 1, "capital": 100000.0, "risk_fraction": 0.01,
-              "reward_risk": 2.0, "hold_weeks": 2}
+    INPUTS = {"tier": 1, "capital": 100000.0, "risk_pct": 1.0,
+              "reward_ratio": 2.0, "max_hold_weeks": 2}
 
     def test_same_ticker_and_inputs_is_a_duplicate(self, isolated_db):
         history.create_run("t1", "AAPL", status=history.STATUS_QUEUED,
                            inputs={**self.INPUTS, "sizing_overrides": {"capital": 100000}})
         found = history.find_active_duplicate("aapl ", self.INPUTS)
-        assert found == {"task_id": "t1", "status": "queued"}
+        assert found == {"run_id": "t1", "status": "queued"}
         history.mark_running("t1")
         assert history.find_active_duplicate("AAPL", self.INPUTS)["status"] == "running"
 

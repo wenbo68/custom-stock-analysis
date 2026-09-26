@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Company-news provider — the qualitative fifth report (2026-08-13).
 
-The four existing dimensions are numbers; this one is words: recent
+The four existing data_reports are numbers; this one is words: recent
 news coverage of the stock, last ``NEWS_WINDOW_BDAYS`` business days
 (the calendar span varies with the weekday the run lands on; the
 payload publishes the actual bounds). Each
@@ -11,7 +11,7 @@ the feed's own abstract, then the headline, are the fail-soft
 fallbacks when no summary could be written.
 
 Two interchangeable feeds (2026-08-14, source-quality trial):
-``FINNHUB_API_KEY`` set → Finnhub's company-news endpoint (per-symbol
+``FINNHUB_API_KEY`` set → Finnhub's company-news endpoint (per-ticker
 with a real date range — Yahoo cannot do that); key absent → Yahoo
 Finance via yfinance (works unconfigured, per the config house rule).
 Both normalize to the same five-field entry shape, so everything
@@ -20,7 +20,7 @@ downstream is source-blind.
 The card originally carried a second "company statements" group (SEC
 filings); the owner deleted it 2026-08-13 — its only unique signal
 (red-flag 8-K events) is moving into the fundamentals report as
-explicit fields instead, where the deep debate can grade it.
+explicit fields instead, where the deep analysis can grade it.
 
 Every bullet carries a 1-based ``citation`` index into the result's
 citations list, and every citation URL is the product of a real fetch
@@ -72,8 +72,8 @@ from ..news_screen import NewsJudgmentCache, screen_news
 from ..run_context import data_key
 from .base import (
     Citation,
-    DimensionProvider,
-    DimensionResult,
+    DataReportProvider,
+    DataReport,
     Market,
     SourceKind,
 )
@@ -181,13 +181,13 @@ def normalize_news_entry(entry: Mapping[str, Any]) -> Dict[str, Optional[str]]:
     }
 
 
-def _yahoo_news_loader(symbol: str) -> List[Dict[str, Optional[str]]]:
+def _yahoo_news_loader(ticker: str) -> List[Dict[str, Optional[str]]]:
     """Recent Yahoo Finance news, normalized to {title, publisher, url,
     date, summary}. Requests more than Yahoo's 10-article default so a
     heavily-covered stock still shows more than a day or two."""
     import yfinance as yf
 
-    ticker = yf.Ticker(symbol)
+    ticker = yf.Ticker(ticker)
     try:
         raw = ticker.get_news(count=NEWS_FETCH_COUNT)
     except TypeError:  # older yfinance without the count parameter
@@ -232,7 +232,7 @@ def normalize_finnhub_entry(entry: Mapping[str, Any]) -> Dict[str, Optional[str]
 
 
 def _finnhub_news_loader(
-    symbol: str, api_key: str, since: Optional[date] = None
+    ticker: str, api_key: str, since: Optional[date] = None
 ) -> List[Dict[str, Optional[str]]]:
     """Company news from Finnhub, fetched one day per request.
 
@@ -252,7 +252,11 @@ def _finnhub_news_loader(
         day = (today - timedelta(days=offset)).isoformat()
         response = requests.get(
             FINNHUB_NEWS_URL,
-            params={"symbol": symbol, "from": day, "to": day, "token": api_key},
+            # "symbol" is Finnhub's parameter name — a wire name, not
+            # this app's vocabulary. The 2026-09-24 symbol→ticker rename
+            # renamed it too and Finnhub answered 422 "Missing parameter
+            # symbol" for every day of the window (fixed 2026-09-25).
+            params={"symbol": ticker, "from": day, "to": day, "token": api_key},
             timeout=_FINNHUB_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
@@ -267,13 +271,13 @@ def _finnhub_news_loader(
     return entries
 
 
-def _default_news_loader(symbol: str) -> List[Dict[str, Optional[str]]]:
+def _default_news_loader(ticker: str) -> List[Dict[str, Optional[str]]]:
     """Finnhub when a key is configured (source-quality trial 2026-08-14),
     Yahoo otherwise — unconfigured keeps working, configured enhances."""
     api_key = data_key("finnhub")
     if api_key:
-        return _finnhub_news_loader(symbol, api_key)
-    return _yahoo_news_loader(symbol)
+        return _finnhub_news_loader(ticker, api_key)
+    return _yahoo_news_loader(ticker)
 
 
 def _default_today() -> date:
@@ -342,25 +346,25 @@ def name_to_terms(raw_name: str) -> List[str]:
     return terms
 
 
-def _default_name_terms(symbol: str) -> List[str]:
+def _default_name_terms(ticker: str) -> List[str]:
     """Company-name terms via the same yfinance info the fundamentals
     provider already fetches per run. Failure returns [] — the filter
     then runs on ticker + aliases alone (fail-soft, never fail-closed)."""
     try:
         import yfinance as yf
 
-        info = yf.Ticker(symbol).get_info() or {}
+        info = yf.Ticker(ticker).get_info() or {}
         raw = info.get("shortName") or info.get("longName") or ""
         return name_to_terms(raw)
     except Exception:
         return []
 
 
-def relevance_terms(symbol: str, name_terms: Sequence[str]) -> List[str]:
+def relevance_terms(ticker: str, name_terms: Sequence[str]) -> List[str]:
     """The full term set: ticker, registered-name terms, brand aliases."""
-    terms = [symbol.lower()]
+    terms = [ticker.lower()]
     terms += [term.lower() for term in name_terms]
-    terms += BRAND_ALIASES.get(symbol.upper(), [])
+    terms += BRAND_ALIASES.get(ticker.upper(), [])
     seen = set()
     unique = []
     for term in terms:
@@ -379,10 +383,10 @@ def mentions_company(entry: Mapping[str, Any], terms: Sequence[str]) -> bool:
     )
 
 
-class CompanyNewsProvider(DimensionProvider):
+class CompanyNewsProvider(DataReportProvider):
     """US company news: recent Yahoo Finance coverage, cited."""
 
-    dimension = "company_news"
+    name = "company_news"
     kind = SourceKind.TEXTUAL
 
     def __init__(
@@ -403,7 +407,7 @@ class CompanyNewsProvider(DimensionProvider):
 
     @staticmethod
     def _default_screener(
-        symbol: str,
+        ticker: str,
         entries: Sequence[Mapping[str, Any]],
         company: Optional[str],
     ) -> Dict[str, Any]:
@@ -411,28 +415,28 @@ class CompanyNewsProvider(DimensionProvider):
         select at the card's score bar. LLM failures inside degrade to
         keep-with-warning (news_screen contract), never to a crash."""
         return screen_news(
-            symbol,
+            ticker,
             entries,
             company=company,
             threshold=CARD_SCORE_BAR,
-            cache=NewsJudgmentCache(symbol),
+            cache=NewsJudgmentCache(ticker),
         )
 
     def supports(self, market: Market) -> bool:
         return market == Market.US
 
-    def collect(self, symbol: str) -> DimensionResult:
+    def collect(self, ticker: str) -> DataReport:
         today = self._today()
         warnings: List[str] = []
         try:
-            entries = list(self._load_news(symbol))
+            entries = list(self._load_news(ticker))
         except Exception as exc:
             # A failed fetch still ships the card's shape — an empty
             # timeline with the warning saying why (degradation lives on
             # the card notes, never on a card-level grade, 2026-08-19).
             since = business_days_back(today, NEWS_WINDOW_BDAYS)
-            return DimensionResult(
-                dimension=self.dimension,
+            return DataReport(
+                name=self.name,
                 kind=self.kind,
                 payload=_empty_news_coverage(since, today),
                 warnings=[f"news headlines unavailable: {exc}"],
@@ -466,8 +470,8 @@ class CompanyNewsProvider(DimensionProvider):
         # Relevance filter: keep only articles that name the company.
         # A failed name lookup degrades to ticker+aliases (fail-soft) —
         # it must never turn into an empty term set that cuts everything.
-        name_terms = list(self._load_name_terms(symbol))
-        terms = relevance_terms(symbol, name_terms)
+        name_terms = list(self._load_name_terms(ticker))
+        terms = relevance_terms(ticker, name_terms)
         relevant = [entry for entry in dated if mentions_company(entry, terms)]
         filtered_out = len(dated) - len(relevant)
         if dated and not relevant:
@@ -499,7 +503,7 @@ class CompanyNewsProvider(DimensionProvider):
         # keep every event at or above the card's score bar — no fixed
         # top-N; the card's length reflects the week.
         company = name_terms[0] if name_terms else None
-        screen = self._screen(symbol, unique, company)
+        screen = self._screen(ticker, unique, company)
         warnings.extend(screen["warnings"])
 
         # Display order is chronological, newest first (owner format
@@ -543,8 +547,8 @@ class CompanyNewsProvider(DimensionProvider):
                 item["articles_covering_event"] = event["group_size"]
             items.append(item)
 
-        return DimensionResult(
-            dimension=self.dimension,
+        return DataReport(
+            name=self.name,
             kind=self.kind,
             payload={
                 "news_coverage": {

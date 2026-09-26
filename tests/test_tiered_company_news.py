@@ -26,11 +26,11 @@ from src.tiered_analysis.providers.company_news import (
 TODAY = date(2026, 8, 13)
 
 
-def passthrough_screener(symbol, entries, company):
+def passthrough_screener(ticker, entries, company):
     """Offline stand-in for the LLM screen: every article is its own
     kept event, in the order the provider handed them over."""
     passthrough_screener.calls.append(
-        {"symbol": symbol, "entries": list(entries), "company": company}
+        {"ticker": ticker, "entries": list(entries), "company": company}
     )
     return {
         "selected": [
@@ -96,10 +96,10 @@ def news_fixture():
 def make_provider(news=None, screener=passthrough_screener):
     passthrough_screener.calls = []
     return CompanyNewsProvider(
-        news_loader=lambda symbol: news if news is not None else news_fixture(),
+        news_loader=lambda ticker: news if news is not None else news_fixture(),
         today=lambda: TODAY,
         # Offline: no yfinance name lookup; ticker + BRAND_ALIASES suffice.
-        name_terms_loader=lambda symbol: [],
+        name_terms_loader=lambda ticker: [],
         # Offline: no LLM; the screen's own behavior is covered by
         # test_tiered_news_screen.py.
         screener=screener,
@@ -114,7 +114,7 @@ class TestHelpers(unittest.TestCase):
             business_days_back(date(2026, 8, 13), 7), date(2026, 8, 5)
         )
         # Monday 2026-08-17, quota 7: two weekends inside — an
-        # 11-calendar-day span, same weekday depth.
+        # 11-calendar-day span, same weekday tier.
         self.assertEqual(
             business_days_back(date(2026, 8, 17), 7), date(2026, 8, 7)
         )
@@ -249,10 +249,10 @@ class TestCollect(unittest.TestCase):
     def test_full_run_windows_citations_and_fallback_bullets(self):
         result = make_provider().collect("AAPL")
 
-        self.assertEqual(result.dimension, "company_news")
+        self.assertEqual(result.name, "company_news")
         self.assertEqual(result.kind, SourceKind.TEXTUAL)
         self.assertIsNotNone(result.payload)  # no card-level grade anymore
-        self.assertFalse(result.is_actionable)  # textual never feeds sizing
+        self.assertFalse(result.counted)  # textual never feeds sizing
 
         news = result.payload["news_coverage"]
         # The window is a business-day quota with a varying calendar
@@ -382,7 +382,7 @@ class TestCollect(unittest.TestCase):
         # Degradation lives on the card notes now, never on a card-level
         # grade: a failed fetch still ships the card's payload shape (an
         # empty timeline over the real window) plus the warning saying why.
-        def broken(symbol):
+        def broken(ticker):
             raise RuntimeError("Yahoo down")
 
         provider = CompanyNewsProvider(news_loader=broken, today=lambda: TODAY)
@@ -404,11 +404,47 @@ class TestCollect(unittest.TestCase):
             result.warnings,
         )
 
+    def test_finnhub_loader_asks_by_symbol_one_day_at_a_time(self):
+        # Finnhub's parameter is "symbol" — a wire name the 2026-09-24
+        # symbol→ticker rename must not touch (it did; 422 on every day).
+        response = mock.Mock()
+        response.json.return_value = []
+        with mock.patch("requests.get", return_value=response) as get, mock.patch.object(
+            company_news, "date", wraps=company_news.date
+        ) as fake_date:
+            fake_date.today.return_value = TODAY
+            company_news._finnhub_news_loader("AAPL", "k", since=date(2026, 8, 11))
+        self.assertEqual(get.call_count, 3)
+        for call in get.call_args_list:
+            params = call.kwargs["params"]
+            self.assertEqual(params["symbol"], "AAPL")
+            self.assertNotIn("ticker", params)
+            self.assertEqual(params["from"], params["to"])
+        self.assertEqual([c.kwargs["params"]["from"] for c in get.call_args_list],
+                         ["2026-08-11", "2026-08-12", "2026-08-13"])
+
+    def test_failed_fetch_warning_never_carries_the_api_key(self):
+        # requests' error text repeats the URL, key and all (leaked on
+        # the page and into the database on 2026-09-24).
+        def leaky(_ticker):
+            raise RuntimeError(
+                "422 Client Error: Unprocessable Entity for url: "
+                "https://finnhub.io/api/v1/company-news?ticker=AAPL&from=2026-09-18"
+                "&to=2026-09-18&token=SECRETKEY123"
+            )
+
+        result = CompanyNewsProvider(news_loader=leaky, today=lambda: TODAY).collect("AAPL")
+        joined = " ".join(result.warnings)
+        self.assertIn("news headlines unavailable", joined)
+        self.assertIn("422 Client Error", joined)
+        self.assertIn("token=<redacted>", joined)
+        self.assertNotIn("SECRETKEY123", joined)
+
     def test_screener_gets_the_filtered_deduped_newest_first_entries(self):
         result = make_provider().collect("AAPL")
         self.assertIsNotNone(result.payload)
         call = passthrough_screener.calls[0]
-        self.assertEqual(call["symbol"], "AAPL")
+        self.assertEqual(call["ticker"], "AAPL")
         # No registered name available offline -> company is None.
         self.assertIsNone(call["company"])
         # Windowed, link-verified, newest first.
@@ -418,7 +454,7 @@ class TestCollect(unittest.TestCase):
         )
 
     def test_screener_warnings_and_event_extras_reach_the_result(self):
-        def screener(symbol, entries, company):
+        def screener(ticker, entries, company):
             return {
                 "selected": [
                     {
@@ -454,7 +490,7 @@ class TestCollect(unittest.TestCase):
         self.assertEqual(news["items"][0]["citation"], 1)
 
     def test_bullets_display_newest_first_even_when_ranked_otherwise(self):
-        def screener(symbol, entries, company):
+        def screener(ticker, entries, company):
             # The screen returns rank order (oldest event ranked most
             # important); the card must still read as a timeline.
             return {

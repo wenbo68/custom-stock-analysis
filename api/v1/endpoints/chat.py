@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Chat API (2026-09-21): conversations with the app's chatbot.
+"""Chat API (2026-09-21): conversations with the app's chat bot.
 
 A conversation is created empty, then each `POST .../messages` stores
-the user's text, runs the bot's loop (src/chatbot/harness.py) — the
+the user's text, runs the bot's loop (src/chat/harness.py) — the
 model may call tools, whose calls and results become messages too —
 and answers with the whole conversation. When the model wants to do
 something that needs the user's yes (start or delete a run, read a
@@ -28,16 +28,16 @@ from api.v1.endpoints.chat_schemas import (
     SendMessageRequest,
 )
 from api.v1.endpoints.tiered_schemas import TranscriptCall
-from src.chatbot import store
-from src.chatbot.harness import (
+from src.chat import store
+from src.chat.harness import (
     ChatHarness,
     ConfirmationPendingError,
     ConversationBusyError,
     NothingPendingError,
     UnknownConversationError,
 )
-from src.chatbot.model import LiteLlmClient
-from src.chatbot.transcript import transcript_chars, transcript_view
+from src.chat.model import LiteLlmClient
+from src.chat.transcript import transcript_chars, transcript_view
 from src.tiered_analysis.run_context import llm_model
 
 logger = logging.getLogger(__name__)
@@ -64,14 +64,16 @@ def _message_view(message: Dict[str, Any]) -> Dict[str, Any]:
         "seq": message.get("seq"), "role": role, "created_at": message.get("created_at"),
     }
     if role == "tool":
+        # Named as the chat page labels them: name, input, output.
         view.update({
             "tool_call_id": message.get("tool_call_id"),
-            "tool_name": message.get("name"),
-            "result": _parse_json(message.get("content")),
-            "result_chars": message.get("chars"),
+            "name": message.get("name"),
+            "output": _parse_json(message.get("content")),
+            "output_chars": message.get("output_chars"),
             "truncated": message.get("truncated"),
             "approved": message.get("approved"),
-            "duration_ms": message.get("duration_ms"),
+            "time_ms": message.get("time_ms"),
+            "input": message.get("input"),
         })
         return view
     view["text"] = message.get("content")
@@ -85,10 +87,10 @@ def _message_view(message: Dict[str, Any]) -> Dict[str, Any]:
             for call in message.get("tool_calls") or []
         ]
         view["usage"] = message.get("usage")
-        view["model"] = message.get("model")
+        view["llm"] = message.get("llm")
         view["error"] = message.get("error")
         view["notice"] = message.get("notice")
-        view["duration_ms"] = message.get("duration_ms")
+        view["time_ms"] = message.get("time_ms")
         view["transcript_chars"] = transcript_chars(message)
     return view
 
@@ -104,7 +106,7 @@ def _pending_view(pending: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]
         return None
     return {"calls": [
         {"call_id": c.get("call_id"), "name": c.get("name"),
-         "arguments": c.get("args") or {}, "facts": c.get("facts") or {}}
+         "input": c.get("input") or {}, "facts": c.get("facts") or {}}
         for c in calls
     ]}
 
@@ -158,6 +160,7 @@ def delete_conversation(conversation_id: str) -> Dict[str, str]:
 @router.post("/conversations/{conversation_id}/messages", response_model=ConversationView)
 def send_message(conversation_id: str, request: SendMessageRequest) -> Dict[str, Any]:
     """Send a message and run the bot until it answers or needs a yes.
+    The bot answers in `language`, the one the user chose for the app.
 
     Answers with the whole conversation; read `pending` for a held
     action. Errors: 400 `llm_not_configured`; 404 unknown conversation;
@@ -166,7 +169,7 @@ def send_message(conversation_id: str, request: SendMessageRequest) -> Dict[str,
     """
     _require_llm_configured()
     try:
-        harness.send(conversation_id, request.text)
+        harness.send(conversation_id, request.text, request.language)
     except UnknownConversationError:
         raise HTTPException(status_code=404, detail="conversation not found")
     except ConversationBusyError:
@@ -182,7 +185,7 @@ def confirm_action(conversation_id: str, request: ConfirmRequest) -> Dict[str, A
     resume the bot. 409 `nothing_pending` when no action is held."""
     _require_llm_configured()
     try:
-        harness.confirm(conversation_id, request.approved)
+        harness.confirm(conversation_id, request.approved, request.language)
     except UnknownConversationError:
         raise HTTPException(status_code=404, detail="conversation not found")
     except ConversationBusyError:
@@ -194,9 +197,9 @@ def confirm_action(conversation_id: str, request: ConfirmRequest) -> Dict[str, A
 
 @router.get("/conversations/{conversation_id}/messages/{seq}/transcript", response_model=TranscriptCall)
 def get_message_transcript(conversation_id: str, seq: int) -> Dict[str, Any]:
-    """One bot reply's model call — the exact prompt it was sent, the raw
-    reply, the model, timing and tokens — in the same shape as a run's
-    `GET /tiered/runs/{task_id}/transcript/{seq}`. 404 for an unknown
+    """One bot reply's model call — the exact input it was sent, the raw
+    output, the llm, time and tokens — in the same shape as a run's
+    `GET /tiered/runs/{run_id}/transcript/{call_number}`. 404 for an unknown
     conversation or a message that holds no model call (user lines and
     tool results)."""
     if not store.conversation_exists(conversation_id):

@@ -14,14 +14,23 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from src.tiered_analysis.settings import DEFAULT_HOLD_WEEKS, DEFAULT_TIER
+from src.languages import DEFAULT_LANGUAGE, LANGUAGES, require_supported
+from src.tiered_analysis.settings import DEFAULT_MAX_HOLD_WEEKS, DEFAULT_TIER
+
+# Every field a client sends or reads carries the analysis page's own
+# words, in the form's order — ticker, capital, risk % (a percent, as
+# typed), reward ratio, max hold weeks, tier, run anyway — so the page,
+# the chat's tool and the user share one vocabulary (owner request
+# 2026-09-24). The engine and the database use the same words too.
 
 RunStatus = Literal["queued", "running", "done", "failed"]
-Outlook = Literal["bullish", "neutral", "bearish", "unknown"]
-#: The outlook filter also takes "none": rows with no opinion (unfinished,
-#: failed, or the judge produced nothing) — the dash in the history list.
-OutlookFilter = Literal["bullish", "neutral", "bearish", "none"]
-Section = Literal["core", "dimensions", "debate", "plan"]
+#: `no_outlook` = the run finished but the analysis produced no outlook
+#: (the page's "No outlook").
+Outlook = Literal["bullish", "neutral", "bearish", "no_outlook"]
+#: As a filter, `no_outlook` also matches rows that have no outlook yet
+#: (unfinished or failed) — the dash in the history list.
+OutlookFilter = Literal["bullish", "neutral", "bearish", "no_outlook"]
+Section = Literal["core", "data_reports", "deep_analysis", "plan"]
 
 
 # ---------------------------------------------------------------------------
@@ -29,89 +38,99 @@ Section = Literal["core", "dimensions", "debate", "plan"]
 # ---------------------------------------------------------------------------
 
 
-class SizingOverride(BaseModel):
-    """Per-run sizing inputs; the form defaults fill whatever is omitted."""
+class TieredAnalyzeRequest(BaseModel):
+    """The run form, field for field. The form defaults fill whatever a
+    caller leaves out (see GET /status `defaults`)."""
 
+    ticker: str = Field(description="Ticker, e.g. AAPL or 600519.")
     capital: Optional[float] = Field(
         default=None, gt=0,
         description="Trading capital in the ticker's own currency.",
     )
-    risk_fraction: Optional[float] = Field(
-        default=None, gt=0, lt=1,
-        description="Fraction of capital to risk on this trade (0.01 = 1%).",
+    risk_pct: Optional[float] = Field(
+        default=None, gt=0, lt=100,
+        description="Percent of capital to risk on this trade (1 = 1%).",
     )
-    reward_risk: Optional[float] = Field(
+    reward_ratio: Optional[float] = Field(
         default=None, gt=1, le=10,
-        description="Target reward-to-risk ratio (target = entry + R × risk).",
+        description="Target reward-to-risk ratio (target = entry + ratio × risk).",
     )
-
-
-class TieredAnalyzeRequest(BaseModel):
-    stock_code: str = Field(description="Ticker, e.g. AAPL or 600519.")
-    #: 1 = the one-blob judge, 2 = the evidence vote. Tier 3 is retired
-    #: (outlook redesign) — depth 3 is a validation error, not a clamp.
-    depth: int = Field(
-        default=DEFAULT_TIER, ge=1, le=2,
-        description="1 = quick analysis, 2 = deep analysis (the evidence vote).",
-    )
-    sizing: Optional[SizingOverride] = None
     #: Max hold time in weeks (2026-08-08): the horizon the AI judges
     #: against, shown on the report and used as the grading window.
-    hold_weeks: int = Field(
-        default=DEFAULT_HOLD_WEEKS, ge=1, le=4,
+    max_hold_weeks: int = Field(
+        default=DEFAULT_MAX_HOLD_WEEKS, ge=1, le=4,
         description="Max hold time in weeks the AI judges against.",
     )
-    #: Clock-gate override ("run anyway"): start during the trading day,
-    #: analyzing the PREVIOUS completed session's close.
+    #: 1 = the preliminary analysis (one LLM call), 2 = the deep analysis
+    #: (the vote). Tier 3 is retired (outlook redesign) — tier 3 is a
+    #: validation error, not a clamp.
+    tier: int = Field(
+        default=DEFAULT_TIER, ge=1, le=2,
+        description="1 = preliminary analysis, 2 = deep analysis (the vote).",
+    )
+    #: "Run anyway" after a market-open refusal: start during the trading
+    #: day, analyzing the PREVIOUS completed session's close.
     run_anyway: bool = Field(
         default=False,
         description="Start during the trading day anyway, analyzing the previous completed session.",
     )
+    #: The language the user chose for the app (2026-09-26): every
+    #: sentence the report's models write is in it. Stored with the
+    #: run's inputs; two runs that differ only by language are not
+    #: duplicates of each other.
+    language: str = Field(
+        default=DEFAULT_LANGUAGE,
+        description="The language the report's model-written text is in. One of: " + ", ".join(sorted(LANGUAGES)) + ".",
+    )
 
-    @field_validator("stock_code")
+    @field_validator("ticker")
     @classmethod
     def _not_blank(cls, value: str) -> str:
         cleaned = value.strip()
         if not cleaned:
-            raise ValueError("stock_code must not be blank")
+            raise ValueError("ticker must not be blank")
         return cleaned
+
+    _language = field_validator("language")(require_supported)
 
 
 class AnalyzeAccepted(BaseModel):
     """202: the run is stored and will start when a slot is free."""
 
-    task_id: str
-    stock_code: str
-    depth: int
+    run_id: str
+    ticker: str
+    tier: int
     status: Literal["queued", "running"] = Field(
         description="running when a slot was free at once, else queued.",
     )
 
 
 # ---------------------------------------------------------------------------
-# GET /runs, GET /runs/tickers, GET /runs/{task_id}
+# GET /runs, GET /runs/tickers, GET /runs/{run_id}
 # ---------------------------------------------------------------------------
 
 
 class RunSummary(BaseModel):
     """One history row: identity, status, and the facts the list shows
-    and filters on. No report payload — that is GET /runs/{task_id}."""
+    and filters on. No report payload — that is GET /runs/{run_id}."""
 
-    task_id: str
-    stock_code: str
+    run_id: str
+    ticker: str
     status: RunStatus
     error: Optional[str] = None
     created_at: Optional[str] = Field(default=None, description="ISO 8601, UTC.")
     updated_at: Optional[str] = Field(default=None, description="ISO 8601, UTC.")
-    queue_ahead: Optional[int] = Field(
+    queue_position: Optional[int] = Field(
         default=None,
-        description="Queued rows only: how many runs are ahead in the line.",
+        description="Queued rows only: the run's place in the line, from 1.",
     )
-    tier: Optional[int] = Field(default=None, description="1 or 2.")
+    # The run's inputs, in the form's order; null on rows stored before
+    # a field existed.
     capital: Optional[float] = None
-    risk_fraction: Optional[float] = Field(default=None, description="0.01 = 1%.")
-    reward_risk: Optional[float] = None
-    hold_weeks: Optional[int] = None
+    risk_pct: Optional[float] = Field(default=None, description="Percent of capital risked (1 = 1%).")
+    reward_ratio: Optional[float] = None
+    max_hold_weeks: Optional[int] = None
+    tier: Optional[int] = Field(default=None, description="1 or 2.")
     outlook: Optional[Outlook] = Field(
         default=None, description="Set once the run is done; null before.",
     )
@@ -146,8 +165,8 @@ class RunDetail(RunSummary):
         default=None,
         description=(
             "The stored report (shape: web/src/api/tiered.ts TieredResult), "
-            "limited to `sections`, plus `dimension_index`: one light row per "
-            "data report (name, kind, is_actionable, warnings) whatever the "
+            "limited to `sections`, plus `data_report_index`: one light row per "
+            "data report (name, kind, counted, warnings) whatever the "
             "sections. Null while queued/running and after a failure."
         ),
     )
@@ -156,29 +175,29 @@ class RunDetail(RunSummary):
 class RunDeleted(BaseModel):
     """The run and its transcript are gone."""
 
-    task_id: str
-    stock_code: str
+    run_id: str
+    ticker: str
     status: Literal["queued", "done", "failed"] = Field(
         description="What the run was. `queued` means it was cancelled before it started.",
     )
 
 
 # ---------------------------------------------------------------------------
-# GET /runs/{task_id}/debate/items
+# GET /runs/{run_id}/vote_items
 # ---------------------------------------------------------------------------
 
 #: A vote item's fate: counted toward the score, or excluded (a failed
 #: citation check, outvoted by the checkers, or left unresolved).
-DebateItemStatus = Literal["counted", "excluded"]
+VoteItemStatus = Literal["counted", "excluded"]
 
 
-class DebateItemPage(BaseModel):
+class VoteItemPage(BaseModel):
     """One page of a deep-analysis run's vote items, in stored order."""
 
     items: List[Dict[str, Any]] = Field(
         description=(
-            "Vote items (shape: web/src/api/tiered.ts TieredDebateItem): the "
-            "claim, its dimension and data field, the bullet_outlook it argues "
+            "Vote items (shape: web/src/api/tiered.ts TieredVoteItem): the "
+            "claim, its data_report and data field, the item_outlook it argues "
             "for, the listers' and checkers' votes, and final_status."
         ),
     )
@@ -189,23 +208,23 @@ class DebateItemPage(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# GET /runs/{task_id}/transcript, GET /runs/{task_id}/transcript/{seq}
+# GET /runs/{run_id}/transcript, GET /runs/{run_id}/transcript/{call_number}
 # ---------------------------------------------------------------------------
 
 
 class TranscriptCallFacts(BaseModel):
     """Everything about one LLM call except its text."""
 
-    seq: int = Field(description="Call number within the run, from 1.")
+    call_number: int = Field(description="Call number within the run, from 1.")
     created_at: Optional[str] = None
     stage: Optional[str] = Field(
-        default=None, description="Which step made the call, e.g. tier1_analysis.",
+        default=None, description="Which stage of the run made the call, e.g. preliminary_analysis.",
     )
-    model: Optional[str] = None
+    llm: Optional[str] = Field(default=None, description="The model that answered.")
     temperature: Optional[float] = None
-    duration_ms: Optional[int] = None
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
+    time_ms: Optional[int] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
     structured: Optional[str] = Field(
         default=None, description="Reply enforcement asked for: schema, json, or null.",
     )
@@ -218,8 +237,8 @@ class TranscriptCallSummary(TranscriptCallFacts):
     """An index row: the facts plus how big the text is, so a caller can
     decide whether to fetch it."""
 
-    prompt_chars: int
-    reply_chars: int
+    input_chars: int
+    output_chars: int
 
 
 class TranscriptIndex(BaseModel):
@@ -229,10 +248,10 @@ class TranscriptIndex(BaseModel):
 
 
 class TranscriptCall(TranscriptCallFacts):
-    """One call with its full prompt and raw reply."""
+    """One call with its full input (the prompt) and raw output (the reply)."""
 
-    prompt: Optional[str] = None
-    reply: Optional[str] = None
+    input: Optional[str] = None
+    output: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -266,19 +285,20 @@ class RunSlots(BaseModel):
 
 
 class RunDefaults(BaseModel):
-    """What a run uses when the request leaves a field out."""
+    """What a run uses when the request leaves a field out, in the
+    form's order."""
 
-    tier: int
-    hold_weeks: int
     capital: Optional[float] = None
-    risk_fraction: Optional[float] = Field(default=None, description="0.01 = 1%.")
-    reward_risk: float
+    risk_pct: Optional[float] = Field(default=None, description="Percent of capital risked (1 = 1%).")
+    reward_ratio: float
+    max_hold_weeks: int
+    tier: int
 
 
 class MarketClockStatus(BaseModel):
     """Where one market's clock stands. Runs analyze completed sessions
     only, so they are refused from the open until 30 minutes past the
-    close (`POST /analyze` answers 409 `market_open`; `run_anyway` overrides)."""
+    close (`POST /analyze` answers 409 `market_open`; `run_anyway` starts it anyway)."""
 
     market: str = Field(
         description=(

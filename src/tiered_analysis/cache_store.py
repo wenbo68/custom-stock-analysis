@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Protocol
 logger = logging.getLogger(__name__)
 
 #: Rows untouched for this long are deleted at startup. The longest-lived
-#: cache is the per-symbol news judgment (35-day article window, rewritten
+#: cache is the per-ticker news judgment (35-day article window, rewritten
 #: on every use), so 60 days keeps everything that can still matter.
 CACHE_MAX_AGE_DAYS = 60
 

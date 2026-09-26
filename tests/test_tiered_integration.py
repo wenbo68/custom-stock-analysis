@@ -5,7 +5,7 @@ The real connections are faked here (data manager, quick judge, debate
 engine, signal logger); what's under test is the glue:
 
 - dsa_bars_loader: DataFetcherManager daily DataFrame -> chronological Bars
-- run_tiered_analysis: collect dimensions + judge + merge + signal log
+- run_tiered_analysis: collect data_reports + judge + merge + signal log
 """
 from __future__ import annotations
 
@@ -16,23 +16,24 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from src.tiered_analysis.debate import outlook_from_final
+from src.tiered_analysis.deep_analysis import outlook_from_final
 from src.tiered_analysis.earnings import EarningsInfo
 from src.tiered_analysis.integration import (
     dsa_bars_loader,
     run_tiered_analysis,
 )
 from src.tiered_analysis.providers.technicals import technicals_as_of
-from src.tiered_analysis.quick_judge import QuickResult, QuickOutlook
+from src.tiered_analysis.preliminary_analysis import PreliminaryResult, PreliminaryOutlook
+from src.tiered_analysis.llm_support import run_language
 from src.tiered_analysis.run_gate import expected_bar_date
 from src.tiered_analysis.schema import Action, Outlook, derive_action
 from src.tiered_analysis.providers.base import (
-    DimensionProvider,
-    DimensionResult,
+    DataReportProvider,
+    DataReport,
     Market,
     SourceKind,
 )
-from src.tiered_analysis.schema import SniperLevels
+from src.tiered_analysis.schema import TradePlanLevels
 
 
 def _daily_df(rows):
@@ -44,8 +45,8 @@ class FakeManager:
         self._df = df
         self.calls = []
 
-    def get_daily_data(self, stock_code, days=30, fresh_through=None):
-        self.calls.append((stock_code, days))
+    def get_daily_data(self, ticker, days=30, fresh_through=None):
+        self.calls.append((ticker, days))
         self.fresh_through = fresh_through
         return self._df, "fake-source"
 
@@ -79,40 +80,40 @@ class TestDsaBarsLoader(unittest.TestCase):
         self.assertEqual(bars, [])
 
 
-class _StubProvider(DimensionProvider):
+class _StubProvider(DataReportProvider):
     kind = SourceKind.NUMERIC
 
     def __init__(self, name, result=None, crash=False):
-        self.dimension = name
+        self.name = name
         self._result = result
         self._crash = crash
 
     def supports(self, market):
         return True
 
-    def collect(self, symbol):
+    def collect(self, ticker):
         if self._crash:
             raise RuntimeError("provider blew up")
         return self._result
 
 
 def _dim(name):
-    return DimensionResult(
-        dimension=name,
+    return DataReport(
+        name=name,
         kind=SourceKind.NUMERIC,
         payload={"x": 1},
     )
 
 
 class _FakeQuickJudge:
-    """Canned tier-1 outlook; records (symbol, hold_weeks) calls."""
+    """Canned tier-1 outlook; records (ticker, max_hold_weeks) calls."""
 
     def __init__(self, score=7.5, summary="buy the pullback",
                  outlook=True, warnings=()):
         self.calls = []
         if outlook:
-            self._result = QuickResult(
-                outlook=QuickOutlook(
+            self._result = PreliminaryResult(
+                outlook=PreliminaryOutlook(
                     outlook=outlook_from_final(score),
                     final_score=score,
                     summary=summary,
@@ -120,14 +121,14 @@ class _FakeQuickJudge:
                 warnings=list(warnings),
             )
         else:
-            self._result = QuickResult(warnings=list(warnings))
+            self._result = PreliminaryResult(warnings=list(warnings))
 
-    def run(self, symbol, dimensions, hold_weeks):
-        self.calls.append((symbol, hold_weeks))
+    def run(self, ticker, data_reports, max_hold_weeks):
+        self.calls.append((ticker, max_hold_weeks))
         return self._result
 
 
-def _no_earnings(symbol, market):
+def _no_earnings(ticker, market):
     """Offline stand-in for the yfinance earnings lookup."""
     return EarningsInfo()
 
@@ -139,22 +140,22 @@ class TestRunTieredAnalysis(unittest.TestCase):
             market=Market.US,
             providers=providers if providers is not None
             else [_StubProvider("technicals", _dim("technicals"))],
-            quick_judge=judge or _FakeQuickJudge(),
+            preliminary_analysis=judge or _FakeQuickJudge(),
             earnings_lookup=_no_earnings,
         )
         return outcome, []
 
-    def test_dimensions_attached(self):
+    def test_data_reports_attached(self):
         outcome, _ = self._run()
         report = outcome.report
         self.assertEqual(report.outlook, Outlook.BULLISH)
-        self.assertEqual([d.dimension for d in report.dimensions], ["technicals"])
+        self.assertEqual([d.name for d in report.data_reports], ["technicals"])
 
-    def test_crashing_provider_becomes_warned_empty_dimension(self):
+    def test_crashing_provider_becomes_warned_empty_data_report(self):
         providers = [_StubProvider("fundamentals", crash=True)]
         outcome, _ = self._run(providers=providers)
-        dim = outcome.report.dimensions[0]
-        self.assertEqual(dim.dimension, "fundamentals")
+        dim = outcome.report.data_reports[0]
+        self.assertEqual(dim.name, "fundamentals")
         self.assertIsNone(dim.payload)
         self.assertTrue(any("provider blew up" in w for w in dim.warnings))
 
@@ -162,8 +163,8 @@ class TestRunTieredAnalysis(unittest.TestCase):
         """The cross_bars_loader seam: a harness that injects providers
         (which normally skips cross-provider enrichment) can opt in by
         passing its own loader — the demo seeder relies on this."""
-        tech = DimensionResult(
-            dimension="technicals",
+        tech = DataReport(
+            name="technicals",
             kind=SourceKind.NUMERIC,
             payload={"market": {"regime": {"value": "bullish"}}},
         )
@@ -171,24 +172,24 @@ class TestRunTieredAnalysis(unittest.TestCase):
             "AAPL",
             market=Market.US,
             providers=[_StubProvider("technicals", tech)],
-            quick_judge=_FakeQuickJudge(),
+            preliminary_analysis=_FakeQuickJudge(),
             earnings_lookup=_no_earnings,
             cross_bars_loader=lambda ticker: [],
         )
-        enriched = outcome.report.dimensions[0]
+        enriched = outcome.report.data_reports[0]
         self.assertIn("rs_sector_1m", enriched.payload["market"])
         self.assertTrue(
             any("sector unknown" in w for w in enriched.warnings)
         )
 
-    def test_failed_tier1_still_returns_report_with_dimensions(self):
+    def test_failed_tier1_still_returns_report_with_data_reports(self):
         judge = _FakeQuickJudge(
             outlook=False,
             warnings=["quick judge LLM call failed: LLM down"],
         )
         outcome, _ = self._run(judge=judge)
-        self.assertEqual(outcome.report.outlook, Outlook.UNKNOWN)
-        self.assertTrue(outcome.report.dimensions)
+        self.assertEqual(outcome.report.outlook, Outlook.NO_OUTLOOK)
+        self.assertTrue(outcome.report.data_reports)
         self.assertTrue(any("LLM down" in w for w in outcome.report.warnings))
 
 
@@ -198,11 +199,11 @@ class _FakeDebateEngine:
         self._warnings = list(warnings)
         self.calls = []
 
-    def run(self, symbol, tier1, dimensions, hold_weeks=2):
-        from src.tiered_analysis.debate import DebateResult
+    def run(self, ticker, tier1, data_reports, max_hold_weeks=2):
+        from src.tiered_analysis.deep_analysis import DeepAnalysisResult
 
-        self.calls.append(symbol)
-        return DebateResult(outlook=self._outlook, warnings=self._warnings)
+        self.calls.append(ticker)
+        return DeepAnalysisResult(outlook=self._outlook, warnings=self._warnings)
 
 
 def _env(value):
@@ -229,31 +230,31 @@ def _technicals_dim_with_levels():
     (entry − 2×ATR), target=108 (entry + 2×(entry−stop); no overhead
     resistance to cap it). Trend check passes: close 100 > sma_50 96.
     """
-    return DimensionResult(
-        dimension="technicals",
+    return DataReport(
+        name="technicals",
         kind=SourceKind.NUMERIC,
         payload=_tech_payload(),
     )
 
 
 def _debate_outlook(outlook=Outlook.BULLISH, score=7.4):
-    from src.tiered_analysis.debate import DebateOutlook
+    from src.tiered_analysis.deep_analysis import DeepAnalysisOutlook
 
-    return DebateOutlook(outlook=outlook, final_score=score,
+    return DeepAnalysisOutlook(outlook=outlook, final_score=score,
                          summary="the vote settled it", initial_score=score,
                          pools={})
 
 
 class TestDepthRoutingAndSizing(unittest.TestCase):
-    """Outlook redesign: depth 1|2 routing, outlook/action, sizing."""
+    """Outlook redesign: tier 1|2 routing, outlook/action, sizing."""
 
-    def _run(self, depth=1, sizing_settings=None, sizing_overrides=None,
+    def _run(self, tier=1, sizing_settings=None, sizing_overrides=None,
              debate_outlook=None, quick_score=7.5, tech_payload=None):
         from src.tiered_analysis.settings import SizingSettings
         from src.tiered_analysis.tiers import Tier2Stage
 
         technicals = (
-            DimensionResult(dimension="technicals", kind=SourceKind.NUMERIC,
+            DataReport(name="technicals", kind=SourceKind.NUMERIC,
                             payload=tech_payload)
             if tech_payload is not None else _technicals_dim_with_levels()
         )
@@ -263,8 +264,8 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
             "AAPL",
             market=Market.US,
             providers=[_StubProvider("technicals", technicals)],
-            quick_judge=judge,
-            depth=depth,
+            preliminary_analysis=judge,
+            tier=tier,
             sizing_settings=sizing_settings or SizingSettings(),
             sizing_overrides=sizing_overrides,
             tier2_stage=Tier2Stage(engine=debate_engine),
@@ -275,46 +276,46 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         logged = [outcome.final_report]
         return outcome, logged, debate_engine, judge.calls
 
-    def test_default_depth_is_tier1_only(self):
+    def test_default_tier_is_tier1_only(self):
         outcome, logged, debate_engine, judge_calls = self._run()
-        self.assertEqual(outcome.depth, 1)
+        self.assertEqual(outcome.tier, 1)
         self.assertEqual(sorted(outcome.state.reports), [1])
         self.assertIs(outcome.final_report, outcome.report)
-        # The quick judge IS the depth-1 judge, and it sees the hold time.
+        # The quick judge IS the tier-1 judge, and it sees the hold time.
         self.assertEqual(judge_calls, [("AAPL", 2)])
         self.assertEqual(debate_engine.calls, [])
         self.assertEqual(logged[0].tier, 1)
         self.assertEqual(outcome.outlook, Outlook.BULLISH)
-        self.assertEqual(outcome.action, Action.ENTER)
+        self.assertEqual(outcome.action, Action.BUY_NOW)
 
-    def test_depth_2_skips_the_quick_judge_and_runs_the_vote(self):
+    def test_tier_2_skips_the_preliminary_analysis_and_runs_the_vote(self):
         outcome, logged, debate_engine, judge_calls = self._run(
-            depth=2, debate_outlook=_debate_outlook())
-        # The quick-judge call must NOT run at depth 2.
+            tier=2, debate_outlook=_debate_outlook())
+        # The quick-judge call must NOT run at tier 2.
         self.assertEqual(judge_calls, [])
         self.assertEqual(sorted(outcome.state.reports), [1, 2])
         self.assertEqual(outcome.final_report.tier, 2)
         self.assertEqual(outcome.final_report.outlook, Outlook.BULLISH)
         self.assertEqual(debate_engine.calls, ["AAPL"])
-        # Skipping the blob is the documented depth-2 contract, not a data
+        # Skipping the blob is the documented tier-2 contract, not a data
         # problem — the foundation report must NOT warn about it.
         self.assertFalse(any("skipped" in w for w in outcome.report.warnings))
         # the ledger gets the deepest tier, with the evidence attached
         self.assertEqual(logged[0].tier, 2)
-        self.assertTrue(logged[0].dimensions)
+        self.assertTrue(logged[0].data_reports)
 
-    def test_depth_2_failure_has_no_tier1_fallback(self):
-        outcome, _, _, _ = self._run(depth=2, debate_outlook=None)
-        self.assertEqual(outcome.final_report.outlook, Outlook.UNKNOWN)
-        self.assertEqual(outcome.outlook, Outlook.UNKNOWN)
+    def test_tier_2_failure_has_no_tier1_fallback(self):
+        outcome, _, _, _ = self._run(tier=2, debate_outlook=None)
+        self.assertEqual(outcome.final_report.outlook, Outlook.NO_OUTLOOK)
+        self.assertEqual(outcome.outlook, Outlook.NO_OUTLOOK)
         self.assertEqual(outcome.action, Action.UNKNOWN)
         self.assertTrue(any("re-run" in w
                             for w in outcome.final_report.warnings))
 
-    def test_invalid_depth_rejected(self):
-        for depth in (0, 3, 4):
+    def test_invalid_tier_rejected(self):
+        for tier in (0, 3, 4):
             with self.assertRaises(ValueError):
-                self._run(depth=depth)
+                self._run(tier=tier)
 
     def test_missing_sizing_falls_back_to_the_form_defaults(self):
         # Owner decision 2026-07-24: every run sizes. With no settings and
@@ -324,7 +325,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         outcome, _, _, _ = self._run()
         self.assertTrue(outcome.sizing["enabled"])
         self.assertEqual(outcome.sizing["inputs"]["capital"], 100000.0)
-        self.assertEqual(outcome.sizing["inputs"]["risk_fraction"], 0.01)
+        self.assertEqual(outcome.sizing["inputs"]["risk_pct"], 1.0)
         self.assertEqual(outcome.sizing["shares"], 166.666)
 
     def test_enabled_sizing_computes_shares_from_final_levels(self):
@@ -332,7 +333,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
 
         outcome, logged, _, _ = self._run(
             sizing_settings=SizingSettings(capital=100000.0,
-                                           risk_fraction=0.01))
+                                           risk_pct=1))
         # entry 96, stop 90 → loss/share 6 → 1000/6 = 166.666 shares
         self.assertEqual(outcome.sizing["shares"], 166.666)
         self.assertTrue(outcome.sizing["enabled"])
@@ -347,7 +348,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
 
     def test_per_run_overrides_enable_sizing(self):
         outcome, _, _, _ = self._run(
-            sizing_overrides={"capital": 100000.0, "risk_fraction": 0.01})
+            sizing_overrides={"capital": 100000.0, "risk_pct": 1.0})
         self.assertEqual(outcome.sizing["shares"], 166.666)
 
     def test_reward_capped_plan_maps_bullish_to_buy_later(self):
@@ -357,11 +358,11 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         outcome, _, _, _ = self._run(
             tech_payload=_tech_payload(resistance_1=104.0))
         self.assertEqual(outcome.outlook, Outlook.BULLISH)
-        self.assertEqual(outcome.action, Action.ENTER_LATER)
+        self.assertEqual(outcome.action, Action.BUY_LATER)
 
     def test_bearish_is_no_trade_and_sizes_nothing(self):
         outcome, _, _, _ = self._run(
-            depth=2, debate_outlook=_debate_outlook(Outlook.BEARISH, 2.5))
+            tier=2, debate_outlook=_debate_outlook(Outlook.BEARISH, 2.5))
         self.assertEqual(outcome.outlook, Outlook.BEARISH)
         self.assertEqual(outcome.action, Action.NO_TRADE)
         # The ownership input is gone (2026-09-16): no held-shares block.
@@ -371,15 +372,15 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
 
     def test_plan_review_emits_structured_warnings_and_shares_detail(self):
         outcome, _, _, _ = self._run(
-            sizing_overrides={"capital": 100000.0, "risk_fraction": 0.01})
+            sizing_overrides={"capital": 100000.0, "risk_pct": 1.0})
         pw = outcome.plan_warnings
-        self.assertEqual(sorted(pw), ["entry", "shares", "stop_loss", "take_profit"])
+        self.assertEqual(sorted(pw), ["entry", "shares", "stop_loss", "target"])
         gap = pw["stop_loss"][0]
         self.assertEqual(gap["id"], "gap_atr")
         # open = stop 90 − 1×ATR 3 = 87; loss = 166.666 × (96 − 87) = 1499.994
         self.assertAlmostEqual(gap["values"]["atr_open"], 87.0)
         self.assertAlmostEqual(gap["values"]["atr_loss"], 1499.994)
-        self.assertEqual(pw["take_profit"], [])  # R:R exactly the 2× goal
+        self.assertEqual(pw["target"], [])  # R:R exactly the 2× goal
         shares_detail = outcome.report.levels_detail["levels"]["shares"]
         self.assertEqual(shares_detail["base"], 166.666)
         self.assertEqual(shares_detail["final"], 166.666)
@@ -397,7 +398,7 @@ class TestDepthRoutingAndSizing(unittest.TestCase):
         self.assertIsNone(outcome.earnings.next_date)
 
     def test_llm_usage_always_present_with_scope_note(self):
-        outcome, _, _, _ = self._run(depth=2, debate_outlook=None)
+        outcome, _, _, _ = self._run(tier=2, debate_outlook=None)
         self.assertEqual(outcome.llm_usage["total"]["calls"], 0)  # all fakes
         self.assertIn("tier-1", outcome.llm_usage["scope"])
 
@@ -408,16 +409,16 @@ class TestDeriveAction(unittest.TestCase):
     def test_bullish_splits_on_the_reward_goal(self):
         self.assertEqual(
             derive_action(Outlook.BULLISH, plan_meets_goal=True),
-            Action.ENTER)
+            Action.BUY_NOW)
         self.assertEqual(
             derive_action(Outlook.BULLISH, plan_meets_goal=False),
-            Action.ENTER_LATER)
+            Action.BUY_LATER)
 
     def test_a_goal_miss_never_changes_the_other_cells(self):
         for outlook, expected in [
             (Outlook.NEUTRAL, Action.NO_TRADE),
             (Outlook.BEARISH, Action.NO_TRADE),
-            (Outlook.UNKNOWN, Action.UNKNOWN),
+            (Outlook.NO_OUTLOOK, Action.UNKNOWN),
         ]:
             self.assertEqual(
                 derive_action(outlook, plan_meets_goal=False), expected)
@@ -434,8 +435,8 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         from src.tiered_analysis.settings import SizingSettings
 
         payload = _tech_payload(avg_vol_60d=1000.0)
-        dim = DimensionResult(
-            dimension="technicals", kind=SourceKind.NUMERIC,
+        dim = DataReport(
+            name="technicals", kind=SourceKind.NUMERIC,
             payload=payload,
         )
         prompts = []
@@ -447,9 +448,9 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         outcome = run_tiered_analysis(
             "AAPL", market=Market.US,
             providers=[_StubProvider("technicals", dim)],
-            quick_judge=_FakeQuickJudge(),
+            preliminary_analysis=_FakeQuickJudge(),
             sizing_settings=SizingSettings(capital=100000.0,
-                                           risk_fraction=0.01),
+                                           risk_pct=1),
             earnings_lookup=_no_earnings,
             plan_summarizer=summarizer,
         )
@@ -459,7 +460,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         # 166.666 shares are 16.7% of the 1000-share ADV → liquidity flags →
         # the fake AI trims to 50 with a verified link.
         reply = json.dumps({"adjustments": [{
-            "target": "shares", "value": 50,
+            "level": "shares", "value": 50,
             "reasons": [{
                 "check": "liquidity",
                 "text": ("The planned order is far above the 5% liquidity "
@@ -492,7 +493,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         # "12.34%" is stated but cited by nothing and matches no report
         # value → both rounds fail → the computed plan stands.
         reply = json.dumps({"adjustments": [{
-            "target": "shares", "value": 50,
+            "level": "shares", "value": 50,
             "reasons": [{
                 "check": "liquidity",
                 "text": ("Order flow above 12.34% of daily volume is "
@@ -511,7 +512,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         # "5%" restates the liquidity threshold and "50" is the proposed
         # value itself — neither needs a link; "1000" is cited.
         reply = json.dumps({"adjustments": [{
-            "target": "shares", "value": 50,
+            "level": "shares", "value": 50,
             "reasons": [{
                 "check": "liquidity",
                 "text": ("Cutting to 50 keeps the order under the 5% "
@@ -530,7 +531,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         # trim guardrail voids it, liquidity keeps firing, and after the
         # last round every adjustment is discarded (cycle, 2026-07-22).
         reply = json.dumps({"adjustments": [{
-            "target": "shares", "value": 500,
+            "level": "shares", "value": 500,
             "reasons": [{"check": "liquidity", "text": "More is better.",
                          "links": []}],
         }]})
@@ -551,7 +552,7 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         # not above the limit → converged with round 2's value/reason.
         def trim_reply(value):
             return json.dumps({"adjustments": [{
-                "target": "shares", "value": value,
+                "level": "shares", "value": value,
                 "reasons": [{
                     "check": "liquidity",
                     "text": (f"Cutting to {value} moves the order toward "
@@ -595,13 +596,13 @@ class TestRegistryBarsLoaderWiring(unittest.TestCase):
             Bar(high=c + 1.0, low=c - 1.0, close=c, date=f"d{i}")
             for i, c in enumerate(closes)
         ]
-        providers = get_providers(Market.US, bars_loader=lambda symbol: bars)
-        technicals = next(p for p in providers if p.dimension == "technicals")
+        providers = get_providers(Market.US, bars_loader=lambda ticker: bars)
+        technicals = next(p for p in providers if p.name == "technicals")
         result = technicals.collect("AAPL")
-        # 70 bars: the thin-history fields blank with notes (no 200-day
+        # 70 bars: the thin-history fields blank with warnings (no 200-day
         # average, thin weekly read) — but the payload exists and the
         # close is served.
-        self.assertTrue(result.field_notes)
+        self.assertTrue(result.field_warnings)
         self.assertIsNotNone(result.payload["price"]["close"]["value"])
 
 
@@ -611,7 +612,7 @@ class TestDowntrendCheckAndWarning(unittest.TestCase):
     structured warning on the entry column instead."""
 
     DOWNTREND_TECH = _tech_payload(close=89.0, sma_50=90.0, support_1=None)
-    LEVELS = SniperLevels(entry=89.0, stop_loss=83.0, take_profit=101.0)
+    LEVELS = TradePlanLevels(entry=89.0, stop_loss=83.0, target=101.0)
 
     def test_downtrend_is_flagged_for_the_adjust_cycle(self):
         from src.tiered_analysis.plan_review import _flagged_checks
@@ -644,7 +645,7 @@ class TestDowntrendCheckAndWarning(unittest.TestCase):
         from src.tiered_analysis.plan_review import build_plan_warnings
 
         warnings = build_plan_warnings(
-            self.DOWNTREND_TECH, SniperLevels(),
+            self.DOWNTREND_TECH, TradePlanLevels(),
             shares=None, risk_amount=None, reward_goal=2.0,
         )
         self.assertEqual(warnings["entry"], [])
@@ -657,7 +658,7 @@ class TestEarningsGateWarning(unittest.TestCase):
     pipeline reading it."""
 
     TECH = _tech_payload()
-    LEVELS = SniperLevels(entry=96.0, stop_loss=90.0, take_profit=108.0)
+    LEVELS = TradePlanLevels(entry=96.0, stop_loss=90.0, target=108.0)
 
     def _warnings(self, earnings):
         from src.tiered_analysis.plan_review import build_plan_warnings
@@ -694,12 +695,12 @@ class TestEarningsGateWarning(unittest.TestCase):
         self.assertEqual(self._warnings(None)["entry"], [])
 
     def test_full_run_reads_earnings_from_the_fundamentals_payload(self):
-        # End to end: the fundamentals dimension carries the date; the
+        # End to end: the fundamentals data_report carries the date; the
         # plan review must find it there without a second fetch.
         from src.tiered_analysis.settings import SizingSettings
 
-        fundamentals = DimensionResult(
-            dimension="fundamentals", kind=SourceKind.NUMERIC,
+        fundamentals = DataReport(
+            name="fundamentals", kind=SourceKind.NUMERIC,
             payload={"next_earnings_date": "2026-07-30",
                      "days_until_earnings": 3},
         )
@@ -709,7 +710,7 @@ class TestEarningsGateWarning(unittest.TestCase):
                 _StubProvider("technicals", _technicals_dim_with_levels()),
                 _StubProvider("fundamentals", fundamentals),
             ],
-            quick_judge=_FakeQuickJudge(),
+            preliminary_analysis=_FakeQuickJudge(),
             sizing_settings=SizingSettings(),
         )
         entry_warnings = outcome.plan_warnings["entry"]
@@ -724,14 +725,14 @@ class TestMacroEventGateWarning(unittest.TestCase):
     macro mirror of the earnings gate, reusing the same warning window."""
 
     TECH = _tech_payload()
-    LEVELS = SniperLevels(entry=96.0, stop_loss=90.0, take_profit=108.0)
+    LEVELS = TradePlanLevels(entry=96.0, stop_loss=90.0, target=108.0)
 
     @staticmethod
     def _macro_dim(events):
         from src.tiered_analysis.providers.technicals import make_metric
 
-        return DimensionResult(
-            dimension="macro_economy", kind=SourceKind.NUMERIC,
+        return DataReport(
+            name="macro_economy", kind=SourceKind.NUMERIC,
             payload={"events": {
                 key: make_metric(key, "x", value)
                 for key, value in events.items()
@@ -741,9 +742,9 @@ class TestMacroEventGateWarning(unittest.TestCase):
     def test_soonest_event_in_window_is_picked(self):
         from datetime import date
 
-        from src.tiered_analysis.plan_review import macro_event_from_dimensions
+        from src.tiered_analysis.plan_review import macro_event_from_data_reports
 
-        event = macro_event_from_dimensions(
+        event = macro_event_from_data_reports(
             [self._macro_dim({
                 "next_rate_decision_date": "2026-07-29",
                 "next_cpi_release_date": "2026-07-10",
@@ -760,9 +761,9 @@ class TestMacroEventGateWarning(unittest.TestCase):
     def test_all_events_outside_window_stay_quiet(self):
         from datetime import date
 
-        from src.tiered_analysis.plan_review import macro_event_from_dimensions
+        from src.tiered_analysis.plan_review import macro_event_from_data_reports
 
-        event = macro_event_from_dimensions(
+        event = macro_event_from_data_reports(
             [self._macro_dim({
                 "next_rate_decision_date": "2026-07-29",
                 "next_cpi_release_date": "2026-08-12",
@@ -771,10 +772,10 @@ class TestMacroEventGateWarning(unittest.TestCase):
         )
         self.assertIsNone(event)
 
-    def test_no_macro_dimension_stays_quiet(self):
-        from src.tiered_analysis.plan_review import macro_event_from_dimensions
+    def test_no_macro_data_report_stays_quiet(self):
+        from src.tiered_analysis.plan_review import macro_event_from_data_reports
 
-        self.assertIsNone(macro_event_from_dimensions([]))
+        self.assertIsNone(macro_event_from_data_reports([]))
 
     def test_macro_event_lands_a_structured_entry_warning(self):
         from src.tiered_analysis.plan_review import build_plan_warnings
@@ -807,7 +808,7 @@ class TestStalenessGate(unittest.TestCase):
     """The staleness gate (owner decisions 2026-08-08): stop before any
     LLM stage when the bars predate the newest completed session."""
 
-    def _run(self, stop_reason, staleness_gate=True, depth=1):
+    def _run(self, stop_reason, staleness_gate=True, tier=1):
         calls = {"judge": 0}
         judge = _FakeQuickJudge()
 
@@ -819,10 +820,10 @@ class TestStalenessGate(unittest.TestCase):
                 "AAPL",
                 market=Market.US,
                 providers=[_StubProvider("technicals", _dim("technicals"))],
-                quick_judge=judge,
+                preliminary_analysis=judge,
                 earnings_lookup=_no_earnings,
                 staleness_gate=staleness_gate,
-                depth=depth,
+                tier=tier,
             )
         calls["judge"] = len(judge.calls)
         return outcome, calls
@@ -865,8 +866,8 @@ class TestStalenessGateReadsTheBarDate(unittest.TestCase):
     def _dim_dated(self, as_of):
         payload = _tech_payload()
         payload["meta"] = {"as_of": _env(as_of)}
-        return DimensionResult(
-            dimension="technicals",
+        return DataReport(
+            name="technicals",
             kind=SourceKind.NUMERIC,
             payload=payload,
         )
@@ -877,7 +878,7 @@ class TestStalenessGateReadsTheBarDate(unittest.TestCase):
             "AAPL",
             market=Market.US,
             providers=[_StubProvider("technicals", self._dim_dated(as_of))],
-            quick_judge=judge,
+            preliminary_analysis=judge,
             earnings_lookup=_no_earnings,
             staleness_gate=True,
         )
@@ -922,21 +923,58 @@ class TestHoldWeeks(unittest.TestCase):
             "AAPL",
             market=Market.US,
             providers=[_StubProvider("technicals", _dim("technicals"))],
-            quick_judge=_FakeQuickJudge(),
+            preliminary_analysis=_FakeQuickJudge(),
             earnings_lookup=_no_earnings,
             **kwargs,
         )
 
     def test_default_is_two_weeks(self):
         outcome = self._run()
-        self.assertEqual(outcome.hold_weeks, 2)
-        self.assertEqual(outcome.final_report.hold_weeks, 2)
+        self.assertEqual(outcome.max_hold_weeks, 2)
+        self.assertEqual(outcome.final_report.max_hold_weeks, 2)
 
     def test_chosen_hold_weeks_lands_on_outcome_and_report(self):
-        outcome = self._run(hold_weeks=4)
-        self.assertEqual(outcome.hold_weeks, 4)
-        self.assertEqual(outcome.final_report.hold_weeks, 4)
+        outcome = self._run(max_hold_weeks=4)
+        self.assertEqual(outcome.max_hold_weeks, 4)
+        self.assertEqual(outcome.final_report.max_hold_weeks, 4)
 
     def test_invalid_hold_weeks_rejected(self):
         with self.assertRaises(ValueError):
-            self._run(hold_weeks=5)
+            self._run(max_hold_weeks=5)
+
+
+class TestRunLanguage(unittest.TestCase):
+    """The run's language rides on the usage tracker, so every prompt
+    builder — down to the news screens inside the providers — reads it
+    with ``run_language()`` while the run is active."""
+
+    class _RecordingJudge(_FakeQuickJudge):
+        def run(self, ticker, data_reports, max_hold_weeks):
+            self.language = run_language()
+            return super().run(ticker, data_reports, max_hold_weeks)
+
+    def _run(self, **kwargs):
+        judge = self._RecordingJudge()
+        run_tiered_analysis(
+            "AAPL",
+            market=Market.US,
+            providers=[_StubProvider("technicals", _dim("technicals"))],
+            preliminary_analysis=judge,
+            earnings_lookup=_no_earnings,
+            **kwargs,
+        )
+        return judge.language
+
+    def test_a_run_speaks_the_language_it_was_started_in(self):
+        self.assertEqual(self._run(language="zh"), "zh")
+
+    def test_a_run_started_without_a_language_speaks_english(self):
+        self.assertEqual(self._run(), "en")
+
+    def test_the_language_does_not_leak_past_the_run(self):
+        self._run(language="zh")
+        self.assertEqual(run_language(), "en")
+
+    def test_an_unknown_language_is_refused_before_any_work(self):
+        with self.assertRaises(ValueError):
+            self._run(language="fr")

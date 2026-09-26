@@ -1,6 +1,9 @@
 import type { UiLanguage } from '../i18n/uiText';
+import { readStoredValue } from './storedValue';
 
-export const UI_LANGUAGE_STORAGE_KEY = 'dsa.uiLanguage';
+export const UI_LANGUAGE_STORAGE_KEY = 'uiLanguage';
+/** The key before the 2026-09-24 rename; a choice saved under it is read once and moved. */
+export const LEGACY_UI_LANGUAGE_STORAGE_KEY = 'dsa.uiLanguage';
 
 export function normalizeUiLanguage(value?: string | null): UiLanguage | null {
   if (value === 'zh' || value === 'en') {
@@ -14,11 +17,7 @@ function getStoredUiLanguage(storage?: Storage | null): UiLanguage | null {
     return null;
   }
 
-  try {
-    return normalizeUiLanguage(storage.getItem(UI_LANGUAGE_STORAGE_KEY));
-  } catch {
-    return null;
-  }
+  return normalizeUiLanguage(readStoredValue(storage, UI_LANGUAGE_STORAGE_KEY, LEGACY_UI_LANGUAGE_STORAGE_KEY));
 }
 
 export function getUiLanguageStorage(): Storage | null {

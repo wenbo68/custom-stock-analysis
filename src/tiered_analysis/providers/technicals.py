@@ -32,11 +32,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .base import (
     Citation,
-    DimensionProvider,
-    DimensionResult,
+    DataReportProvider,
+    DataReport,
     Market,
     SourceKind,
-    note_fields,
+    warn_fields,
 )
 
 RSI_PERIOD = 14
@@ -209,7 +209,7 @@ def read_label(payload: Optional[Dict[str, Any]], group: str, key: str) -> Optio
     return value if isinstance(value, str) else None
 
 
-def technicals_as_of(dimensions: Sequence[DimensionResult]) -> Optional[str]:
+def technicals_as_of(data_reports: Sequence[DataReport]) -> Optional[str]:
     """The "bars up to" date the technicals provider computed from —
     the last COMPLETED session the analysis judged ("YYYY-MM-DD").
 
@@ -219,8 +219,8 @@ def technicals_as_of(dimensions: Sequence[DimensionResult]) -> Optional[str]:
     Shared by the staleness gate and the signal log's grading anchor,
     so both always mean the same session.
     """
-    for dim in dimensions:
-        if dim.dimension == "technicals" and dim.payload:
+    for dim in data_reports:
+        if dim.name == "technicals" and dim.payload:
             return read_label(dim.payload, "meta", "as_of")
     return None
 
@@ -736,7 +736,7 @@ def _round(value: Optional[float], digits: int = 2) -> Optional[float]:
     return round(value, digits) if value is not None else None
 
 
-def _unwired_bars_loader(symbol: str) -> List[Bar]:
+def _unwired_bars_loader(ticker: str) -> List[Bar]:
     """Placeholder loader until the tier pipeline wires a real data source."""
     raise RuntimeError(
         "technicals bars_loader not wired yet; inject one built on the "
@@ -744,7 +744,7 @@ def _unwired_bars_loader(symbol: str) -> List[Bar]:
     )
 
 
-class TechnicalsProvider(DimensionProvider):
+class TechnicalsProvider(DataReportProvider):
     """NUMERIC technicals for any market (indicators are market-agnostic).
 
     ``index_bars_loader`` (optional) feeds the market-regime and
@@ -753,7 +753,7 @@ class TechnicalsProvider(DimensionProvider):
     must not sink the stock's own report.
     """
 
-    dimension = "technicals"
+    name = "technicals"
     kind = SourceKind.NUMERIC
 
     def __init__(
@@ -771,26 +771,26 @@ class TechnicalsProvider(DimensionProvider):
     def supports(self, market: Market) -> bool:
         return True
 
-    def collect(self, symbol: str) -> DimensionResult:
+    def collect(self, ticker: str) -> DataReport:
         warnings: List[str] = []
         # A failed bars fetch still ships the card's shape — every
         # indicator blank (the compute helpers all self-guard on empty
         # history) with the warning saying why; degradation lives on
         # the fields, never on a card-level grade (2026-08-19).
         try:
-            bars = list(self._bars_loader(symbol))
+            bars = list(self._bars_loader(ticker))
         except Exception as exc:  # fail-loud as structured blanks
             bars = []
-            warnings.append(f"bars_loader failed for {symbol}: {exc}")
+            warnings.append(f"bars_loader failed for {ticker}: {exc}")
         if bars and len(bars) < MIN_HISTORY_BARS:
             warnings.append(
-                f"insufficient history for {symbol}: "
+                f"insufficient history for {ticker}: "
                 f"{len(bars)} bars < {MIN_HISTORY_BARS} required for the"
                 " minimum indicator set"
             )
 
-        field_notes: Dict[str, List[str]] = {}
-        payload, formulas = self._build_payload(bars, warnings, field_notes)
+        field_warnings: Dict[str, List[str]] = {}
+        payload, formulas = self._build_payload(bars, warnings, field_warnings)
 
         missing = [
             f"{group}.{key}"
@@ -800,19 +800,19 @@ class TechnicalsProvider(DimensionProvider):
             and f"{group}.{key}" not in OPTIONAL_METRICS
         ]
         if missing:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 f"indicators lacking history: {', '.join(sorted(missing))}",
                 sorted(missing),
             )
-        return DimensionResult(
-            dimension=self.dimension,
+        return DataReport(
+            name=self.name,
             kind=self.kind,
             payload=payload,
             citations=[Citation(source_name=self._source_name)],
             warnings=warnings,
             formulas=formulas or None,
-            field_notes=field_notes or None,
+            field_warnings=field_warnings or None,
         )
 
     # -- payload assembly ---------------------------------------------------
@@ -821,7 +821,7 @@ class TechnicalsProvider(DimensionProvider):
         self,
         bars: List[Bar],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
         closes = [bar.close for bar in bars]
         # No bars at all (total fetch failure): every metric below reads
@@ -832,15 +832,15 @@ class TechnicalsProvider(DimensionProvider):
         weekly_closes = [bar.close for bar in weekly_bars]
 
         if len(bars) < YEAR_BARS:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 f"only {len(bars)} daily bars (<{YEAR_BARS}): the one-year "
                 "fields cover the history that exists",
                 YEAR_WINDOW_FIELDS,
             )
         if len(weekly_bars) < WEEKLY_BARS_TARGET:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 f"only {len(weekly_bars)} weekly bars "
                 f"(<{WEEKLY_BARS_TARGET}): the weekly structure read is "
                 "unreliable",
@@ -921,7 +921,7 @@ class TechnicalsProvider(DimensionProvider):
         pullback = typical_pullback_atr(daily_highs, daily_lows, atr)
 
         regime, rs_1m, rs_3m, rs_label, bench_receipts = (
-            self._benchmark_fields(closes, warnings, field_notes)
+            self._benchmark_fields(closes, warnings, field_warnings)
         )
 
         # Receipt ingredients (UI formulas): values the formulas divide
@@ -1600,7 +1600,7 @@ class TechnicalsProvider(DimensionProvider):
         self,
         closes: List[float],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Tuple[
         Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any],
         Dict[str, Dict[str, Any]],
@@ -1639,7 +1639,7 @@ class TechnicalsProvider(DimensionProvider):
         )
 
         def _absent(reason: str) -> Tuple[Any, ...]:
-            note_fields(warnings, field_notes, reason, BENCHMARK_FIELDS)
+            warn_fields(warnings, field_warnings, reason, BENCHMARK_FIELDS)
             return (
                 make_metric(
                     regime_name,
@@ -1690,8 +1690,8 @@ class TechnicalsProvider(DimensionProvider):
                 interpretation=regime_interpretation,
             )
         else:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 "benchmark index history too short for the regime read",
                 ("market.regime",),
             )

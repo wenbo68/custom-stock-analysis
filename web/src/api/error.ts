@@ -296,17 +296,6 @@ export function parseApiError(error: unknown): ParsedApiError {
     ?? '请求未成功完成，请稍后重试。';
   const matchText = buildMatchText([rawMessage, errorMessage, causeMessage, code, errorCode, response?.statusText]);
 
-  const hasStockCodeField = includesAny(matchText, ['stock_code', 'stock_codes']);
-  const hasMissingParamText = includesAny(matchText, ['必须提供 stock_code 或 stock_codes', 'missing', 'required']);
-  if (hasStockCodeField && hasMissingParamText) {
-    return createParsedApiError({
-      title: '请求缺少必要参数',
-      message: '请先补充股票代码或必要输入后再试。',
-      rawMessage,
-      status,
-      category: 'missing_params',
-    });
-  }
 
   const noConfiguredLlm = (
     includesAny(matchText, ['all llm models failed']) && includesAny(matchText, ['last error: none'])

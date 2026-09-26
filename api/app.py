@@ -3,7 +3,7 @@
 
 Compared with the parent project this serves exactly four things:
 - the tiered API under ``/api/v1/tiered``
-- the chatbot API under ``/api/v1/chat``
+- the chat API under ``/api/v1/chat``
 - a health probe at ``/api/health``
 - the built frontend (``web/`` -> ``static/``) as a single-page app
 

@@ -1,0 +1,193 @@
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import type { ChatConversation, ChatConversationSummary } from '../../api/chat';
+import { UiLanguageProvider } from '../../contexts/UiLanguageContext';
+
+vi.mock('../../api/chat', () => ({
+  chatApi: {
+    listConversations: vi.fn(),
+    createConversation: vi.fn(),
+    getConversation: vi.fn(),
+    deleteConversation: vi.fn(),
+    sendMessage: vi.fn(),
+    getTranscript: vi.fn(),
+    confirm: vi.fn(),
+  },
+}));
+
+const { chatApi } = await import('../../api/chat');
+const { default: ChatPage } = await import('../ChatPage');
+
+const SUMMARY: ChatConversationSummary = {
+  id: 'c1', title: 'hi', created_at: '2026-09-23T10:00:00', updated_at: '2026-09-23T10:00:00',
+  message_count: 0, user_input_count: 0, total_tokens: 0, ended_at: null,
+};
+const EMPTY: ChatConversation = { ...SUMMARY, messages: [], pending: null };
+const ANSWERED: ChatConversation = {
+  ...SUMMARY,
+  message_count: 2, user_input_count: 1, total_tokens: 738,
+  messages: [
+    { seq: 1, role: 'user', created_at: null, text: 'hi there' },
+    { seq: 2, role: 'assistant', created_at: null, text: 'hello', usage: { input_tokens: 700, output_tokens: 38 }, llm: 'fake', time_ms: 5, transcript_chars: 100 },
+  ],
+  pending: null,
+};
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+beforeEach(() => {
+  vi.mocked(chatApi.listConversations).mockResolvedValue([]);
+  vi.mocked(chatApi.createConversation).mockResolvedValue(EMPTY);
+});
+
+describe('ChatPage', () => {
+  it('shows the sent line at once with pulsing dots, then the answer', async () => {
+    let answer: (value: ChatConversation) => void = () => {};
+    vi.mocked(chatApi.sendMessage).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <UiLanguageProvider>
+          <ChatPage />
+        </UiLanguageProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'hi there' } });
+    fireEvent.click(screen.getByTestId('chat-send'));
+
+    // The user's line and the dots, before the server has answered.
+    expect(await screen.findByTestId('chat-user')).toHaveTextContent('hi there');
+    expect(screen.getByTestId('chat-working')).toBeInTheDocument();
+    expect(screen.queryByText(/Thinking|思考中/)).toBeNull();
+    expect(screen.getByTestId('chat-input')).toBeDisabled();
+
+    vi.mocked(chatApi.listConversations).mockResolvedValue([{ ...SUMMARY, user_input_count: 1, total_tokens: 738 }]);
+    await act(async () => {
+      answer(ANSWERED);
+    });
+    await waitFor(() => expect(screen.getByText('hello')).toBeInTheDocument());
+    expect(screen.queryByTestId('chat-working')).toBeNull();
+    expect(screen.getAllByTestId('chat-user')).toHaveLength(1);
+    expect(screen.getByTestId('chat-input')).toBeEnabled();
+    expect(chatApi.sendMessage).toHaveBeenCalledWith('c1', 'hi there', 'en');
+  });
+
+  it('shows each stored step while the turn still runs, dots after it, and never a held call from a peek', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let answer: (value: ChatConversation) => void = () => {};
+    vi.mocked(chatApi.sendMessage).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    // The server has stored the user's line, the tool-calling reply and
+    // the tool's result, and holds a second call for the user's yes.
+    const partial: ChatConversation = {
+      ...SUMMARY,
+      message_count: 3, user_input_count: 1,
+      messages: [
+        { seq: 1, role: 'user', created_at: null, text: 'hi there' },
+        { seq: 2, role: 'assistant', created_at: null, text: null, tool_calls: [{ id: 'c1', name: 'list_tickers', arguments: {} }], usage: { input_tokens: 10, output_tokens: 2 }, llm: 'fake' },
+        { seq: 3, role: 'tool', created_at: null, tool_call_id: 'c1', name: 'list_tickers', output: { tickers: ['AAPL'] }, output_chars: 20, input: {} },
+      ],
+      pending: { calls: [{ call_id: 'c2', name: 'delete_run', input: { run_id: 'x' }, facts: {} }] },
+    };
+    vi.mocked(chatApi.getConversation).mockResolvedValue(partial);
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <UiLanguageProvider>
+          <ChatPage />
+        </UiLanguageProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'hi there' } });
+    fireEvent.click(screen.getByTestId('chat-send'));
+    expect(await screen.findByTestId('chat-user')).toHaveTextContent('hi there');
+    expect(screen.queryByTestId('chat-tool')).toBeNull();
+
+    // One peek later the two finished steps are on the page, the dots
+    // sit after them, and the held call is not shown yet.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(900);
+    });
+    expect(chatApi.getConversation).toHaveBeenCalledWith('c1');
+    expect(screen.getByTestId('chat-assistant')).toBeInTheDocument();
+    const tool = screen.getByTestId('chat-tool');
+    expect(tool).toHaveTextContent(/list_tickers/);
+    const dots = screen.getByTestId('chat-working');
+    expect(tool.compareDocumentPosition(dots) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByTestId('chat-pending')).toBeNull();
+    expect(screen.getByTestId('chat-input')).toBeDisabled();
+
+    // The request's own answer brings the held call; the dots go.
+    vi.mocked(chatApi.getConversation).mockClear();
+    await act(async () => {
+      answer(partial);
+    });
+    await waitFor(() => expect(screen.getByTestId('chat-pending')).toBeInTheDocument());
+    expect(screen.queryByTestId('chat-working')).toBeNull();
+    expect(screen.getByTestId('chat-tool-decision')).toHaveTextContent(/approve|同意/);
+    // Peeking stopped with the request.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(chatApi.getConversation).not.toHaveBeenCalled();
+  });
+
+  it('floats the mode, language and color menus over the top right corner of the chat, and the message box over its bottom', () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue([SUMMARY]);
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <UiLanguageProvider>
+          <ChatPage />
+        </UiLanguageProvider>
+      </MemoryRouter>,
+    );
+    // The header's menus, with their symbols, float in the chat column's top right corner, on a shade that hugs them: no strip across the width.
+    const band = screen.getByTestId('chat-band');
+    expect(band).toHaveClass('absolute', 'top-0', 'right-0');
+    expect(band.className).not.toMatch(/inset-x-0|bg-/);
+    expect(screen.getByTestId('chat-band-content').className).toMatch(/bg-black\/55.*shadow-/);
+    const controls = screen.getByTestId('header-controls');
+    expect(band).toContainElement(controls);
+    for (const menu of ['mode-menu', 'language-menu', 'theme-menu']) {
+      expect(controls).toContainElement(screen.getByTestId(menu));
+      expect(screen.getByTestId(menu).querySelector('svg')).not.toBeNull();
+    }
+    const sidebar = screen.getByTestId('chat-sidebar');
+    expect(sidebar).not.toContainElement(controls);
+    // The panel is level 1; the composer, directly on the page, is level 1 too.
+    expect(sidebar).toHaveClass('bg-gray-900');
+    expect(screen.getByTestId('chat-composer')).toHaveClass('bg-gray-900');
+    // The message box floats at the bottom of the chat column, on a shade.
+    const dock = screen.getByTestId('chat-dock');
+    expect(screen.getByTestId('chat-column')).toHaveClass('relative');
+    expect(dock).toHaveClass('absolute', 'bottom-0');
+    expect(dock.className).not.toMatch(/bg-/);
+    expect(screen.getByTestId('chat-dock-content').className).toMatch(/bg-black\/55.*shadow-/);
+    expect(dock).toContainElement(screen.getByTestId('chat-composer'));
+  });
+
+  it('scrolls the chat across the whole column, caps only the text, and puts no backdrop behind it', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue([{ ...SUMMARY, user_input_count: 1, total_tokens: 738 }]);
+    vi.mocked(chatApi.getConversation).mockResolvedValue(ANSWERED);
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <UiLanguageProvider>
+          <ChatPage />
+        </UiLanguageProvider>
+      </MemoryRouter>,
+    );
+    // The page and the column run edge to edge; nothing caps or insets them.
+    const main = screen.getByRole('main');
+    expect(main.className).not.toMatch(/max-w-|px-|gap-/);
+    const column = screen.getByTestId('chat-column');
+    expect(column.className).not.toMatch(/max-w-|mx-auto|bg-gray-900|p-4/);
+    // The text inside the scroll box is capped and centered, and keeps a bottom inset for the dock.
+    fireEvent.click(await screen.findByTestId('chat-conversation'));
+    const thread = await screen.findByTestId('chat-thread');
+    expect(thread).toHaveClass('h-full', 'overflow-y-auto');
+    expect(thread.className).not.toMatch(/max-w-/);
+    const content = screen.getByTestId('chat-thread-content');
+    expect(content).toHaveClass('mx-auto', 'max-w-[59rem]', 'pt-[var(--chat-band-height,4rem)]', 'pb-[var(--chat-dock-height,8rem)]');
+    expect(screen.getByTestId('chat-dock-content').parentElement).toHaveClass('mx-auto', 'max-w-[59rem]');
+  });
+});

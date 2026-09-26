@@ -10,7 +10,7 @@ something:
   LLM call that may adjust the plan: trim the share count, move the
   stop, move the target. Every accepted adjustment carries a
   code-validated, link-cited reason (the same citation contract as the
-  tier-2 debate).
+  deep analysis).
 - **The cycle** — an adjusted plan can trip a check the computed plan
   did not (a tightened stop raises the mechanical share count past the
   liquidity limit), so the PLAN-DEPENDENT checks (liquidity, stop vs
@@ -48,7 +48,7 @@ from typing import (
 
 from pydantic import BaseModel, Field
 
-from .debate import (
+from .deep_analysis import (
     _NUMERIC_REASON_RE,
     _link_value_text,
     _payload_value,
@@ -56,33 +56,35 @@ from .debate import (
     _values_equal,
     value_pattern,
 )
-from .earnings import EARNINGS_WARNING_DAYS, EarningsInfo, earnings_from_dimensions
+from .earnings import EARNINGS_WARNING_DAYS, EarningsInfo, earnings_from_data_reports
 from .levels import (
     LEVEL_KEYS,
     AdjustmentProposal,
     BaseLevels,
     apply_adjustments,
     decisions_to_detail,
-    decisions_to_sniper,
+    decisions_to_levels,
 )
 from .llm_support import (
     LlmConfigError,
     default_summarizer,
     display_value,
     evidence_block,
+    in_language,
+    language_rule,
     parse_llm_json,
     summarize_with_schema,
 )
-from .providers.base import DimensionResult, Market
+from .providers.base import DataReport, Market
 from .providers.technicals import read_label, read_metric
 from .schema import (
-    DEFAULT_HOLD_WEEKS,
+    DEFAULT_MAX_HOLD_WEEKS,
     REWARD_GOAL_EPS,
     Outlook,
     SizingSlots,
-    SniperLevels,
-    hold_weeks_text,
-    reward_ratio,
+    TradePlanLevels,
+    max_hold_weeks_text,
+    calculate_reward_ratio,
 )
 from .settings import SizingSettings
 from .sizing import SizingInputs, SizingResult, floor_to_tradeable, size_position
@@ -98,8 +100,8 @@ VOLATILITY_FLAG_PCT = 4.0
 #: How far past the stop the ATR gap scenario assumes the open lands.
 GAP_ATR_MULTIPLE = 1.0
 
-#: Adjustable targets the LLM may propose (the entry is formula-owned).
-_ADJUSTABLE = ("stop_loss", "take_profit", "shares")
+#: Adjustable levels the LLM may propose (the entry is formula-owned).
+_ADJUSTABLE = ("stop_loss", "target", "shares")
 
 #: Checks whose condition depends on the plan itself (share count, stop
 #: placement). Only these re-run each round and define convergence —
@@ -118,32 +120,32 @@ MAX_ADJUST_ROUNDS = 3
 class PlanReview:
     """Everything the review produced, ready for the run outcome."""
 
-    levels: SniperLevels
+    levels: TradePlanLevels
     levels_detail: Dict[str, Any]
     warnings: List[str] = field(default_factory=list)
     #: Structured per-column warnings for the trade-plan card:
-    #: {"entry"|"stop_loss"|"take_profit"|"shares": [{"id", "values"}]}.
+    #: {"entry"|"stop_loss"|"target"|"shares": [{"id", "values"}]}.
     plan_warnings: Optional[Dict[str, List[Dict[str, Any]]]] = None
     sizing_detail: Optional[Dict[str, Any]] = None
     sizing_slots: SizingSlots = field(default_factory=SizingSlots)
 
 
-def _tech_payload(dimensions: Sequence[DimensionResult]) -> Dict[str, Any]:
-    for dim in dimensions:
-        if dim.dimension == "technicals" and dim.payload:
+def _tech_payload(data_reports: Sequence[DataReport]) -> Dict[str, Any]:
+    for dim in data_reports:
+        if dim.name == "technicals" and dim.payload:
             return dim.payload
     return {}
 
 
 def _size(
-    levels: SniperLevels,
+    levels: TradePlanLevels,
     outlook: Outlook,
     market: Market,
     settings: SizingSettings,
 ) -> Tuple[SizingInputs, SizingResult]:
     inputs = SizingInputs(
         capital=settings.capital,
-        risk_fraction=settings.risk_fraction,
+        risk_pct=settings.risk_pct,
         entry=levels.entry,
         stop_loss=levels.stop_loss,
         outlook=outlook,
@@ -155,10 +157,10 @@ def _size(
 def sizing_detail_dict(
     settings: SizingSettings,
     result: SizingResult,
-    levels: SniperLevels,
+    levels: TradePlanLevels,
     shares: Optional[float] = None,
     risk_amount: Optional[float] = None,
-    extra_notes: Sequence[str] = (),
+    extra_warnings: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """The JSON sizing block; ``shares``/``risk_amount`` override the
     engine's numbers when the AI trimmed the count."""
@@ -178,11 +180,11 @@ def sizing_detail_dict(
         "lot_size": result.lot_size,
         "reason_code": result.reason_code.value if result.reason_code else None,
         "refusal_reason": result.refusal_reason,
-        "notes": list(result.notes) + list(extra_notes),
+        "warnings": list(result.warnings) + list(extra_warnings),
         "inputs": {
             "capital": settings.capital,
-            "risk_fraction": settings.risk_fraction,
-            "reward_risk": settings.reward_risk,
+            "risk_pct": settings.risk_pct,
+            "reward_ratio": settings.reward_ratio,
             "entry": levels.entry,
             "stop_loss": levels.stop_loss,
         },
@@ -204,7 +206,7 @@ class _Check:
 
 def _flagged_checks(
     tech: Dict[str, Any],
-    levels: SniperLevels,
+    levels: TradePlanLevels,
     shares: Optional[float],
 ) -> List[_Check]:
     checks: List[_Check] = []
@@ -265,8 +267,8 @@ MACRO_EVENT_KEYS = (
 )
 
 
-def macro_event_from_dimensions(
-    dimensions: Sequence[DimensionResult],
+def macro_event_from_data_reports(
+    data_reports: Sequence[DataReport],
     today: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     """The soonest scheduled macro event inside the warning window.
@@ -279,8 +281,8 @@ def macro_event_from_dimensions(
     import datetime as _dt
 
     payload = next(
-        (dim.payload for dim in dimensions
-         if dim.dimension == "macro_economy" and dim.payload),
+        (dim.payload for dim in data_reports
+         if dim.name == "macro_economy" and dim.payload),
         None,
     )
     if payload is None:
@@ -306,7 +308,7 @@ def macro_event_from_dimensions(
 
 def build_plan_warnings(
     tech: Dict[str, Any],
-    levels: SniperLevels,
+    levels: TradePlanLevels,
     shares: Optional[float],
     risk_amount: Optional[float],
     reward_goal: float,
@@ -315,9 +317,9 @@ def build_plan_warnings(
 ) -> Dict[str, List[Dict[str, Any]]]:
     """The structured per-column warnings (numbers only, no wording)."""
     warnings: Dict[str, List[Dict[str, Any]]] = {
-        "entry": [], "stop_loss": [], "take_profit": [], "shares": [],
+        "entry": [], "stop_loss": [], "target": [], "shares": [],
     }
-    entry, stop, target = levels.entry, levels.stop_loss, levels.take_profit
+    entry, stop, target = levels.entry, levels.stop_loss, levels.target
     atr = read_metric(tech, "volatility", "atr_14")
     worst_day_pct = read_metric(tech, "volatility", "worst_day_pct_1y")
     close = read_metric(tech, "price", "close")
@@ -393,13 +395,13 @@ def build_plan_warnings(
                         ),
                     },
                 })
-    ratio = reward_ratio(levels)
+    ratio = calculate_reward_ratio(levels)
     if ratio is not None:
         if ratio < reward_goal - REWARD_GOAL_EPS:
-            warnings["take_profit"].append({
+            warnings["target"].append({
                 "id": "reward_below_goal",
                 "values": {
-                    "entry": entry, "stop_loss": stop, "take_profit": target,
+                    "entry": entry, "stop_loss": stop, "target": target,
                     "ratio": ratio, "goal": reward_goal,
                 },
             })
@@ -410,7 +412,7 @@ def build_plan_warnings(
 # The LLM adjustment call
 # ---------------------------------------------------------------------------
 
-_PROMPT_TEMPLATE = """You are the risk reviewer of a swing-trade BUY plan for {symbol}.
+_PROMPT_TEMPLATE = """You are the risk reviewer of a swing-trade BUY plan for {ticker}.
 The position will be held for up to {hold_text} (the user's chosen max
 hold time) — judge every risk against that horizon.
 
@@ -420,8 +422,8 @@ Collected evidence (the ONLY facts you may use — no outside knowledge):
 The computed plan (deterministic formulas):
 - entry = {entry} ({entry_formula})
 - stop_loss = {stop_loss} ({stop_formula})
-- take_profit = {take_profit} ({target_formula})
-- shares = {base_shares} (capital × risk fraction ÷ (entry − stop_loss))
+- target = {target} ({target_formula})
+- shares = {base_shares} (capital × risk % ÷ 100 ÷ (entry − stop_loss))
 {round_note}
 Deterministic checks flagged these problems:
 {checks}
@@ -429,12 +431,12 @@ Deterministic checks flagged these problems:
 Propose adjustments that fix ONLY the flagged problems. Rules (all
 checked mechanically by code):
 - Reply with JSON only:
-  {{"adjustments": [{{"target": "stop_loss" | "take_profit" | "shares",
+  {{"adjustments": [{{"level": "stop_loss" | "target" | "shares",
     "value": <number>,
     "reasons": [{{"check": "<flagged check name>",
       "text": "<one sentence>",
       "links": [{{"ref": "technicals.volatility.atr_pct", "value": "4.3"}}]}}]}}]}}
-- At most one adjustment per target. An empty list is a valid answer if
+- At most one adjustment per level. An empty list is a valid answer if
   no change genuinely helps.
 - Each reasons entry explains ONE flagged problem this adjustment fixes:
   "check" is that problem's name copied exactly from the flagged list
@@ -442,7 +444,7 @@ checked mechanically by code):
   never invent a check name, never repeat one within an adjustment.
 - "shares" may only go DOWN from {trim_baseline}.
 - A price move must stay within 1 ATR ({atr}) of its computed value, and
-  keep stop_loss < entry < take_profit.
+  keep stop_loss < entry < target.
 - Each text must state every report number it relies on EXACTLY as the
   report above displays it, each cited in that entry's "links" with
   {{"ref": the leaf field, "value": the displayed value}}. Plain
@@ -450,9 +452,10 @@ checked mechanically by code):
 - Never point at a report metric by name alone: write its name AND its
   displayed value, cited in "links" (e.g. "the one-year high (461.62)").
   Do not state numbers you cannot cite — the only uncited numbers
-  allowed are your proposed value, that target's computed value, and
+  allowed are your proposed value, that level's computed value, and
   the thresholds quoted in the flagged checks. No market lore that the
-  report does not carry."""
+  report does not carry.
+{language_rule}"""
 
 _FIX_TEMPLATE = """{prompt}
 
@@ -505,7 +508,7 @@ def _link_errors(
     links: Sequence[Dict[str, Any]],
     sentence: str,
     where: str,
-    dimensions: Sequence[DimensionResult],
+    data_reports: Sequence[DataReport],
 ) -> List[str]:
     errors: List[str] = []
     for link in links:
@@ -513,7 +516,7 @@ def _link_errors(
         if not ref:
             errors.append(f"{where}: link without a ref")
             continue
-        resolves, actual = _payload_value(ref, dimensions)
+        resolves, actual = _payload_value(ref, data_reports)
         if not resolves:
             errors.append(
                 f"{where} link {ref!r}: does not resolve to a single report value"
@@ -600,7 +603,7 @@ class _PlanReasonForm(BaseModel):
 
 class _PlanAdjustmentForm(BaseModel):
     # Mirrors _ADJUSTABLE — Literal needs the strings spelled out.
-    target: Literal["stop_loss", "take_profit", "shares"]
+    level: Literal["stop_loss", "target", "shares"]
     value: float
     reasons: List[_PlanReasonForm] = Field(default_factory=list)
 
@@ -629,14 +632,14 @@ def _parse_adjustments(
         if not isinstance(item, dict):
             errors.append(f"{where}: not an object")
             continue
-        target = str(item.get("target", "")).strip()
-        if target not in _ADJUSTABLE:
+        level = str(item.get("level", "")).strip()
+        if level not in _ADJUSTABLE:
             errors.append(
-                f"{where}: target must be one of {', '.join(_ADJUSTABLE)}"
+                f"{where}: level must be one of {', '.join(_ADJUSTABLE)}"
             )
             continue
-        if target in seen:
-            errors.append(f"{where}: duplicate target {target!r}")
+        if level in seen:
+            errors.append(f"{where}: duplicate level {level!r}")
             continue
         value = item.get("value")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -646,16 +649,16 @@ def _parse_adjustments(
         if reason_errors:
             errors.extend(reason_errors)
             continue
-        seen.add(target)
+        seen.add(level)
         usable.append({
-            "target": target, "value": float(value), "reasons": reasons,
+            "level": level, "value": float(value), "reasons": reasons,
         })
     return usable, errors
 
 
 def _request_adjustments(
-    symbol: str,
-    dimensions: Sequence[DimensionResult],
+    ticker: str,
+    data_reports: Sequence[DataReport],
     bases: BaseLevels,
     base_shares: Optional[float],
     trim_baseline: Optional[float],
@@ -664,7 +667,7 @@ def _request_adjustments(
     summarizer: Callable[[str], str],
     round_note: str = "",
     extra_allowed: Sequence[str] = (),
-    hold_weeks: int = DEFAULT_HOLD_WEEKS,
+    max_hold_weeks: int = DEFAULT_MAX_HOLD_WEEKS,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """One call + one fix round; returns (adjustments, warnings).
 
@@ -683,42 +686,43 @@ def _request_adjustments(
 
     entry_v, entry_f = basis("entry")
     stop_v, stop_f = basis("stop_loss")
-    target_v, target_f = basis("take_profit")
+    target_v, target_f = basis("target")
     prompt = _PROMPT_TEMPLATE.format(
-        symbol=symbol,
-        hold_text=hold_weeks_text(hold_weeks),
-        evidence=evidence_block(dimensions, display=True),
+        ticker=ticker,
+        hold_text=max_hold_weeks_text(max_hold_weeks),
+        evidence=evidence_block(data_reports, display=True),
         entry=entry_v, entry_formula=entry_f,
         stop_loss=stop_v, stop_formula=stop_f,
-        take_profit=target_v, target_formula=target_f,
+        target=target_v, target_formula=target_f,
         base_shares=display_value(base_shares) if base_shares is not None else "—",
         trim_baseline=display_value(trim_baseline) if trim_baseline is not None else "—",
         round_note=round_note,
         checks="\n".join(f"- {check.name}: {check.text}" for check in checks),
         atr=display_value(atr) if atr is not None else "—",
+        language_rule=language_rule(),
     )
 
     allowed_checks = [check.name for check in checks]
     base_displays = {
-        "stop_loss": stop_v, "take_profit": target_v,
+        "stop_loss": stop_v, "target": target_v,
         "shares": (
             display_value(trim_baseline) if trim_baseline is not None else "—"
         ),
     }
 
     def reason_link_errors(adjustment: Dict[str, Any]) -> List[str]:
-        target = adjustment["target"]
+        level = adjustment["level"]
         allowed_always = [
             display_value(adjustment["value"]),
-            base_displays.get(target, "—"),
+            base_displays.get(level, "—"),
             *_THRESHOLD_DISPLAYS,
             *extra_allowed,
         ]
         problems: List[str] = []
         for reason in adjustment["reasons"]:
-            where = f'adjustment "{target}" ({reason["check"]})'
+            where = f'adjustment "{level}" ({reason["check"]})'
             problems.extend(_link_errors(
-                reason["links"], reason["text"], where, dimensions,
+                reason["links"], reason["text"], where, data_reports,
             ))
             cited = [
                 _link_value_text(link.get("value"))
@@ -731,15 +735,19 @@ def _request_adjustments(
         return problems
 
     warnings: List[str] = []
-    adjustments, errors = _parse_adjustments(
-        parse_llm_json(summarize_with_schema(summarizer, prompt, _PlanReplyForm)),
-        allowed_checks,
-    )
-    for adjustment in adjustments:
-        errors.extend(reason_link_errors(adjustment))
-    if errors:
+
+    def attempt(attempt_prompt: str) -> List[Dict[str, Any]]:
+        """One call plus its citation fix round; the usable adjustments."""
+        adjustments, errors = _parse_adjustments(
+            parse_llm_json(summarize_with_schema(summarizer, attempt_prompt, _PlanReplyForm)),
+            allowed_checks,
+        )
+        for adjustment in adjustments:
+            errors.extend(reason_link_errors(adjustment))
+        if not errors:
+            return adjustments
         fix_prompt = _FIX_TEMPLATE.format(
-            prompt=prompt, errors="\n".join(f"- {error}" for error in errors)
+            prompt=attempt_prompt, errors="\n".join(f"- {error}" for error in errors)
         )
         adjustments, errors = _parse_adjustments(
             parse_llm_json(
@@ -752,16 +760,24 @@ def _request_adjustments(
             link_problems = reason_link_errors(adjustment)
             if link_problems:
                 warnings.append(
-                    f"plan-review adjustment for {adjustment['target']} dropped "
+                    f"plan-review adjustment for {adjustment['level']} dropped "
                     f"— citations unfixable: {'; '.join(link_problems)}"
                 )
             else:
                 kept.append(adjustment)
-        adjustments = kept
         warnings.extend(
             f"plan-review reply problem: {error}" for error in errors
         )
-    return adjustments, warnings
+        return kept
+
+    # The reasons are read on the plan card, so they must be in the
+    # run's language; a wrong-language reply is asked again (in_language).
+    adjustments = in_language(
+        attempt, prompt,
+        lambda found: [reason["text"] for adjustment in found for reason in adjustment["reasons"]],
+        "plan review", warnings,
+    )
+    return adjustments or [], warnings
 
 
 # ---------------------------------------------------------------------------
@@ -793,12 +809,12 @@ def _shares_detail(
     detail: Dict[str, Any] = {
         "base": base,
         "formula": (
-            "capital × risk_fraction ÷ (entry − stop_loss)"
+            "capital × risk_pct ÷ 100 ÷ (entry − stop_loss)"
             if base is not None else None
         ),
         "inputs": {
             "capital": base_inputs.capital,
-            "risk_fraction": base_inputs.risk_fraction,
+            "risk_pct": base_inputs.risk_pct,
             "entry": base_inputs.entry,
             "stop_loss": base_inputs.stop_loss,
         } if base is not None else None,
@@ -814,7 +830,7 @@ def _shares_detail(
     if adjusted is not None:
         detail["adjusted_inputs"] = {
             "capital": final_inputs.capital,
-            "risk_fraction": final_inputs.risk_fraction,
+            "risk_pct": final_inputs.risk_pct,
             "entry": final_inputs.entry,
             "stop_loss": final_inputs.stop_loss,
         }
@@ -829,7 +845,7 @@ class _RoundPlan:
 
     decisions: Dict[str, Any]
     adjust_warnings: List[str]
-    levels: SniperLevels
+    levels: TradePlanLevels
     inputs: SizingInputs
     result: SizingResult
     ai_shares: Optional[float]
@@ -847,34 +863,34 @@ def _merge_proposals(
 ) -> Dict[str, Dict[str, Any]]:
     """Fold one round's adjustments into the cumulative set (new dict).
 
-    A later round's value replaces the earlier one for the same target;
+    A later round's value replaces the earlier one for the same level;
     reasons merge — an earlier reason survives unless the new round
     re-explains the same check (one bullet per check in the UI).
     """
     combined = dict(merged)
     for adjustment in adjustments:
-        target = adjustment["target"]
+        level = adjustment["level"]
         reasons = list(adjustment["reasons"])
-        previous = combined.get(target)
+        previous = combined.get(level)
         if previous is not None:
             fresh_checks = {reason["check"] for reason in reasons}
             reasons = [
                 reason for reason in previous["reasons"]
                 if reason["check"] not in fresh_checks
             ] + reasons
-        combined[target] = {"value": adjustment["value"], "reasons": reasons}
+        combined[level] = {"value": adjustment["value"], "reasons": reasons}
     return combined
 
 
 def review_plan(
-    symbol: str,
-    dimensions: Sequence[DimensionResult],
+    ticker: str,
+    data_reports: Sequence[DataReport],
     bases: BaseLevels,
     outlook: Outlook,
     market: Market,
     settings: SizingSettings,
     summarizer: Optional[Callable[[str], str]] = None,
-    hold_weeks: int = DEFAULT_HOLD_WEEKS,
+    max_hold_weeks: int = DEFAULT_MAX_HOLD_WEEKS,
 ) -> PlanReview:
     """Run the check-adjust cycle and produce the final plan block.
 
@@ -888,15 +904,15 @@ def review_plan(
     ``levels_detail["review_failures"]`` lists what failed per round.
     LLM outages keep the computed plan with a warning, as before.
     """
-    tech = _tech_payload(dimensions)
+    tech = _tech_payload(data_reports)
     atr = read_metric(tech, "volatility", "atr_14")
-    earnings = earnings_from_dimensions(dimensions)
+    earnings = earnings_from_data_reports(data_reports)
     warnings: List[str] = []
 
     # The computed plan: base levels, base share count.
     base_decisions, base_adj_warnings = apply_adjustments(bases, [], atr=atr)
     warnings.extend(base_adj_warnings)
-    base_levels = decisions_to_sniper(base_decisions)
+    base_levels = decisions_to_levels(base_decisions)
     base_inputs, base_result = _size(base_levels, outlook, market, settings)
 
     def evaluate(merged: Dict[str, Dict[str, Any]]) -> _RoundPlan:
@@ -911,7 +927,7 @@ def review_plan(
         decisions, adjust_warnings = apply_adjustments(
             bases, price_proposals, atr=atr
         )
-        levels = decisions_to_sniper(decisions)
+        levels = decisions_to_levels(decisions)
         inputs, result = _size(levels, outlook, market, settings)
 
         # The AI's share trim: reductions only (vs this round's mechanical
@@ -977,9 +993,9 @@ def review_plan(
                         display_value(plan.levels.stop_loss)
                         if plan.levels.stop_loss is not None else "—"
                     ),
-                    "take_profit": (
-                        display_value(plan.levels.take_profit)
-                        if plan.levels.take_profit is not None else "—"
+                    "target": (
+                        display_value(plan.levels.target)
+                        if plan.levels.target is not None else "—"
                     ),
                     "shares": (
                         display_value(plan.shares)
@@ -989,7 +1005,7 @@ def review_plan(
                 round_note = (
                     "Your earlier accepted adjustments were applied; the plan "
                     f"currently stands at stop_loss = {current['stop_loss']}, "
-                    f"take_profit = {current['take_profit']}, shares = "
+                    f"target = {current['target']}, shares = "
                     f"{current['shares']}. The checks below were re-run "
                     "against this CURRENT plan. New adjustments replace your "
                     "earlier ones for the same target and must still obey "
@@ -1001,12 +1017,12 @@ def review_plan(
                 )
             try:
                 adjustments, request_warnings = _request_adjustments(
-                    symbol, dimensions, bases,
+                    ticker, data_reports, bases,
                     base_result.shares, plan.result.shares,
                     prompt_checks, atr,
                     summarizer or default_summarizer,
                     round_note=round_note, extra_allowed=extra_allowed,
-                    hold_weeks=hold_weeks,
+                    max_hold_weeks=max_hold_weeks,
                 )
             except LlmConfigError as exc:
                 warnings.append(f"plan review skipped: {exc}")
@@ -1014,7 +1030,7 @@ def review_plan(
                 break
             except Exception as exc:  # LLM transport failures degrade loudly
                 logger.warning(
-                    "plan review LLM call failed for %s: %s", symbol, exc
+                    "plan review LLM call failed for %s: %s", ticker, exc
                 )
                 warnings.append(f"plan review LLM call failed: {exc}")
                 # No completed-but-flagged round yet → plain outage, keep
@@ -1096,12 +1112,12 @@ def review_plan(
     )
     sizing_detail = sizing_detail_dict(
         settings, final_result, levels,
-        shares=final_shares, risk_amount=final_risk, extra_notes=trim_notes,
+        shares=final_shares, risk_amount=final_risk, extra_warnings=trim_notes,
     )
     slots = (
         SizingSlots(
             capital=settings.capital,
-            risk_fraction=settings.risk_fraction,
+            risk_pct=settings.risk_pct,
             shares=float(final_shares),
         )
         if final_shares is not None and final_shares > 0
@@ -1119,9 +1135,9 @@ def review_plan(
         levels_detail["review_failures"] = review_failures
 
     plan_warnings = build_plan_warnings(
-        tech, levels, final_shares, final_risk, settings.reward_risk,
+        tech, levels, final_shares, final_risk, settings.reward_ratio,
         earnings=earnings,
-        macro_event=macro_event_from_dimensions(dimensions),
+        macro_event=macro_event_from_data_reports(data_reports),
     )
 
     return PlanReview(

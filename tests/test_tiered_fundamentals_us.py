@@ -149,13 +149,13 @@ FAKE_BARS = [
 
 def _provider(**overrides) -> FundamentalsUSProvider:
     kwargs = dict(
-        facts_loader=lambda symbol: FAKE_FACTS,
-        info_loader=lambda symbol: FAKE_INFO,
-        earnings_lookup=lambda symbol: FAKE_EARNINGS_FIELDS,
-        earnings_history_loader=lambda symbol: FAKE_EARNINGS_ROWS,
-        eps_trend_loader=lambda symbol: FAKE_EPS_TREND,
-        eps_revisions_loader=lambda symbol: FAKE_EPS_REVISIONS,
-        bars_loader=lambda symbol: FAKE_BARS,
+        facts_loader=lambda ticker: FAKE_FACTS,
+        info_loader=lambda ticker: FAKE_INFO,
+        earnings_lookup=lambda ticker: FAKE_EARNINGS_FIELDS,
+        earnings_history_loader=lambda ticker: FAKE_EARNINGS_ROWS,
+        eps_trend_loader=lambda ticker: FAKE_EPS_TREND,
+        eps_revisions_loader=lambda ticker: FAKE_EPS_REVISIONS,
+        bars_loader=lambda ticker: FAKE_BARS,
         today=lambda: TODAY,
     )
     kwargs.update(overrides)
@@ -345,7 +345,7 @@ class TestFundamentalsUSProvider(unittest.TestCase):
     def test_all_sources_up_envelope_payload(self):
         result = _provider().collect("AAPL")
         self.assertEqual(result.kind, SourceKind.NUMERIC)
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
         payload = result.payload
 
         for group, key, expected in (
@@ -458,17 +458,17 @@ class TestFundamentalsUSProvider(unittest.TestCase):
         self.assertNotIn("yoy_now", trend["inputs"])
 
     def test_edgar_down_blanks_statement_fields_with_notes(self):
-        def _edgar_boom(symbol):
+        def _edgar_boom(ticker):
             raise RuntimeError("SEC rate limited")
 
         result = _provider(facts_loader=_edgar_boom).collect("AAPL")
-        self.assertTrue(result.is_actionable)  # payload still ships
+        self.assertTrue(result.counted)  # payload still ships
         # EDGAR-fed fields are blank, with the failure note on each.
         self.assertIsNone(metric_value(result.payload["growth"]["revenue_yoy_q"]))
         self.assertIsNone(metric_value(result.payload["balance"]["current_ratio"]))
         self.assertTrue(
             any("SEC rate limited" in note
-                for note in result.field_notes["growth.revenue_yoy_q"])
+                for note in result.field_warnings["growth.revenue_yoy_q"])
         )
         # The healthy Yahoo side still carries its values.
         self.assertAlmostEqual(
@@ -477,7 +477,7 @@ class TestFundamentalsUSProvider(unittest.TestCase):
         self.assertTrue(any("SEC rate limited" in w for w in result.warnings))
 
     def test_yahoo_down_blanks_valuation_with_notes(self):
-        def _yahoo_boom(symbol):
+        def _yahoo_boom(ticker):
             raise RuntimeError("yahoo unavailable")
 
         result = _provider(info_loader=_yahoo_boom).collect("AAPL")
@@ -485,7 +485,7 @@ class TestFundamentalsUSProvider(unittest.TestCase):
         self.assertIsNone(metric_value(result.payload["meta"]["sector"]))
         self.assertTrue(
             any("yahoo unavailable" in note
-                for note in result.field_notes["valuation.pe_ttm"])
+                for note in result.field_warnings["valuation.pe_ttm"])
         )
         # The healthy EDGAR side still carries its values.
         self.assertAlmostEqual(
@@ -494,7 +494,7 @@ class TestFundamentalsUSProvider(unittest.TestCase):
         self.assertTrue(any("yahoo unavailable" in w for w in result.warnings))
 
     def test_everything_down_ships_all_blank_payload_with_notes(self):
-        def _boom(symbol):
+        def _boom(ticker):
             raise RuntimeError("down")
 
         result = _provider(
@@ -519,7 +519,7 @@ class TestFundamentalsUSProvider(unittest.TestCase):
                 )
         # An all-blank NUMERIC payload is still present, so downstream
         # numeric consumers gate per-field, not on the card.
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
         # Both core failures land as warnings and per-field notes.
         self.assertTrue(
             any("EDGAR fundamentals failed" in w for w in result.warnings)
@@ -527,27 +527,27 @@ class TestFundamentalsUSProvider(unittest.TestCase):
         self.assertTrue(any("Yahoo summary failed" in w for w in result.warnings))
         self.assertTrue(
             any("EDGAR fundamentals failed" in note
-                for note in result.field_notes["growth.revenue_yoy_q"])
+                for note in result.field_warnings["growth.revenue_yoy_q"])
         )
         self.assertTrue(
             any("Yahoo summary failed" in note
-                for note in result.field_notes["valuation.pe_ttm"])
+                for note in result.field_warnings["valuation.pe_ttm"])
         )
 
     def test_empty_yahoo_info_is_surfaced_never_a_silent_blank(self):
         # Design doc §2.2: ok-but-empty responses are the silent-blank trap.
-        result = _provider(info_loader=lambda symbol: {}).collect("AAPL")
+        result = _provider(info_loader=lambda ticker: {}).collect("AAPL")
         self.assertIsNone(metric_value(result.payload["valuation"]["pe_ttm"]))
         self.assertTrue(
             any("no valuation ratios" in w for w in result.warnings)
         )
         self.assertTrue(
             any("no valuation ratios" in note
-                for note in result.field_notes["valuation.pe_ttm"])
+                for note in result.field_warnings["valuation.pe_ttm"])
         )
 
     def test_auxiliary_failures_only_blank_their_own_fields(self):
-        def _boom(symbol):
+        def _boom(ticker):
             raise RuntimeError("aux down")
 
         result = _provider(
@@ -564,7 +564,7 @@ class TestFundamentalsUSProvider(unittest.TestCase):
         )
         self.assertTrue(
             any("EPS revision counts failed" in note
-                for note in result.field_notes[
+                for note in result.field_warnings[
                     "quarterly_report.eps_down_revisions_30d"])
         )
         # The core statement and valuation fields are untouched.
@@ -574,7 +574,7 @@ class TestFundamentalsUSProvider(unittest.TestCase):
         self.assertAlmostEqual(
             metric_value(result.payload["valuation"]["pe_ttm"]), 28.5
         )
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
         self.assertTrue(any("aux down" in w for w in result.warnings))
 
     def test_revision_counts_survive_numpy_integers(self):
@@ -585,7 +585,7 @@ class TestFundamentalsUSProvider(unittest.TestCase):
         import numpy as np
 
         result = _provider(
-            eps_revisions_loader=lambda symbol: {
+            eps_revisions_loader=lambda ticker: {
                 "up": np.int64(7), "down": np.int64(14)
             },
         ).collect("AAPL")
@@ -603,20 +603,20 @@ class TestFundamentalsUSProvider(unittest.TestCase):
 
 class TestEarningsFromDimensions(unittest.TestCase):
     def test_reads_v3_quarterly_report_and_computes_days(self):
-        from src.tiered_analysis.earnings import earnings_from_dimensions
+        from src.tiered_analysis.earnings import earnings_from_data_reports
 
         # v3 payloads publish no days field: days come from the date.
         result = _provider().collect("AAPL")
-        info = earnings_from_dimensions([result], today=TODAY)
+        info = earnings_from_data_reports([result], today=TODAY)
         self.assertEqual(info.next_date, "2025-07-20")
         self.assertEqual(info.days_until, 19)
 
     def test_reads_v2_nested_envelopes(self):
-        from src.tiered_analysis.earnings import earnings_from_dimensions
+        from src.tiered_analysis.earnings import earnings_from_data_reports
         from src.tiered_analysis.providers.technicals import make_metric
 
         legacy = SimpleNamespace(
-            dimension="fundamentals",
+            name="fundamentals",
             payload={
                 "earnings": {
                     "next_earnings_date": make_metric(
@@ -628,18 +628,18 @@ class TestEarningsFromDimensions(unittest.TestCase):
                 }
             },
         )
-        info = earnings_from_dimensions([legacy])
+        info = earnings_from_data_reports([legacy])
         self.assertEqual(info.next_date, "2025-07-20")
         self.assertEqual(info.days_until, 19)
 
     def test_reads_v1_flat_payload(self):
-        from src.tiered_analysis.earnings import earnings_from_dimensions
+        from src.tiered_analysis.earnings import earnings_from_data_reports
 
         legacy = SimpleNamespace(
-            dimension="fundamentals",
+            name="fundamentals",
             payload={"next_earnings_date": "2025-08-01", "days_until_earnings": 3},
         )
-        info = earnings_from_dimensions([legacy])
+        info = earnings_from_data_reports([legacy])
         self.assertEqual(info.next_date, "2025-08-01")
         self.assertEqual(info.days_until, 3)
 
@@ -648,8 +648,8 @@ class TestRegistryIncludesFundamentals(unittest.TestCase):
     def test_fundamentals_routed_for_us_only(self):
         from src.tiered_analysis.providers.registry import get_providers
 
-        us_dimensions = [p.dimension for p in get_providers(Market.US)]
-        cn_dimensions = [p.dimension for p in get_providers(Market.CN)]
+        us_dimensions = [p.name for p in get_providers(Market.US)]
+        cn_dimensions = [p.name for p in get_providers(Market.CN)]
         self.assertIn("fundamentals", us_dimensions)
         self.assertNotIn("fundamentals", cn_dimensions)
 
@@ -663,7 +663,7 @@ class TestLiveEdgarSanity(unittest.TestCase):
 
         provider = FundamentalsUSProvider()
         result = provider.collect("AAPL")
-        self.assertTrue(result.is_actionable)  # payload always ships
+        self.assertTrue(result.counted)  # payload always ships
         payload = result.payload
         meta = payload.get("meta") or {}
         # Data must be from a recent fiscal year, not a dead XBRL tag's era.

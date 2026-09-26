@@ -73,7 +73,9 @@ export default {
           dim: 'hsl(var(--destructive) / 0.8)',
           glow: 'hsl(var(--destructive) / 0.3)',
         },
-        base: 'hsl(var(--background))',
+        // No color may be named `base`: it would turn `text-base` into a
+        // color utility and silently drop the font-size one (bug found
+        // 2026-09-24 — step titles inside a text-xs block rendered at 12px).
         elevated: 'hsl(var(--elevated))',
         hover: 'hsl(var(--hover))',
         'secondary-bg': 'hsl(var(--secondary))',

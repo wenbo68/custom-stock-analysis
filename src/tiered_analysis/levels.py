@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Deterministic base price levels + adjustment validation (v2 slice 3).
 
-Anchor-and-adjust (docs/tiered-analysis-formulas.md §2-3): formulas compute
+Anchor-and-adjust: formulas compute
 a base for every level; the LLM may propose bounded adjustments (validated
 here); code re-checks ordering and reward-to-risk after every accepted
 adjustment. A rejected adjustment never edits the number — the base stands
@@ -13,28 +13,25 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .providers.base import DimensionResult
+from .providers.base import DataReport
 from .providers.technicals import read_metric
-from .schema import SniperLevels
+from .schema import TradePlanLevels
+from .settings import DEFAULT_REWARD_RATIO
 from .stops import DEFAULT_ATR_MULTIPLIER, suggest_atr_stop
-
-#: Default target multiple when the user picked none: twice the upside of
-#: the accepted downside (the run form's reward filter overrides this).
-REWARD_RISK_MULTIPLE = 2.0
 
 #: Below this reward-to-risk the plan is flagged loudly — but still issued
 #: (owner decision 2026-07-22: always give a plan; the warning row carries
 #: the judgment, the user decides).
-MIN_REWARD_RISK = 1.5
+MIN_REWARD_RATIO = 1.5
 
 #: An adjustment may move a level at most one typical daily swing from its
 #: base — beyond that it is re-invention, not context.
 ADJUSTMENT_BAND_ATR_MULTIPLE = 1.0
 
-#: Level keys, in both SniperLevels field order and adjustment-application
+#: Level keys, in both TradePlanLevels field order and adjustment-application
 #: order (entry first so stop/target checks see the final entry). The plan
 #: is one order at the ideal entry (owner decision, 2026-07-21).
-LEVEL_KEYS = ("entry", "stop_loss", "take_profit")
+LEVEL_KEYS = ("entry", "stop_loss", "target")
 
 
 def _valid(value: Optional[float]) -> bool:
@@ -54,7 +51,7 @@ class LevelBasis:
 class BaseLevels:
     entry: Optional[LevelBasis] = None
     stop_loss: Optional[LevelBasis] = None
-    take_profit: Optional[LevelBasis] = None
+    target: Optional[LevelBasis] = None
     warnings: List[str] = field(default_factory=list)
 
     def get(self, key: str) -> Optional[LevelBasis]:
@@ -90,7 +87,7 @@ def compute_base_levels(
     atr: Optional[float] = None,
     resistance_1: Optional[float] = None,
     high_1y: Optional[float] = None,
-    reward_risk: float = REWARD_RISK_MULTIPLE,
+    reward_ratio: float = DEFAULT_REWARD_RATIO,
 ) -> BaseLevels:
     """The base levels; missing inputs degrade loudly, never silently.
 
@@ -99,8 +96,8 @@ def compute_base_levels(
     (the payload's coordinate fields); resistance is the nearest pivot
     high, with the one-year high as the landmark cap.
 
-    ``reward_risk`` is the user's chosen target multiple (target = entry
-    + reward_risk × risk). No condition voids the plan (owner decisions
+    ``reward_ratio`` is the user's chosen target multiple (target = entry
+    + reward_ratio × risk). No condition voids the plan (owner decisions
     2026-07-22 and 2026-07-24: always give a plan — the warning row
     carries the judgment, the user decides). A close at or below the
     50-day average draws a trend warning, and the plan review flags it
@@ -173,7 +170,7 @@ def compute_base_levels(
         )
 
         geometric = round(
-            entry_value + reward_risk * (entry_value - stop_value), 2
+            entry_value + reward_ratio * (entry_value - stop_value), 2
         )
         resistances = [
             v
@@ -185,15 +182,15 @@ def compute_base_levels(
             target_value = round(nearest_res, 2)
             risk = entry_value - stop_value
             actual_ratio = (target_value - entry_value) / risk if risk > 0 else 0.0
-            if actual_ratio < reward_risk:
+            if actual_ratio < reward_ratio:
                 warnings.append(
                     f"reward below goal: overhead resistance at {nearest_res:g} "
                     f"caps the plan's reward-to-risk at {actual_ratio:.2f}, below "
-                    f"your {reward_risk:g}× goal"
+                    f"your {reward_ratio:g}× goal"
                 )
             target = LevelBasis(
                 value=target_value,
-                formula=f"min(ideal_entry + {reward_risk:g} × (ideal_entry − "
+                formula=f"min(ideal_entry + {reward_ratio:g} × (ideal_entry − "
                 "stop_loss), nearest overhead resistance)",
                 inputs=_present(
                     ideal_entry=entry_value,
@@ -206,18 +203,18 @@ def compute_base_levels(
         else:
             target = LevelBasis(
                 value=geometric,
-                formula=f"ideal_entry + {reward_risk:g} × (ideal_entry − stop_loss)",
+                formula=f"ideal_entry + {reward_ratio:g} × (ideal_entry − stop_loss)",
                 inputs={
                     "ideal_entry": entry_value,
                     "stop_loss": stop_value,
-                    "reward_risk_multiple": reward_risk,
+                    "reward_ratio": reward_ratio,
                 },
             )
 
     return BaseLevels(
         entry=entry,
         stop_loss=stop,
-        take_profit=target,
+        target=target,
         warnings=warnings,
     )
 
@@ -226,14 +223,14 @@ def _present(**values: Optional[float]) -> Dict[str, float]:
     return {name: value for name, value in values.items() if value is not None}
 
 
-def bases_from_dimensions(
-    dimensions: Sequence[DimensionResult],
-    reward_risk: float = REWARD_RISK_MULTIPLE,
+def bases_from_data_reports(
+    data_reports: Sequence[DataReport],
+    reward_ratio: float = DEFAULT_REWARD_RATIO,
 ) -> BaseLevels:
-    """Pull the level inputs out of the technicals dimension payload."""
+    """Pull the level inputs out of the technicals data_report payload."""
     payload: Optional[Dict[str, Any]] = None
-    for dim in dimensions:
-        if dim.dimension == "technicals" and dim.payload:
+    for dim in data_reports:
+        if dim.name == "technicals" and dim.payload:
             payload = dim.payload
             break
     if payload is None:
@@ -251,7 +248,7 @@ def bases_from_dimensions(
         atr=read_metric(payload, "volatility", "atr_14"),
         resistance_1=read_metric(payload, "levels", "resistance_1"),
         high_1y=read_metric(payload, "price", "high_1y"),
-        reward_risk=reward_risk,
+        reward_ratio=reward_ratio,
     )
 
 
@@ -264,7 +261,7 @@ class AdjustmentProposal:
     #: One entry per flagged check the adjustment fixes, each in the
     #: shape {"check": <flagged check name>, "text": <one sentence>,
     #: "links": [{ref, value}, ...]} — the check name is the UI's
-    #: deterministic keyword, the links are debate-style citations.
+    #: deterministic keyword, the links are deep analysis-style citations.
     reasons: Tuple[Dict[str, Any], ...] = ()
     evidence: Tuple[str, ...] = ()
 
@@ -290,7 +287,7 @@ def _ordering_problem(finals: Dict[str, Optional[float]]) -> Optional[str]:
     """Sanity of the whole set for a buy; None when consistent."""
     entry = finals["entry"]
     stop = finals["stop_loss"]
-    target = finals["take_profit"]
+    target = finals["target"]
 
     pairs = [
         (stop, entry, "stop-loss must stay below the entry"),
@@ -375,8 +372,8 @@ def apply_adjustments(
     return decisions, warnings
 
 
-def decisions_to_sniper(decisions: Dict[str, LevelDecision]) -> SniperLevels:
-    return SniperLevels(**{key: decisions[key].final for key in LEVEL_KEYS})
+def decisions_to_levels(decisions: Dict[str, LevelDecision]) -> TradePlanLevels:
+    return TradePlanLevels(**{key: decisions[key].final for key in LEVEL_KEYS})
 
 
 def decisions_to_detail(

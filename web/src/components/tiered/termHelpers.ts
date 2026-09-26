@@ -40,7 +40,7 @@ export function dedupeCitations(citations: TieredCitation[]): TieredCitation[] {
 
 // Payload rows carry ids of this shape so evidence references
 // ("technicals.sma_20", "fundamentals.valuation.pe_ttm") can anchor-jump
-// to the exact row on the dimension card.
+// to the exact row on the data_report card.
 export function metricAnchorId(refPath: string): string {
   return `tiered-metric-${refPath.replace(/\./g, '-')}`;
 }

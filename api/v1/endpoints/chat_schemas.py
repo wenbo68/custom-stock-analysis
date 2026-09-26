@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Request and response shapes of the chat API (2026-09-21)."""
+"""Request and response shapes of the chat API (2026-09-21). Every field
+is named as the chat page labels it (owner request 2026-09-24): a
+conversation's facts are user_input_count, total_tokens, created_at
+(start date) and ended_at (end date); a tool step has a name, an input
+and an output; an LLM step has its llm, time_ms and usage."""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+from src.languages import DEFAULT_LANGUAGE, LANGUAGES, require_supported
 
 ChatRole = Literal["user", "assistant", "tool"]
 
@@ -15,9 +21,9 @@ class ConversationSummary(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     message_count: int
-    question_count: int = Field(description="How many messages the user sent (the conversation's questions).")
-    total_tokens: int = Field(description="Tokens every model call in the conversation used, together.")
-    last_question_at: Optional[str] = Field(default=None, description="When the user last sent a message; null before the first.")
+    user_input_count: int = Field(description="How many messages the user sent (the page's \"user inputs\").")
+    total_tokens: int = Field(description="Tokens every LLM call in the conversation used, together.")
+    ended_at: Optional[str] = Field(default=None, description="When the user last sent a message (the page's \"end date\"); null before the first.")
 
 
 class ConversationList(BaseModel):
@@ -31,14 +37,14 @@ class ToolCall(BaseModel):
 
 
 class TokenUsage(BaseModel):
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
 
 
 class ChatMessage(BaseModel):
     """One message as the page shows it. A user message has `text`. An
-    assistant message has `text` and/or `tool_calls`. A tool message
-    answers one call (`tool_call_id`) with `result`."""
+    assistant message (one LLM call) has `text` and/or `tool_calls`. A
+    tool message answers one call (`tool_call_id`) with `output`."""
 
     seq: int
     role: ChatRole
@@ -46,29 +52,33 @@ class ChatMessage(BaseModel):
     text: Optional[str] = None
     tool_calls: List[ToolCall] = Field(default_factory=list)
     usage: Optional[TokenUsage] = None
-    model: Optional[str] = None
-    error: Optional[str] = Field(default=None, description="Assistant rows only: the model call failed with this.")
-    duration_ms: Optional[int] = Field(default=None, description=(
-        "Assistant rows: how long the model call took. Tool rows: how long the tool ran "
+    llm: Optional[str] = Field(default=None, description="Assistant rows only: the model that answered.")
+    error: Optional[str] = Field(default=None, description="Assistant rows only: the LLM call failed with this.")
+    time_ms: Optional[int] = Field(default=None, description=(
+        "Assistant rows: how long the LLM call took. Tool rows: how long the tool ran "
         "(null when nothing ran — an unknown tool, bad arguments, a refusal)."
     ))
     transcript_chars: Optional[int] = Field(default=None, description=(
         "Assistant rows only: how much text the call's transcript holds; read it with "
         "`GET /conversations/{id}/messages/{seq}/transcript`. Null when there is none."
     ))
-    notice: Optional[str] = Field(default=None, description="Assistant rows only: `step_cap` when the turn hit the tool-round limit.")
+    notice: Optional[str] = Field(default=None, description="Assistant rows only: `tool_call_limit` when the turn hit the tool-call limit.")
     tool_call_id: Optional[str] = None
-    tool_name: Optional[str] = None
-    result: Optional[Any] = Field(default=None, description="Tool rows: what the tool answered (an `error` key on a refusal or miss).")
-    result_chars: Optional[int] = None
+    name: Optional[str] = Field(default=None, description="Tool rows: the tool's name.")
+    output: Optional[Any] = Field(default=None, description="Tool rows: what the tool answered (an `error` key on a refusal or miss).")
+    output_chars: Optional[int] = None
     truncated: Optional[bool] = Field(default=None, description="Tool rows: the model saw a cut-down copy.")
     approved: Optional[bool] = Field(default=None, description="Tool rows that waited for the user: their answer.")
+    input: Optional[Dict[str, Any]] = Field(default=None, description=(
+        "Tool rows: the inputs the tool ran with, every default filled in. Null when the "
+        "model's arguments never parsed (the assistant row's `tool_calls` keep what it sent)."
+    ))
 
 
 class PendingCall(BaseModel):
     call_id: str
     name: str
-    arguments: Dict[str, Any]
+    input: Dict[str, Any] = Field(description="The inputs the tool would run with, every default filled in.")
     facts: Dict[str, Any] = Field(description=(
         "What to ask with: for start_run the effective inputs; for delete_run "
         "the run's row; for the large reads chars and tokens_estimate."
@@ -87,8 +97,22 @@ class ConversationView(ConversationSummary):
     pending: Optional[PendingAction] = None
 
 
+LANGUAGE_FIELD_DESCRIPTION = (
+    "The language the user chose for the app (the page's language switch); "
+    "the bot answers in it whatever language the message is written in. "
+    "One of: " + ", ".join(sorted(LANGUAGES)) + "."
+)
+
+
+def validate_language(value: str) -> str:
+    return require_supported(value)
+
+
 class SendMessageRequest(BaseModel):
     text: str = Field(description="The user's message.")
+    language: str = Field(default=DEFAULT_LANGUAGE, description=LANGUAGE_FIELD_DESCRIPTION)
+
+    _language = field_validator("language")(validate_language)
 
     @field_validator("text")
     @classmethod
@@ -101,6 +125,9 @@ class SendMessageRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     approved: bool = Field(description="true runs the held action; false records the refusal.")
+    language: str = Field(default=DEFAULT_LANGUAGE, description=LANGUAGE_FIELD_DESCRIPTION)
+
+    _language = field_validator("language")(validate_language)
 
 
 class ConversationDeleted(BaseModel):

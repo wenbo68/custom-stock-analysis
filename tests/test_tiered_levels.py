@@ -18,16 +18,16 @@ import unittest
 
 from src.tiered_analysis.levels import (
     ADJUSTMENT_BAND_ATR_MULTIPLE,
-    MIN_REWARD_RISK,
+    MIN_REWARD_RATIO,
     AdjustmentProposal,
     apply_adjustments,
-    bases_from_dimensions,
+    bases_from_data_reports,
     compute_base_levels,
     decisions_to_detail,
-    decisions_to_sniper,
+    decisions_to_levels,
 )
 from src.tiered_analysis.providers.base import (
-    DimensionResult,
+    DataReport,
     SourceKind,
 )
 
@@ -65,7 +65,7 @@ class TestComputeBaseLevels(unittest.TestCase):
         # target = 96 + 2*(96-90) = 108. No backup entry (retired).
         self.assertAlmostEqual(bases.entry.value, 96.0)
         self.assertAlmostEqual(bases.stop_loss.value, 90.0)
-        self.assertAlmostEqual(bases.take_profit.value, 108.0)
+        self.assertAlmostEqual(bases.target.value, 108.0)
         self.assertEqual(bases.warnings, [])
 
     def test_entry_capped_at_close(self):
@@ -86,7 +86,7 @@ class TestComputeBaseLevels(unittest.TestCase):
     def test_no_structural_supports_means_no_levels_with_warning(self):
         bases = _bases(sma_50=None, sma_200=None, support_1=None)
         self.assertIsNone(bases.entry)
-        self.assertIsNone(bases.take_profit)
+        self.assertIsNone(bases.target)
         self.assertTrue(any("support" in w.lower() for w in bases.warnings))
 
     def test_no_close_means_no_levels_with_warning(self):
@@ -95,24 +95,24 @@ class TestComputeBaseLevels(unittest.TestCase):
         self.assertTrue(bases.warnings)
 
     def test_chosen_reward_ratio_scales_the_target(self):
-        bases = _bases(reward_risk=3.0)
+        bases = _bases(reward_ratio=3.0)
         # target = 96 + 3*(96-90) = 114, and the formula names the ratio.
-        self.assertAlmostEqual(bases.take_profit.value, 114.0)
-        self.assertIn("3 ×", bases.take_profit.formula)
+        self.assertAlmostEqual(bases.target.value, 114.0)
+        self.assertIn("3 ×", bases.target.formula)
 
     def test_capped_target_below_the_chosen_goal_warns(self):
         # Resistance at 106 (> close 100) caps the 108 geometric target:
         # ratio (106-96)/6 = 1.67 clears the 1.5 floor but misses the 2x
         # goal -> plan stands with a "reward below goal" warning.
         bases = _bases(resistance_1=106.0)
-        self.assertAlmostEqual(bases.take_profit.value, 106.0)
+        self.assertAlmostEqual(bases.target.value, 106.0)
         self.assertTrue(any("below" in w and "goal" in w for w in bases.warnings))
 
     def test_missing_atr_means_no_stop_and_no_target(self):
         bases = _bases(atr=None)
         self.assertIsNotNone(bases.entry)
         self.assertIsNone(bases.stop_loss)
-        self.assertIsNone(bases.take_profit)
+        self.assertIsNone(bases.target)
         self.assertTrue(bases.warnings)
 
 
@@ -124,7 +124,7 @@ class TestLevelsAreRoundedToCents(unittest.TestCase):
             close=408.74, sma_50=408.74, sma_200=400.0,
             support_1=405.0, atr=11.64,
         )
-        for key in ("entry", "stop_loss", "take_profit"):
+        for key in ("entry", "stop_loss", "target"):
             basis = bases.get(key)
             self.assertIsNotNone(basis, key)
             self.assertEqual(basis.value, round(basis.value, 2), key)
@@ -137,7 +137,7 @@ class TestTrendAndRoomGates(unittest.TestCase):
         # plan — the warning row carries the judgment, the user decides.
         bases = _bases(close=89.0)  # close <= sma_50 (96)
         self.assertIsNotNone(bases.entry)
-        self.assertIsNotNone(bases.take_profit)
+        self.assertIsNotNone(bases.target)
         self.assertTrue(any("trend warning" in w for w in bases.warnings))
 
     def test_trend_boundary_close_equal_sma50_is_downtrend(self):
@@ -154,9 +154,9 @@ class TestTrendAndRoomGates(unittest.TestCase):
         # entry 96, stop 90, geometric target 108; nearest resistance 106
         # (above close 100) caps it: R:R = 10/6 = 1.67 >= 1.5 -> plan stands.
         bases = _bases(resistance_1=106.0)
-        self.assertAlmostEqual(bases.take_profit.value, 106.0)
-        self.assertIn("resistance", bases.take_profit.formula)
-        self.assertAlmostEqual(bases.take_profit.inputs["geometric_target"], 108.0)
+        self.assertAlmostEqual(bases.target.value, 106.0)
+        self.assertIn("resistance", bases.target.formula)
+        self.assertAlmostEqual(bases.target.inputs["geometric_target"], 108.0)
 
     def test_thin_reward_still_gets_a_plan_with_warning(self):
         # Resistance at 104: capped R:R = (104-96)/6 = 1.33, below the
@@ -164,22 +164,22 @@ class TestTrendAndRoomGates(unittest.TestCase):
         # 1.5 room gate no longer voids the plan).
         bases = _bases(resistance_1=104.0)
         self.assertIsNotNone(bases.entry)
-        self.assertAlmostEqual(bases.take_profit.value, 104.0)
+        self.assertAlmostEqual(bases.target.value, 104.0)
         self.assertTrue(any("reward below goal" in w for w in bases.warnings))
 
     def test_resistance_below_close_is_ignored(self):
         # A "resistance" the price already broke through is not overhead.
         bases = _bases(resistance_1=99.0)
-        self.assertAlmostEqual(bases.take_profit.value, 108.0)
+        self.assertAlmostEqual(bases.target.value, 108.0)
 
     def test_nearest_of_several_resistances_wins(self):
         bases = _bases(resistance_1=107.0, high_1y=120.0)
-        self.assertAlmostEqual(bases.take_profit.value, 107.0)
+        self.assertAlmostEqual(bases.target.value, 107.0)
 
     def test_no_overhead_resistance_keeps_geometric_target(self):
         bases = _bases(high_1y=100.0)  # at the 1y high: open air above
-        self.assertAlmostEqual(bases.take_profit.value, 108.0)
-        self.assertNotIn("resistance", bases.take_profit.formula)
+        self.assertAlmostEqual(bases.target.value, 108.0)
+        self.assertNotIn("resistance", bases.target.formula)
 
 
 def _reason(text: str) -> dict:
@@ -243,7 +243,7 @@ class TestApplyAdjustments(unittest.TestCase):
         self.assertTrue(any("order" in w.lower() for w in warnings))
 
     def test_reward_risk_degradation_no_longer_rejected(self):
-        self.assertEqual(MIN_REWARD_RISK, 1.5)
+        self.assertEqual(MIN_REWARD_RATIO, 1.5)
         # Raise the entry to 97.5 (in band, ordering fine): with stop 90
         # and target 108 fixed, R:R becomes 10.5/7.5 = 1.4 — below the
         # old floor, but a thin ratio is a plan warning now, never a
@@ -277,12 +277,12 @@ class TestApplyAdjustments(unittest.TestCase):
 
 
 class TestConverters(unittest.TestCase):
-    def test_decisions_to_sniper_uses_final_values(self):
+    def test_decisions_to_trade_plan_uses_final_values(self):
         proposals = [
             AdjustmentProposal(level="entry", value=94.5, reasons=(_reason("x"),), evidence=("e",))
         ]
         decisions, _ = apply_adjustments(_bases(), proposals, atr=3.0)
-        sniper = decisions_to_sniper(decisions)
+        sniper = decisions_to_levels(decisions)
         self.assertAlmostEqual(sniper.entry, 94.5)
         self.assertAlmostEqual(sniper.stop_loss, 90.0)
 
@@ -308,24 +308,24 @@ class TestConverters(unittest.TestCase):
 
 class TestBasesFromDimensions(unittest.TestCase):
     def _technicals(self, payload):
-        return DimensionResult(
-            dimension="technicals",
+        return DataReport(
+            name="technicals",
             kind=SourceKind.NUMERIC,
             payload=payload,
         )
 
     def test_extracts_inputs_from_v2_envelope_payload(self):
         dim = self._technicals(_v2_payload())
-        bases = bases_from_dimensions([dim])
+        bases = bases_from_data_reports([dim])
         self.assertAlmostEqual(bases.entry.value, 96.0)
 
     def test_extracts_resistance_inputs_from_payload(self):
         dim = self._technicals(_v2_payload(resistance_1=106.0))
-        bases = bases_from_dimensions([dim])
-        self.assertAlmostEqual(bases.take_profit.value, 106.0)
+        bases = bases_from_data_reports([dim])
+        self.assertAlmostEqual(bases.target.value, 106.0)
 
-    def test_missing_technicals_dimension_yields_warning_only(self):
-        bases = bases_from_dimensions([])
+    def test_missing_technicals_data_report_yields_warning_only(self):
+        bases = bases_from_data_reports([])
         self.assertIsNone(bases.entry)
         self.assertTrue(bases.warnings)
 

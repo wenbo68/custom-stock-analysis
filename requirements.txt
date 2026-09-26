@@ -18,6 +18,7 @@ exchange-calendars>=4.13.0  # Trading calendars (clock gate + grading windows)
 # --- LLM ---
 litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0   # Unified LLM client (same pin as parent repo)
 tiktoken>=0.8.0,<0.12.0     # Token counting for litellm (parent repo pins <0.12, see its #537)
+py3langid>=0.4.0,<0.5.0     # Deterministic language detection: did the model answer in the chosen language? (src/languages.py)
 
 # --- data sources (daily price-bar fallback chain) ---
 # A-shares: efinance -> Tencent (plain HTTP, no library) -> akshare -> yfinance

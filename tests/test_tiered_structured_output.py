@@ -193,7 +193,7 @@ class _FakeLitellm:
         if self._reject_response_format and "response_format" in kwargs:
             raise self.BadRequestError("schema not accepted here")
         return SimpleNamespace(
-            usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3),
+            usage=SimpleNamespace(input_tokens=7, output_tokens=3),
             choices=[
                 SimpleNamespace(message=SimpleNamespace(content=self._reply))
             ],

@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .providers.base import DimensionResult, note_fields
+from .providers.base import DataReport, warn_fields
 from .providers.sector_map import sector_etf_for
 from .providers.technicals import (
     RS_WINDOW_1M,
@@ -56,26 +56,26 @@ RATIO_KEY = "report_move_ratio_implied_4q"
 
 
 def enrich_cross_fields(
-    dimensions: Sequence[DimensionResult],
+    data_reports: Sequence[DataReport],
     bars_loader: Optional[Callable[[str], Sequence[Any]]],
-) -> List[DimensionResult]:
+) -> List[DataReport]:
     """The collected results with the cross-provider fields added.
 
     ``bars_loader`` None (test harnesses that inject providers) skips
     enrichment entirely so canned payloads pass through untouched.
     """
     if bars_loader is None:
-        return list(dimensions)
-    by_dim = {result.dimension: result for result in dimensions}
+        return list(data_reports)
+    by_dim = {result.name: result for result in data_reports}
     fundamentals = by_dim.get("fundamentals")
 
-    enriched: List[DimensionResult] = []
-    for result in dimensions:
-        if result.dimension == "technicals":
+    enriched: List[DataReport] = []
+    for result in data_reports:
+        if result.name == "technicals":
             enriched.append(
                 _with_sector_fields(result, fundamentals, bars_loader)
             )
-        elif result.dimension == "positioning":
+        elif result.name == "positioning":
             enriched.append(_with_report_move_ratio(result, fundamentals))
         else:
             enriched.append(result)
@@ -183,10 +183,10 @@ def _sector_returns(
 
 
 def _with_sector_fields(
-    technicals: DimensionResult,
-    fundamentals: Optional[DimensionResult],
+    technicals: DataReport,
+    fundamentals: Optional[DataReport],
     bars_loader: Callable[[str], Sequence[Any]],
-) -> DimensionResult:
+) -> DataReport:
     payload = technicals.payload
     market_group = payload.get("market") if payload else None
     if not isinstance(market_group, dict) or "regime" not in market_group:
@@ -194,9 +194,9 @@ def _with_sector_fields(
 
     formulas = dict(technicals.formulas or {})
     warnings = list(technicals.warnings)
-    field_notes = {
+    field_warnings = {
         path: list(notes)
-        for path, notes in (technicals.field_notes or {}).items()
+        for path, notes in (technicals.field_warnings or {}).items()
     }
     sector_paths = tuple(f"market.{key}" for key in _SECTOR_KEYS)
 
@@ -217,22 +217,22 @@ def _with_sector_fields(
     values: Dict[str, Any] = {}
     sector_text = sector or "unknown"
     if sector is None:
-        note_fields(
-            warnings, field_notes,
+        warn_fields(
+            warnings, field_warnings,
             "sector unknown (fundamentals carries no sector label); "
             "sector comparison fields absent",
             sector_paths,
         )
     elif mapped is None:
-        note_fields(
-            warnings, field_notes,
+        warn_fields(
+            warnings, field_warnings,
             f"sector '{sector}' has no sector-ETF mapping (US sectors "
             "only for now); sector comparison fields absent",
             sector_paths,
         )
     elif index_1m is None and index_3m is None:
-        note_fields(
-            warnings, field_notes,
+        warn_fields(
+            warnings, field_warnings,
             "sector comparison needs the market benchmark returns, "
             "which are absent; sector comparison fields absent",
             sector_paths,
@@ -242,8 +242,8 @@ def _with_sector_fields(
         sector_text = f"{sector}, via the {etf_name} ETF ({etf_ticker})"
         etf_1m, etf_3m, error = _sector_returns(bars_loader, etf_ticker)
         if error is not None:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 f"{error}; sector comparison fields absent",
                 sector_paths,
             )
@@ -322,7 +322,7 @@ def _with_sector_fields(
         payload={**payload, "market": new_market},
         formulas=formulas or None,
         warnings=warnings,
-        field_notes=field_notes or None,
+        field_warnings=field_warnings or None,
     )
 
 
@@ -332,9 +332,9 @@ def _with_sector_fields(
 
 
 def _with_report_move_ratio(
-    positioning: DimensionResult,
-    fundamentals: Optional[DimensionResult],
-) -> DimensionResult:
+    positioning: DataReport,
+    fundamentals: Optional[DataReport],
+) -> DataReport:
     payload = positioning.payload
     options = payload.get("options") if payload else None
     if not isinstance(options, dict) or "implied_report_move_pct" not in options:
@@ -357,22 +357,22 @@ def _with_report_move_ratio(
     # so the report page can link straight to the blank ingredient row
     # (owner request 2026-08-23) instead of a generic "needs both" text.
     warnings = list(positioning.warnings)
-    field_notes = {
+    field_warnings = {
         path: list(notes)
-        for path, notes in (positioning.field_notes or {}).items()
+        for path, notes in (positioning.field_warnings or {}).items()
     }
     ratio_path = f"options.{RATIO_KEY}"
     if ratio is None:
         if implied is None:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 "implied report-day move missing — report-move ratio "
                 "(implied vs 4q avg) omitted",
                 (ratio_path,),
             )
         if not realized:
-            note_fields(
-                warnings, field_notes,
+            warn_fields(
+                warnings, field_warnings,
                 "realized 4q average report-day move missing or zero — "
                 "report-move ratio (implied vs 4q avg) omitted",
                 (ratio_path,),
@@ -405,5 +405,5 @@ def _with_report_move_ratio(
         payload={**payload, "options": {**options, RATIO_KEY: envelope}},
         formulas=formulas or None,
         warnings=warnings,
-        field_notes=field_notes or None,
+        field_warnings=field_warnings or None,
     )

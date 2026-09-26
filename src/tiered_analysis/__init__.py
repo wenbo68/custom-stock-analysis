@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tiered analysis (docs/tiered-analysis-design.md).
+"""Tiered analysis: the engine behind the analysis page.
 
 Standalone capability layered on top of DSA. This package must not import
 from or modify the existing single-shot decision path (src/analyzer.py,

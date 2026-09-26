@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Provider contract for tiered analysis (docs/tiered-analysis-design.md §5).
+"""Provider contract for the data reports.
 
 Core rule (§1): every tradeable number is produced by deterministic code
 (NUMERIC); LLM+search output (TEXTUAL) carries citations and never feeds
-numeric consumers such as position sizing. ``DimensionResult.is_actionable``
+numeric consumers such as position sizing. ``DataReport.counted``
 is the gate numeric consumers must check.
 """
 from __future__ import annotations
+
+import re
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -35,7 +37,7 @@ class SourceKind(str, Enum):
 class Citation:
     """A verifiable reference.
 
-    NUMERIC dimensions cite their data source; TEXTUAL dimensions cite
+    NUMERIC data_reports cite their data source; TEXTUAL data_reports cite
     articles. A citation URL must be the product of a real fetch performed
     by a tool, never a model-asserted URL.
     """
@@ -47,14 +49,32 @@ class Citation:
     retrieved_at: Optional[str] = None
 
 
-@dataclass(frozen=True)
-class DimensionResult:
-    """Unified return body for every dimension provider."""
+#: Query parameters that carry a credential, in any data source's URL.
+_SECRET_PARAM_RE = re.compile(r"\b(token|api_key|apikey|access_token|key)=([^&\s\"']+)", re.IGNORECASE)
 
-    dimension: str
+
+def redact_secrets(text: str) -> str:
+    """``text`` with the value of every credential-carrying query
+    parameter (token=, api_key=, apikey=, access_token=, key=) replaced
+    by ``<redacted>``. A failed HTTP request's message repeats its URL,
+    query and all; the page and the database must never see the key."""
+    return _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}=<redacted>", str(text))
+
+
+@dataclass(frozen=True)
+class DataReport:
+    """Unified return body for every data_report provider.
+
+    Its warnings are shown on the page and stored with the run, so any
+    secret a failure message carries — a request URL with the data
+    source's key in its query — is redacted on construction
+    (``redact_secrets``; a Finnhub key leaked this way on 2026-09-24).
+    """
+
+    name: str
     kind: SourceKind
     payload: Optional[Dict[str, Any]] = None
-    narrative: Optional[str] = None
+    summary: Optional[str] = None
     citations: List[Citation] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     #: UI receipts for derived payload metrics, keyed "group.key":
@@ -69,10 +89,17 @@ class DimensionResult:
     #: fields. The report page shows a note next to its own field; a
     #: warning absent from this map has no field to live on and stays a
     #: card-level note. Same out-of-payload rationale as ``formulas``.
-    field_notes: Optional[Dict[str, List[str]]] = None
+    field_warnings: Optional[Dict[str, List[str]]] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "warnings", [redact_secrets(w) for w in self.warnings])
+        if self.field_warnings is not None:
+            object.__setattr__(self, "field_warnings", {
+                key: [redact_secrets(w) for w in notes] for key, notes in self.field_warnings.items()
+            })
 
     @property
-    def is_actionable(self) -> bool:
+    def counted(self) -> bool:
         """True only for NUMERIC results carrying a payload.
 
         Numeric consumers (e.g. future position sizing) must gate on this —
@@ -84,9 +111,9 @@ class DimensionResult:
         return self.kind == SourceKind.NUMERIC and bool(self.payload)
 
 
-def note_fields(
+def warn_fields(
     warnings: List[str],
-    field_notes: Dict[str, List[str]],
+    field_warnings: Dict[str, List[str]],
     message: str,
     paths: Sequence[str],
 ) -> None:
@@ -95,13 +122,13 @@ def note_fields(
     the note beside the field itself."""
     warnings.append(message)
     for path in paths:
-        field_notes.setdefault(path, []).append(message)
+        field_warnings.setdefault(path, []).append(message)
 
 
-class DimensionProvider(ABC):
-    """One implementation per (dimension x market family)."""
+class DataReportProvider(ABC):
+    """One implementation per (data_report x market family)."""
 
-    dimension: str
+    name: str
     kind: SourceKind
 
     @abstractmethod
@@ -109,8 +136,8 @@ class DimensionProvider(ABC):
         """Whether this provider covers the given market family."""
 
     @abstractmethod
-    def collect(self, symbol: str) -> DimensionResult:
-        """Collect this dimension for one symbol.
+    def collect(self, ticker: str) -> DataReport:
+        """Collect this data_report for one ticker.
 
         Failures must surface as blank payload fields (value null) with
         warnings and field notes explaining why (fail-loud) — a total

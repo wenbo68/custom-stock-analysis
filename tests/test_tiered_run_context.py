@@ -28,7 +28,7 @@ class _FakeLitellm:
     def completion(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(
-            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
             choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
         )
 

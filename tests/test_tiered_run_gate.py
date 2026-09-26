@@ -17,7 +17,7 @@ import pytest
 from src.tiered_analysis.run_gate import (
     RUN_BUFFER_MINUTES,
     bar_date_only,
-    clock_gate,
+    market_open_check,
     expected_bar_date,
     known_markets,
     market_clock,
@@ -45,63 +45,63 @@ class Bar:
 class TestClockGate:
     def test_blocked_during_us_trading_day(self):
         # Wednesday 2026-08-05, 14:00 New York — mid-session.
-        result = clock_gate("AAPL", now=ny(2026, 8, 5, 14))
+        result = market_open_check("AAPL", now=ny(2026, 8, 5, 14))
         assert result.blocked is True
         assert result.market == "us"
 
     def test_blocked_within_buffer_after_close(self):
         # 16:10 — closed, but inside the 30-minute vendor buffer.
         assert RUN_BUFFER_MINUTES == 30
-        result = clock_gate("AAPL", now=ny(2026, 8, 5, 16, 10))
+        result = market_open_check("AAPL", now=ny(2026, 8, 5, 16, 10))
         assert result.blocked is True
 
     def test_allowed_after_buffer(self):
-        result = clock_gate("AAPL", now=ny(2026, 8, 5, 16, 31))
+        result = market_open_check("AAPL", now=ny(2026, 8, 5, 16, 31))
         assert result.blocked is False
 
     def test_allowed_before_open(self):
         # 07:00 — yesterday's close is final; mornings are fine.
-        result = clock_gate("AAPL", now=ny(2026, 8, 5, 7))
+        result = market_open_check("AAPL", now=ny(2026, 8, 5, 7))
         assert result.blocked is False
 
     def test_allowed_on_weekend(self):
         # Saturday 2026-08-08 midday.
-        result = clock_gate("AAPL", now=ny(2026, 8, 8, 12))
+        result = market_open_check("AAPL", now=ny(2026, 8, 8, 12))
         assert result.blocked is False
 
     def test_override_always_passes(self):
-        result = clock_gate("AAPL", now=ny(2026, 8, 5, 14), override=True)
+        result = market_open_check("AAPL", now=ny(2026, 8, 5, 14), run_anyway=True)
         assert result.blocked is False
 
     def test_unknown_market_fails_open(self):
-        result = clock_gate("???bogus", now=ny(2026, 8, 5, 14))
+        result = market_open_check("???bogus", now=ny(2026, 8, 5, 14))
         assert result.blocked is False
         assert result.market is None
 
     def test_cn_market_uses_its_own_clock(self):
         # 10:00 Shanghai on a Wednesday — A-share session, blocked.
         now = datetime(2026, 8, 5, 10, 0, tzinfo=SH)
-        result = clock_gate("600519", now=now)
+        result = market_open_check("600519", now=now)
         assert result.blocked is True
         assert result.market == "cn"
 
     def test_cn_after_close_plus_buffer_allowed(self):
         # 15:31 Shanghai — CN closes 15:00; buffer passed.
         now = datetime(2026, 8, 5, 15, 31, tzinfo=SH)
-        result = clock_gate("600519", now=now)
+        result = market_open_check("600519", now=now)
         assert result.blocked is False
 
     def test_blocked_result_carries_session_bounds(self):
         # 2026-08-11 addition: the popup words today's hours from the
         # gate, so a blocked result must carry the session bounds in
         # market-local tz-aware datetimes.
-        result = clock_gate("AAPL", now=ny(2026, 8, 5, 14))
+        result = market_open_check("AAPL", now=ny(2026, 8, 5, 14))
         assert result.blocked is True
         assert result.session_open == ny(2026, 8, 5, 9, 30)
         assert result.session_close == ny(2026, 8, 5, 16, 0)
 
     def test_weekend_result_has_no_session_bounds(self):
-        result = clock_gate("AAPL", now=ny(2026, 8, 8, 12))
+        result = market_open_check("AAPL", now=ny(2026, 8, 8, 12))
         assert result.blocked is False
         assert result.session_open is None
         assert result.session_close is None
@@ -227,7 +227,7 @@ class TestMarketClock:
 
     def test_the_gate_reads_the_same_clock(self):
         now = ny(2026, 8, 5, 14)
-        gate = clock_gate("AAPL", now=now)
+        gate = market_open_check("AAPL", now=now)
         clock = market_clock("us", now=now)
         assert gate.blocked is clock.blocked
         assert gate.session_open == clock.session_open

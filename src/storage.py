@@ -13,7 +13,6 @@ A股自选股智能分析系统 - 存储层
 
 import atexit
 import logging
-import re
 import threading
 from datetime import datetime, timezone
 from typing import Dict, Optional, TypeVar
@@ -37,7 +36,7 @@ from sqlalchemy.orm import (
     sessionmaker,
     Session,
 )
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError
 
 from src.config import get_config
 
@@ -45,61 +44,22 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 CURRENT_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
 
-#: Stored-name rewrite (owner decision 2026-09-17): the identifiers the
-#: code uses for data reports and run steps now read like their UI
-#: labels (macro_economy, company_news, world_news; tier1_analysis,
-#: tier2_analysis, trade_plan, unknown). Runs stored under the old
-#: names are rewritten once at startup so the page keeps recognising
-#: them; this version string in schema_migrations marks that it ran.
-RENAME_MIGRATION_VERSION = "2026-09-18-rename-dimensions-and-stages"
-#: The run-list facts became columns on tiered_runs (2026-09-21); rows
-#: stored before that are filled in once from their JSON at startup.
-DIGEST_MIGRATION_VERSION = "2026-09-21-run-digest-columns"
-#: Column name -> DDL type, for databases created before the columns.
-DIGEST_COLUMN_DDL: Dict[str, str] = {
-    "tier": "INTEGER",
-    "capital": "FLOAT",
-    "risk_fraction": "FLOAT",
-    "reward_risk": "FLOAT",
-    "hold_weeks": "INTEGER",
-    "outlook": "VARCHAR(16)",
-    "shares": "FLOAT",
+#: The page's vocabulary reached the database (owner decision
+#: 2026-09-24): the run and transcript tables now name their columns as
+#: the analysis page names the facts (ticker, risk_pct, reward_ratio,
+#: max_hold_weeks, run_id; call_number, llm, time_ms, input, output…),
+#: risk is stored as a percent, and the stored report uses the same
+#: words. Runs stored before that were test runs (owner decision), so a
+#: database still carrying the old columns has its run and transcript
+#: tables dropped and recreated empty at startup rather than migrated;
+#: this version string in schema_migrations marks that it happened.
+VOCABULARY_RESET_VERSION = "2026-09-24-page-vocabulary"
+#: A column each old-shaped table carried and the new shape does not:
+#: seeing it means the table predates the vocabulary change.
+LEGACY_COLUMN_MARKERS: Dict[str, str] = {
+    "tiered_runs": "task_id",
+    "tiered_run_transcripts": "task_id",
 }
-RENAMED_DIMENSIONS: Dict[str, str] = {
-    "macro_econ": "macro_economy",
-    "company_events": "company_news",
-    "world_events": "world_news",
-}
-RENAMED_STAGES: Dict[str, str] = {
-    "tier1_quick": "tier1_analysis",
-    "tier2_debate": "tier2_analysis",
-    "plan_adjust": "trade_plan",
-    "unattributed": "unknown",
-    # One-day intermediate names (2026-09-17) a database may have been
-    # rewritten to before the final choice.
-    "conclusion_tier1": "tier1_analysis",
-    "conclusion_tier2": "tier2_analysis",
-}
-# A dimension name appears in stored JSON as a quoted key/value
-# ("macro_econ") or as the head of a dotted evidence ref
-# ("macro_econ.cpi", "company_events.news_coverage.items.3.text").
-_DIMENSION_NAME_RE = re.compile(
-    '"(' + "|".join(map(re.escape, RENAMED_DIMENSIONS)) + ')(?=["."])'
-)
-_STAGE_NAME_RE = re.compile(
-    '"(' + "|".join(map(re.escape, RENAMED_STAGES)) + ')"'
-)
-
-
-def rename_stored_identifiers(result_json: str) -> str:
-    """Rewrite a stored run's JSON text from the pre-2026-09-17 names to
-    the current ones. Idempotent: the new names match nothing here."""
-    renamed = _DIMENSION_NAME_RE.sub(
-        lambda m: '"' + RENAMED_DIMENSIONS[m.group(1)], result_json
-    )
-    return _STAGE_NAME_RE.sub(
-        lambda m: '"' + RENAMED_STAGES[m.group(1)] + '"', renamed
-    )
 
 # SQLAlchemy ORM 基类
 Base = declarative_base()
@@ -132,21 +92,22 @@ class DatabaseSchemaMigration(Base):
 class TieredRunRecord(Base):
     """One tiered-analysis run (src/tiered_analysis): status + full report.
 
-    The web tiered page lists these as its run history; result_json holds
-    the serialized TierReport (dimensions, levels, badges) so revisiting a
-    finished run needs no re-analysis.
+    The analysis page lists these as its run history; result_json holds
+    the serialized report (data reports, levels, outlook) so revisiting
+    a finished run needs no re-analysis. Every column is named as the
+    analysis page names the fact (owner request 2026-09-24).
     """
 
     __tablename__ = 'tiered_runs'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(String(64), nullable=False, unique=True, index=True)
-    stock_code = Column(String(16), nullable=False, index=True)
+    run_id = Column(String(64), nullable=False, unique=True, index=True)
+    ticker = Column(String(16), nullable=False, index=True)
     status = Column(String(16), nullable=False, default='running', index=True)
     result_json = Column(Text)
-    #: The run's inputs (tier, capital, risk_fraction, reward_risk) as
-    #: JSON, recorded at creation so history rows can show them while the
-    #: run is still in flight (owner decision 2026-07-24).
+    #: The run's inputs (capital, risk_pct, reward_ratio, max_hold_weeks,
+    #: tier) as JSON, recorded at creation so history rows can show them
+    #: while the run is still in flight (owner decision 2026-07-24).
     inputs_json = Column(Text)
     error = Column(Text)
     created_at = Column(DateTime, default=utc_naive_now, index=True)
@@ -155,43 +116,44 @@ class TieredRunRecord(Base):
     #: endpoint can filter and page in SQL instead of shipping every row
     #: for the browser to sift. Written from the inputs at creation and
     #: from the report at completion; see src/tiered_analysis/run_digest.
-    tier = Column(Integer, index=True)
     capital = Column(Float)
-    risk_fraction = Column(Float)
-    reward_risk = Column(Float)
-    hold_weeks = Column(Integer)
+    #: Percent of capital risked (1 = 1%), as the form takes it.
+    risk_pct = Column(Float)
+    reward_ratio = Column(Float)
+    max_hold_weeks = Column(Integer)
+    tier = Column(Integer, index=True)
     outlook = Column(String(16), index=True)
     #: Float: some markets size in fractional units.
     shares = Column(Float)
 
 
 class TieredRunTranscriptRecord(Base):
-    """One LLM exchange of one tiered run (src/tiered_analysis/llm_support).
+    """One LLM call of one tiered run (src/tiered_analysis/llm_support).
 
-    A run's transcript is the list of its rows ordered by ``seq``: the
-    pipeline stage, model, full prompt, raw reply, token counts, and the
-    error when the call itself failed. Kept in its own table (not on the
-    run row) so the history list stays light; rows older than
-    ``history.TRANSCRIPT_MAX_AGE_DAYS`` are pruned at startup.
+    A run's transcript is the list of its rows ordered by ``call_number``:
+    the stage of the run, the llm, the full input, the raw output, token
+    counts, and the error when the call itself failed. Kept in its own
+    table (not on the run row) so the history list stays light; rows
+    older than ``history.TRANSCRIPT_MAX_AGE_DAYS`` are pruned at startup.
     """
 
     __tablename__ = 'tiered_run_transcripts'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(String(64), nullable=False, index=True)
-    seq = Column(Integer, nullable=False)
+    run_id = Column(String(64), nullable=False, index=True)
+    call_number = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=utc_naive_now, index=True)
     stage = Column(String(64))
-    model = Column(String(128))
+    llm = Column(String(128))
     temperature = Column(Float)
-    duration_ms = Column(Integer)
-    prompt_tokens = Column(Integer)
-    completion_tokens = Column(Integer)
+    time_ms = Column(Integer)
+    input_tokens = Column(Integer)
+    output_tokens = Column(Integer)
     #: Which reply enforcement was requested: "schema", "json", or None.
     structured = Column(String(16))
     error = Column(Text)
-    prompt = Column(Text)
-    reply = Column(Text)
+    input = Column(Text)
+    output = Column(Text)
 
 
 class TieredCacheRecord(Base):
@@ -206,7 +168,7 @@ class TieredCacheRecord(Base):
 
 
 class ChatConversationRecord(Base):
-    """One chatbot conversation (src/chatbot, 2026-09-21): a title and,
+    """One chat conversation (src/chat, 2026-09-21): a title and,
     while the bot waits for the user's yes or no on an action, the tool
     calls being held (``pending_json``). The messages are the rows of
     ChatMessageRecord in ``seq`` order."""
@@ -221,7 +183,7 @@ class ChatConversationRecord(Base):
 
 
 class ChatMessageRecord(Base):
-    """One message of a chatbot conversation, stored in the shape the
+    """One message of a chat conversation, stored in the shape the
     model exchange uses (``content_json``: role, text, the tool calls the
     model asked for, or one tool's result) plus the facts the chat page
     shows beside it (token usage, sizes, errors). The bot's own memory
@@ -314,14 +276,11 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 autoflush=False,
             )
 
-            # 创建所有表
+            # Tables from before the page-vocabulary change go first,
+            # then every table is (re)created.
+            self._reset_legacy_tables()
             Base.metadata.create_all(self._engine)
-            self._ensure_column(TieredRunRecord.__tablename__, "inputs_json", "TEXT")
-            for column, ddl_type in DIGEST_COLUMN_DDL.items():
-                self._ensure_column(TieredRunRecord.__tablename__, column, ddl_type)
             self._ensure_schema_migration_record()
-            self._apply_rename_migration()
-            self._apply_digest_migration()
 
             self._initialized = True
             logger.info(f"数据库初始化完成: {db_url}")
@@ -366,112 +325,49 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         finally:
             session.close()
 
-    def _apply_rename_migration(self) -> None:
-        """One-time rewrite of stored runs and transcript rows to the
-        current dimension/stage names (see RENAME_MIGRATION_VERSION).
-        Best-effort like _ensure_column: a failure only leaves old runs
-        showing under their old names, never blocks startup. Two servers
-        starting together may both rewrite — the rewrite is idempotent
-        and the second one's marker insert is simply ignored."""
-        session = self._SessionLocal()
+    def _reset_legacy_tables(self) -> None:
+        """Drop the run and transcript tables of a database created before
+        the page-vocabulary change (``LEGACY_COLUMN_MARKERS``), so
+        ``create_all`` recreates them in the new shape. Old runs were test
+        runs (owner decision 2026-09-24) and are not carried over; the
+        chat tables and the fetched-data cache are untouched. Logged, and
+        recorded once in schema_migrations. A failure here only leaves
+        the old tables in place — the app then fails loudly on its first
+        query rather than silently misreading old rows."""
         try:
-            if session.get(DatabaseSchemaMigration, RENAME_MIGRATION_VERSION) is not None:
-                return
-            runs = 0
-            for row in session.query(TieredRunRecord).filter(
-                TieredRunRecord.result_json.isnot(None)
-            ):
-                renamed = rename_stored_identifiers(row.result_json)
-                if renamed != row.result_json:
-                    runs += 1
-                    session.execute(
-                        TieredRunRecord.__table__.update()
-                        .where(TieredRunRecord.id == row.id)
-                        # Explicit updated_at: the onupdate default must
-                        # not re-stamp a run nobody touched.
-                        .values(result_json=renamed, updated_at=row.updated_at)
-                    )
-            stages = 0
-            # News-screen calls are staged under their dimension's name.
-            for old_name, new_name in {**RENAMED_STAGES, **RENAMED_DIMENSIONS}.items():
-                stages += session.execute(
-                    TieredRunTranscriptRecord.__table__.update()
-                    .where(TieredRunTranscriptRecord.stage == old_name)
-                    .values(stage=new_name)
-                ).rowcount
-            session.add(DatabaseSchemaMigration(
-                version=RENAME_MIGRATION_VERSION,
-                description="Stored dimension and run-stage names rewritten to the UI-aligned identifiers",
-            ))
-            session.commit()
-            if runs or stages:
-                logger.info(
-                    "renamed stored identifiers in %d run(s) and %d transcript row(s)",
-                    runs, stages,
-                )
-        except IntegrityError:
-            session.rollback()  # another instance recorded the marker first
-        except Exception as exc:
-            session.rollback()
-            logger.warning("stored-name rename migration skipped: %s", exc)
-        finally:
-            session.close()
-
-    def _apply_digest_migration(self) -> None:
-        """One-time fill of the run-list columns (DIGEST_COLUMN_DDL) on
-        rows stored before they existed, from each row's inputs and
-        report JSON. Best-effort like the rename migration: a failure
-        only leaves old rows unfilterable, never blocks startup."""
-        from src.tiered_analysis.run_digest import digest_from_json
-
-        session = self._SessionLocal()
-        try:
-            if session.get(DatabaseSchemaMigration, DIGEST_MIGRATION_VERSION) is not None:
-                return
-            filled = 0
-            for row in session.query(TieredRunRecord):
-                digest = digest_from_json(row.inputs_json, row.result_json, row.status)
-                if all(value is None for value in digest.values()):
-                    continue
-                filled += 1
-                session.execute(
-                    TieredRunRecord.__table__.update()
-                    .where(TieredRunRecord.id == row.id)
-                    # Explicit updated_at: the onupdate default must not
-                    # re-stamp a run nobody touched.
-                    .values(**digest, updated_at=row.updated_at)
-                )
-            session.add(DatabaseSchemaMigration(
-                version=DIGEST_MIGRATION_VERSION,
-                description="Run-list facts (tier, sizing inputs, hold, outlook, shares) filled into their own tiered_runs columns",
-            ))
-            session.commit()
-            if filled:
-                logger.info("filled run-list columns on %d stored run(s)", filled)
-        except IntegrityError:
-            session.rollback()  # another instance recorded the marker first
-        except Exception as exc:
-            session.rollback()
-            logger.warning("run-list column migration skipped: %s", exc)
-        finally:
-            session.close()
-
-    def _ensure_column(self, table: str, column: str, ddl_type: str) -> None:
-        """Best-effort backfill of a column on databases created before it
-        existed (create_all never alters existing tables). A failure only
-        degrades the feature that reads the column, never startup."""
-        try:
-            existing = {
-                col["name"] for col in inspect(self._engine).get_columns(table)
-            }
-            if column in existing:
+            inspector = inspect(self._engine)
+            existing = set(inspector.get_table_names())
+            legacy = [
+                table for table, marker in LEGACY_COLUMN_MARKERS.items()
+                if table in existing
+                and marker in {col["name"] for col in inspector.get_columns(table)}
+            ]
+            if not legacy:
                 return
             with self._engine.begin() as connection:
-                connection.exec_driver_sql(
-                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"
-                )
+                for table in legacy:
+                    connection.exec_driver_sql(f"DROP TABLE {table}")
+            logger.warning(
+                "dropped %s: stored before the page-vocabulary change "
+                "(old runs were test runs and are not carried over)",
+                ", ".join(legacy),
+            )
         except Exception as exc:
-            logger.warning("%s.%s backfill skipped: %s", table, column, exc)
+            logger.warning("legacy table reset skipped: %s", exc)
+            return
+        Base.metadata.create_all(self._engine)
+        session = self._SessionLocal()
+        try:
+            if session.get(DatabaseSchemaMigration, VOCABULARY_RESET_VERSION) is None:
+                session.add(DatabaseSchemaMigration(
+                    version=VOCABULARY_RESET_VERSION,
+                    description="Run and transcript tables recreated with the analysis page's column names",
+                ))
+                session.commit()
+        except Exception:
+            session.rollback()
+        finally:
+            session.close()
 
     @classmethod
     def get_instance(cls) -> 'DatabaseManager':
@@ -533,11 +429,6 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
     def _is_file_sqlite_database(self) -> bool:
         database = (self._engine.url.database or "").strip()
         return bool(database) and database.lower() != ":memory:"
-
-    @staticmethod
-    def _is_sqlite_duplicate_column_error(exc: OperationalError, column: str) -> bool:
-        err_text = str(getattr(exc, "orig", exc)).lower()
-        return "duplicate column name" in err_text and column.lower() in err_text
 
     def get_session(self) -> Session:
         """

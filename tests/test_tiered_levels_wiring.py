@@ -16,8 +16,8 @@ import unittest
 from src.tiered_analysis.earnings import EarningsInfo
 from src.tiered_analysis.integration import run_tiered_analysis
 from src.tiered_analysis.providers.base import (
-    DimensionProvider,
-    DimensionResult,
+    DataReportProvider,
+    DataReport,
     Market,
     SourceKind,
 )
@@ -28,17 +28,17 @@ from src.tiered_analysis.providers.technicals import (
 )
 
 
-class _StubProvider(DimensionProvider):
+class _StubProvider(DataReportProvider):
     kind = SourceKind.NUMERIC
 
     def __init__(self, result):
-        self.dimension = result.dimension
+        self.name = result.name
         self._result = result
 
     def supports(self, market):
         return True
 
-    def collect(self, symbol):
+    def collect(self, ticker):
         return self._result
 
 
@@ -58,8 +58,8 @@ def _payload(close=100.0, sma_50=96.0, sma_200=90.0, support_1=94.0,
 
 
 def _technicals_dim():
-    return DimensionResult(
-        dimension="technicals",
+    return DataReport(
+        name="technicals",
         kind=SourceKind.NUMERIC,
         payload=_payload(),
     )
@@ -68,12 +68,12 @@ def _technicals_dim():
 class _FakeQuickJudge:
     """Canned BUY outlook — levels wiring is what's under test here."""
 
-    def run(self, symbol, dimensions, hold_weeks):
-        from src.tiered_analysis.quick_judge import QuickResult, QuickOutlook
+    def run(self, ticker, data_reports, max_hold_weeks):
+        from src.tiered_analysis.preliminary_analysis import PreliminaryResult, PreliminaryOutlook
         from src.tiered_analysis.schema import Outlook
 
-        return QuickResult(
-            outlook=QuickOutlook(
+        return PreliminaryResult(
+            outlook=PreliminaryOutlook(
                 outlook=Outlook.BULLISH,
                 final_score=7.5,
                 summary="buy the pullback",
@@ -86,8 +86,8 @@ def _run(providers=None):
         "AAPL",
         market=Market.US,
         providers=providers or [_StubProvider(_technicals_dim())],
-        quick_judge=_FakeQuickJudge(),
-        earnings_lookup=lambda symbol, market: EarningsInfo(),
+        preliminary_analysis=_FakeQuickJudge(),
+        earnings_lookup=lambda ticker, market: EarningsInfo(),
         # BUY outlooks whose plan trips a check (the downtrend test)
         # consult the plan-review AI; without this canned "no change
         # helps" reply the test made a REAL network LLM call whenever an
@@ -98,12 +98,12 @@ def _run(providers=None):
 
 
 class TestLevelsWiring(unittest.TestCase):
-    def test_deterministic_bases_replace_dsa_sniper_levels(self):
+    def test_deterministic_bases_replace_dsa_trade_plan_levels(self):
         outcome = _run()
         levels = outcome.report.levels
         self.assertAlmostEqual(levels.entry, 96.0)  # not 210.0
         self.assertAlmostEqual(levels.stop_loss, 90.0)
-        self.assertAlmostEqual(levels.take_profit, 108.0)
+        self.assertAlmostEqual(levels.target, 108.0)
 
     def test_detail_present_with_no_adjustments_ever(self):
         outcome = _run()
@@ -113,8 +113,8 @@ class TestLevelsWiring(unittest.TestCase):
         self.assertIn("support candidates", detail["formula"])
 
     def test_missing_technicals_leaves_levels_empty_with_warning(self):
-        other = DimensionResult(
-            dimension="macro_economy", kind=SourceKind.NUMERIC,
+        other = DataReport(
+            name="macro_economy", kind=SourceKind.NUMERIC,
             payload={"x": 1},
         )
         outcome = _run(providers=[_StubProvider(other)])
@@ -124,8 +124,8 @@ class TestLevelsWiring(unittest.TestCase):
         )
 
     def test_downtrend_plan_still_issues_and_warns_in_the_report(self):
-        downtrend = DimensionResult(
-            dimension="technicals", kind=SourceKind.NUMERIC,
+        downtrend = DataReport(
+            name="technicals", kind=SourceKind.NUMERIC,
             payload=_payload(close=89.0),
         )
         outcome = _run(providers=[_StubProvider(downtrend)])
@@ -147,7 +147,7 @@ class TestLevelAnchorsPayload(unittest.TestCase):
         return bars
 
     def test_provider_payload_carries_the_level_anchors(self):
-        provider = TechnicalsProvider(bars_loader=lambda symbol: self._bars(70))
+        provider = TechnicalsProvider(bars_loader=lambda ticker: self._bars(70))
         payload = provider.collect("AAPL").payload
         self.assertAlmostEqual(read_metric(payload, "price", "close"), 106.9)
         self.assertAlmostEqual(

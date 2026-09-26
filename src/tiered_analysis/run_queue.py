@@ -58,9 +58,10 @@ def max_concurrent_runs() -> int:
 class QueuedRun:
     """One run as the queue hands it to the runner."""
 
-    task_id: str
-    stock_code: str
-    #: The stored creation-time inputs (tier, hold_weeks, sizing_overrides, …).
+    run_id: str
+    ticker: str
+    #: The stored creation-time inputs (capital, risk_pct, reward_ratio,
+    #: max_hold_weeks, tier).
     inputs: Dict[str, Any]
 
 
@@ -81,8 +82,8 @@ class RunQueue:
         with self._lock:
             return len(self._active)
 
-    def submit(self, task_id: str) -> str:
-        """Try to start the just-created queued run ``task_id`` (and any
+    def submit(self, run_id: str) -> str:
+        """Try to start the just-created queued run ``run_id`` (and any
         other waiting run a free slot allows). Returns the status the
         caller should report: ``running`` if it got a slot now, else
         ``queued``. A dispatch failure leaves the row queued for the next
@@ -90,13 +91,13 @@ class RunQueue:
         try:
             started = self.dispatch()
         except Exception as exc:
-            logger.warning("run queue dispatch failed for %s: %s", task_id, exc)
+            logger.warning("run queue dispatch failed for %s: %s", run_id, exc)
             return "queued"
-        return "running" if task_id in started else "queued"
+        return "running" if run_id in started else "queued"
 
     def resume(self) -> List[str]:
         """Startup: start the runs the previous process left queued.
-        Returns the task ids started now."""
+        Returns the run id started now."""
         started = self.dispatch()
         if started:
             logger.info("run queue resumed %d queued run(s)", len(started))
@@ -115,46 +116,46 @@ class RunQueue:
                 if row is None:
                     break
                 run = QueuedRun(
-                    task_id=row["task_id"],
-                    stock_code=row["stock_code"],
+                    run_id=row["run_id"],
+                    ticker=row["ticker"],
                     inputs=dict(row["inputs"] or {}),
                 )
-                history.mark_running(run.task_id)
-                self._active.add(run.task_id)
+                history.mark_running(run.run_id)
+                self._active.add(run.run_id)
                 threading.Thread(
                     target=self._work,
                     args=(run,),
-                    name=f"tiered-analysis-{run.stock_code}",
+                    name=f"tiered-analysis-{run.ticker}",
                     daemon=True,
                 ).start()
-                started.append(run.task_id)
+                started.append(run.run_id)
         return started
 
-    def remove(self, task_id: str) -> Optional[Dict[str, Any]]:
+    def remove(self, run_id: str) -> Optional[Dict[str, Any]]:
         """Delete a run that is not executing: a queued run leaves the
         line (that is how one is cancelled), a finished or failed run is
         removed from the history. Holds the queue lock so a queued row
         cannot be promoted to running between the check and the delete.
-        Returns the deleted row's summary, None for an unknown task id;
+        Returns the deleted row's summary, None for an unknown run id;
         raises ``history.RunInProgressError`` when the run is executing
         (its thread cannot be stopped)."""
         from . import history
 
         with self._lock:
-            if task_id in self._active:
-                raise history.RunInProgressError(task_id)
-            return history.delete_run(task_id)
+            if run_id in self._active:
+                raise history.RunInProgressError(run_id)
+            return history.delete_run(run_id)
 
     def _work(self, run: QueuedRun) -> None:
         try:
             self._runner(run)
         except Exception:  # the runner records its own failures; this is the net
-            logger.exception("run %s escaped its runner", run.task_id)
+            logger.exception("run %s escaped its runner", run.run_id)
         finally:
             with self._lock:
-                self._active.discard(run.task_id)
+                self._active.discard(run.run_id)
             try:
                 self.dispatch()
             except Exception as exc:
                 logger.warning("run queue dispatch failed after %s: %s",
-                               run.task_id, exc)
+                               run.run_id, exc)

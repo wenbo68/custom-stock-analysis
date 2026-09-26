@@ -1,23 +1,27 @@
 # -*- coding: utf-8 -*-
-"""Tiered-analysis API: run tier 1 for a symbol from the web UI.
+"""Tiered-analysis API: start a run from the analysis page or the chat.
 
 A full run takes minutes (data fetch + LLM), so POST /analyze returns a
-task id immediately; the run executes in a background thread. Runs
+run id immediately; the run executes in a background thread. Runs
 persist in the tiered_runs table (src/tiered_analysis/history.py), so
 GET /runs serves a clickable history that survives page navigation and
 server restarts — one page at a time, filtered in SQL — and
-GET /runs/{task_id} returns the stored report, whole or by section.
+GET /runs/{run_id} returns the stored report, whole or by section.
 A run's LLM transcript is served as an index (GET .../transcript) plus
-one call at a time (GET .../transcript/{seq}), since the text of every
-call together runs to half a megabyte; the deep-analysis vote items are
-paged the same way (GET .../debate/items). DELETE /runs/{task_id}
+one call at a time (GET .../transcript/{call_number}), since the text of
+every call together runs to half a megabyte; the deep-analysis vote
+items are paged the same way (GET .../vote_items). DELETE /runs/{run_id}
 removes a run — a queued one is thereby cancelled — and GET /status says
-what the server can do right now (2026-09-21, for the chatbot: the
+what the server can do right now (2026-09-21, for the chat bot: the
 model, the data sources, the run slots, the defaults, each market's
 clock), so a client can explain a refusal before it happens.
 
 Request and response shapes live in tiered_schemas.py so /docs shows
-both sides of every route.
+both sides of every route. Every name a client sends or reads is the
+analysis page's own word for the thing (owner request 2026-09-24), and
+the engine and the database use the same words, so nothing translates.
+A query parameter the route does not know is refused with a 422 rather
+than silently ignored (owner request 2026-09-24).
 
 Self-host: one person, one machine. There is no sign-in; the model and
 its API key come from the environment (``MAIN_LLM`` and ``LLM_API_KEY``,
@@ -37,12 +41,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.v1.endpoints.tiered_schemas import (
     AnalyzeAccepted,
-    DebateItemPage,
-    DebateItemStatus,
     OutlookFilter,
     RunDeleted,
     RunDetail,
@@ -54,27 +56,33 @@ from api.v1.endpoints.tiered_schemas import (
     TieredAnalyzeRequest,
     TranscriptCall,
     TranscriptIndex,
+    VoteItemPage,
+    VoteItemStatus,
 )
+from src.languages import DEFAULT_LANGUAGE
 from src.tiered_analysis import history, report_sections
 from src.tiered_analysis.llm_support import LlmTranscript
 from src.tiered_analysis.run_context import llm_model
 from src.tiered_analysis.run_queue import QueuedRun, RunQueue
+from src.tiered_analysis.settings import SizingSettings, merge_overrides
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def _run_analysis(stock_code: str, depth: int = 1,
-                  sizing_overrides: Optional[Dict[str, float]] = None,
-                  hold_weeks: int = 2,
-                  transcript: Optional[LlmTranscript] = None):
+def _run_analysis(ticker: str, tier: int = 1,
+                  sizing: Optional[SizingSettings] = None,
+                  max_hold_weeks: int = 2,
+                  transcript: Optional[LlmTranscript] = None,
+                  language: str = DEFAULT_LANGUAGE):
     """Indirection so tests can patch the multi-minute production run."""
     from src.tiered_analysis.integration import run_tiered_analysis
 
     return run_tiered_analysis(
-        stock_code, depth=depth, sizing_overrides=sizing_overrides,
-        hold_weeks=hold_weeks, transcript=transcript,
+        ticker, tier=tier, sizing_settings=sizing,
+        max_hold_weeks=max_hold_weeks, transcript=transcript,
+        language=language,
     )
 
 
@@ -82,12 +90,13 @@ def _serialize_levels(levels: Any) -> Dict[str, Any]:
     return {
         "entry": levels.entry,
         "stop_loss": levels.stop_loss,
-        "take_profit": levels.take_profit,
+        "target": levels.target,
     }
 
 
 def _serialize_tier_section(report: Any) -> Optional[Dict[str, Any]]:
-    """Tier 2 section: outlook + audit trail, no dimension duplication."""
+    """The deep-analysis section: outlook + its record, no data-report
+    duplication."""
     if report is None:
         return None
     section: Dict[str, Any] = {
@@ -96,31 +105,31 @@ def _serialize_tier_section(report: Any) -> Optional[Dict[str, Any]]:
         "confidence": report.confidence,
         "score": report.score,
         "levels": _serialize_levels(report.levels),
-        "narrative": report.narrative,
+        "summary": report.summary,
         "warnings": list(report.warnings),
     }
-    if report.debate_detail is not None:
-        section["debate_detail"] = report.debate_detail
+    if report.detail is not None:
+        section["detail"] = report.detail
     return section
 
 
 def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
     report = outcome.report
-    dimensions = []
-    for dim in report.dimensions:
-        dimensions.append({
-            "dimension": dim.dimension,
+    data_reports = []
+    for dim in report.data_reports:
+        data_reports.append({
+            "name": dim.name,
             "kind": dim.kind.value,
-            "is_actionable": dim.is_actionable,
+            "counted": dim.counted,
             "payload": dim.payload,
             # UI formula receipts for derived metrics (technicals v2);
-            # None on other dimensions and old runs.
+            # None on other data reports and old runs.
             "formulas": dim.formulas,
-            "narrative": dim.narrative,
+            "summary": dim.summary,
             "warnings": list(dim.warnings),
-            # The same notes keyed by the payload field ("group.key")
+            # The same warnings keyed by the payload field ("group.key")
             # each is about; None on old stored runs.
-            "field_notes": dim.field_notes,
+            "field_warnings": dim.field_warnings,
             "citations": [
                 {
                     "source_name": c.source_name,
@@ -135,21 +144,20 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
     state_reports = getattr(outcome.state, "reports", {}) or {}
     final = outcome.final_report or report
     return {
-        "symbol": report.symbol,
+        "ticker": report.ticker,
         "market": report.market.value,
-        "tier": report.tier,
+        # The tier the run was asked for (1 or 2), as the form names it.
+        "tier": outcome.tier,
         "score": report.score,
         "confidence": report.confidence,
         "levels": _serialize_levels(report.levels),
         "levels_detail": report.levels_detail,
-        "narrative": report.narrative,
+        "summary": report.summary,
         "warnings": list(report.warnings),
-        # The quick judge's 0-10 outlook (depth 1); None at depth 2, whose
-        # judge detail sits under ``tier2``.
-        "debate_detail": report.debate_detail,
-        "dimensions": dimensions,
-        # v2 slice 6 (additive): depth, deeper-tier sections, sizing, cost.
-        "depth": outcome.depth,
+        # The preliminary analysis's 0-10 outlook (tier 1); None on a
+        # tier-2 run, whose record sits under ``deep_analysis``.
+        "preliminary_analysis": report.detail,
+        "data_reports": data_reports,
         "final": {
             "tier": final.tier,
             "outlook": final.outlook.value,
@@ -157,7 +165,7 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
             "confidence": final.confidence,
             "levels": _serialize_levels(final.levels),
         },
-        "tier2": _serialize_tier_section(state_reports.get(2)),
+        "deep_analysis": _serialize_tier_section(state_reports.get(2)),
         "sizing": outcome.sizing,
         "llm_usage": outcome.llm_usage,
         # Outlook redesign (additive): the impersonal judgment, the
@@ -169,9 +177,9 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
         # Plan review (additive): structured per-column trade-plan
         # warnings — numbers only, the frontend words them.
         "plan_warnings": outcome.plan_warnings,
-        # Max hold time (additive, 2026-08-08): the horizon in weeks the
-        # AI was judged against; absent on old stored runs.
-        "hold_weeks": getattr(outcome, "hold_weeks", None),
+        # Max hold time (2026-08-08): the horizon in weeks the AI was
+        # judged against.
+        "max_hold_weeks": outcome.max_hold_weeks,
     }
 
 
@@ -181,17 +189,18 @@ def _execute_run(run: QueuedRun) -> None:
     try:
         inputs = run.inputs
         outcome = _run_analysis(
-            run.stock_code,
-            depth=int(inputs.get("tier") or 1),
-            sizing_overrides=inputs.get("sizing_overrides") or None,
-            hold_weeks=int(inputs.get("hold_weeks") or 2),
-            transcript=LlmTranscript.for_run(run.task_id),
+            run.ticker,
+            tier=int(inputs.get("tier") or 1),
+            sizing=_sizing_of(inputs),
+            max_hold_weeks=int(inputs.get("max_hold_weeks") or 2),
+            transcript=LlmTranscript.for_run(run.run_id),
+            language=str(inputs.get("language") or DEFAULT_LANGUAGE),
         )
-        history.mark_done(run.task_id, _serialize_outcome(outcome))
+        history.mark_done(run.run_id, _serialize_outcome(outcome))
     except Exception as exc:
         logger.error("tiered analysis task failed for %s: %s",
-                     run.stock_code, exc, exc_info=True)
-        history.mark_failed(run.task_id, str(exc))
+                     run.ticker, exc, exc_info=True)
+        history.mark_failed(run.run_id, str(exc))
 
 
 #: The one queue this process runs; app startup calls ``resume`` on it.
@@ -202,33 +211,53 @@ run_queue = RunQueue(_execute_run)
 _submit_lock = threading.Lock()
 
 
-def _effective_run_inputs(request: TieredAnalyzeRequest) -> Dict[str, Any]:
-    """The settings the run will actually use — request overrides on top
-    of the form defaults (the same resolution run_tiered_analysis
-    performs) — recorded on the run row so history shows them while the
-    run is still in flight."""
-    from src.tiered_analysis.settings import SizingSettings, merge_overrides
-
-    sizing = request.sizing
-    settings = merge_overrides(
+def _sizing_of(inputs: Dict[str, Any]) -> SizingSettings:
+    """The sizing settings a stored run row asks for (its capital, risk %
+    and reward ratio), for ``run_tiered_analysis``."""
+    return merge_overrides(
         SizingSettings(),
-        capital=sizing.capital if sizing else None,
-        risk_fraction=sizing.risk_fraction if sizing else None,
-        reward_risk=sizing.reward_risk if sizing else None,
+        capital=inputs.get("capital"),
+        risk_pct=inputs.get("risk_pct"),
+        reward_ratio=inputs.get("reward_ratio"),
+    )
+
+
+def _effective_run_inputs(request: TieredAnalyzeRequest) -> Dict[str, Any]:
+    """The settings the run will actually use — the request's values on
+    top of the form defaults — in the form's words and order, recorded
+    on the run row so history shows them while the run is still in
+    flight and the queue hands them to the engine."""
+    sizing = merge_overrides(
+        SizingSettings(),
+        capital=request.capital,
+        risk_pct=request.risk_pct,
+        reward_ratio=request.reward_ratio,
     )
     return {
-        "tier": request.depth,
-        "capital": settings.capital,
-        "risk_fraction": settings.risk_fraction,
-        "reward_risk": settings.reward_risk,
-        "hold_weeks": request.hold_weeks,
+        "capital": sizing.capital,
+        "risk_pct": sizing.risk_pct,
+        "reward_ratio": sizing.reward_ratio,
+        "max_hold_weeks": request.max_hold_weeks,
+        "tier": request.tier,
+        "language": request.language,
+    }
+
+
+def effective_inputs(request: TieredAnalyzeRequest) -> Dict[str, Any]:
+    """The run's inputs as the user words them — every default filled
+    in, in the form's order — so a client (the chat's confirmation) can
+    show exactly what the run will use."""
+    return {
+        "ticker": request.ticker,
+        **_effective_run_inputs(request),
+        "run_anyway": request.run_anyway,
     }
 
 
 class RunRefused(Exception):
     """A run request the server will not take: the HTTP status and the
     structured detail the route answers with. Raised by ``submit_run`` so
-    the second client (the chatbot, which calls it directly rather than
+    the second client (the chat bot, which calls it directly rather than
     over HTTP) gets the same refusals as readable results."""
 
     def __init__(self, status_code: int, detail: Dict[str, Any]) -> None:
@@ -252,19 +281,19 @@ def _require_llm_configured() -> None:
 def submit_run(request: TieredAnalyzeRequest) -> Dict[str, Any]:
     """Store a run and hand it to the queue — the whole of what
     ``POST /analyze`` does, as a function, so every client (the web
-    page over HTTP, the chatbot in-process) starts runs through one
-    path: the model check, the market clock gate, the duplicate refusal
-    and the queue. Returns the accepted document (task_id, stock_code,
-    depth, status); raises ``RunRefused`` with the route's status and
-    detail for every refusal."""
-    from src.tiered_analysis.run_gate import clock_gate
+    page over HTTP, the chat bot in-process) starts runs through one
+    path: the model check, the market-open check, the duplicate refusal
+    and the queue. Returns the accepted document (run_id, ticker, tier,
+    status); raises ``RunRefused`` with the route's status and detail
+    for every refusal."""
+    from src.tiered_analysis.run_gate import market_open_check
 
     _require_llm_configured()
-    gate = clock_gate(request.stock_code, override=request.run_anyway)
+    gate = market_open_check(request.ticker, run_anyway=request.run_anyway)
     if gate.blocked:
         logger.info(
-            "tiered run blocked by clock gate for %s (%s)",
-            request.stock_code, gate.detail,
+            "tiered run blocked by the market-open check for %s (%s)",
+            request.ticker, gate.detail,
         )
         # Session bounds ride along (ISO, market-local offset embedded) so
         # the popup can word the hours in market time AND the user's time.
@@ -275,27 +304,23 @@ def submit_run(request: TieredAnalyzeRequest) -> Dict[str, Any]:
         raise RunRefused(409, detail)
 
     inputs = _effective_run_inputs(request)
-    if request.sizing is not None:
-        overrides = request.sizing.model_dump(exclude_none=True)
-        if overrides:
-            inputs["sizing_overrides"] = overrides
 
     with _submit_lock:
-        duplicate = history.find_active_duplicate(request.stock_code, inputs)
+        duplicate = history.find_active_duplicate(request.ticker, inputs)
         if duplicate is not None:
             logger.info("tiered run refused as a duplicate of %s for %s",
-                        duplicate["task_id"], request.stock_code)
+                        duplicate["run_id"], request.ticker)
             raise RunRefused(409, {
                 "code": "duplicate_run",
-                "task_id": duplicate["task_id"],
+                "run_id": duplicate["run_id"],
                 "status": duplicate["status"],
             })
-        task_id = uuid.uuid4().hex
-        history.create_run(task_id, request.stock_code, inputs=inputs,
+        run_id = uuid.uuid4().hex
+        history.create_run(run_id, request.ticker, inputs=inputs,
                            status=history.STATUS_QUEUED)
-    status = run_queue.submit(task_id)
-    return {"task_id": task_id, "stock_code": request.stock_code,
-            "depth": request.depth, "status": status}
+    status = run_queue.submit(run_id)
+    return {"run_id": run_id, "ticker": request.ticker,
+            "tier": request.tier, "status": status}
 
 
 @router.post("/analyze", status_code=202, response_model=AnalyzeAccepted)
@@ -303,7 +328,7 @@ def start_tiered_analysis(request: TieredAnalyzeRequest) -> Dict[str, Any]:
     """Start a run.
 
     The run is stored and executes in the background; poll
-    `GET /runs/{task_id}` (or the list) for its status.
+    `GET /runs/{run_id}` (or the list) for its status.
 
     - 400 `llm_not_configured`: no model set in .env.
     - 409 `market_open`: the ticker's market is inside its trading day
@@ -311,7 +336,7 @@ def start_tiered_analysis(request: TieredAnalyzeRequest) -> Dict[str, Any]:
       and today's session bounds; send `run_anyway: true` to analyze the
       previous completed session instead.
     - 409 `duplicate_run`: a queued or running run has the same ticker
-      and inputs; the body names it (`task_id`, `status`).
+      and inputs; the body names it (`run_id`, `status`).
     """
     try:
         return submit_run(request)
@@ -336,7 +361,33 @@ def get_server_status() -> Dict[str, Any]:
     return server_status()
 
 
-@router.get("/runs", response_model=RunPage)
+def _known_query_params(route: Any) -> set:
+    """The query parameter names a route declares."""
+    return {param.alias for param in route.dependant.query_params}
+
+
+def reject_unknown_query_params(request: Request) -> None:
+    """Refuse (422) a query parameter the route does not declare, naming
+    it — an old or misspelled filter must never silently return an
+    unfiltered list (owner request 2026-09-24)."""
+    route = request.scope.get("route")
+    if route is None:
+        return
+    known = _known_query_params(route)
+    unknown = sorted(name for name in request.query_params if name not in known)
+    if unknown:
+        raise HTTPException(status_code=422, detail={
+            "code": "unknown_query_params",
+            "unknown": unknown,
+            "known": sorted(known),
+            "message": (
+                f"unknown query parameter(s): {', '.join(unknown)}; "
+                f"this route takes: {', '.join(sorted(known))}"
+            ),
+        })
+
+
+@router.get("/runs", response_model=RunPage, dependencies=[Depends(reject_unknown_query_params)])
 def list_tiered_runs(
     ticker: Optional[List[str]] = Query(
         default=None, description="Keep these tickers (any of; case-insensitive).",
@@ -344,18 +395,18 @@ def list_tiered_runs(
     status: Optional[List[RunStatus]] = Query(default=None, description="Any of."),
     outlook: Optional[List[OutlookFilter]] = Query(
         default=None,
-        description="Any of. `none` = rows with no opinion (unfinished, failed, or unknown).",
+        description="Any of. `no_outlook` = rows with no outlook (unfinished, failed, or the analysis produced none).",
     ),
-    tier: Optional[List[int]] = Query(default=None, description="Any of 1, 2."),
-    hold_weeks: Optional[List[int]] = Query(default=None, description="Any of 1-4."),
     capital_min: Optional[float] = Query(default=None, ge=0),
     capital_max: Optional[float] = Query(default=None, ge=0),
-    risk_min: Optional[float] = Query(
-        default=None, ge=0, le=1, description="Fraction: 0.01 = 1%.",
+    risk_pct_min: Optional[float] = Query(
+        default=None, ge=0, le=100, description="Percent: 1 = 1%.",
     ),
-    risk_max: Optional[float] = Query(default=None, ge=0, le=1),
-    reward_min: Optional[float] = Query(default=None, ge=0),
-    reward_max: Optional[float] = Query(default=None, ge=0),
+    risk_pct_max: Optional[float] = Query(default=None, ge=0, le=100),
+    reward_ratio_min: Optional[float] = Query(default=None, ge=0),
+    reward_ratio_max: Optional[float] = Query(default=None, ge=0),
+    max_hold_weeks: Optional[List[int]] = Query(default=None, description="Any of 1-4."),
+    tier: Optional[List[int]] = Query(default=None, description="Any of 1, 2."),
     created_after: Optional[datetime] = Query(
         default=None, description="ISO 8601; inclusive. Naive values are UTC.",
     ),
@@ -372,20 +423,21 @@ def list_tiered_runs(
     Every filter is optional and they combine with AND; a multi-value
     filter matches any of its values (repeat the parameter:
     `?status=queued&status=running`). Ranges are inclusive. Rows carry
-    the list facts only — fetch a report with `GET /runs/{task_id}`.
+    the list facts only — fetch a report with `GET /runs/{run_id}`.
+    An unknown query parameter is a 422 `unknown_query_params`.
     """
     filters = history.RunFilters(
         tickers=tuple(ticker or ()),
         statuses=tuple(status or ()),
         outlooks=tuple(outlook or ()),
         tiers=tuple(tier or ()),
-        hold_weeks=tuple(hold_weeks or ()),
+        max_hold_weeks=tuple(max_hold_weeks or ()),
         capital_min=capital_min,
         capital_max=capital_max,
-        risk_min=risk_min,
-        risk_max=risk_max,
-        reward_min=reward_min,
-        reward_max=reward_max,
+        risk_pct_min=risk_pct_min,
+        risk_pct_max=risk_pct_max,
+        reward_ratio_min=reward_ratio_min,
+        reward_ratio_max=reward_ratio_max,
         created_after=created_after,
         created_before=created_before,
     )
@@ -398,25 +450,25 @@ def list_tiered_tickers() -> Dict[str, List[str]]:
     return {"items": history.list_tickers()}
 
 
-@router.get("/runs/{task_id}", response_model=RunDetail)
+@router.get("/runs/{run_id}", response_model=RunDetail, dependencies=[Depends(reject_unknown_query_params)])
 def get_tiered_run(
-    task_id: str,
+    run_id: str,
     section: Optional[List[Section]] = Query(
         default=None,
         description=(
             "Which parts of the report to include (repeat to combine). "
             "Omit for everything. `core` (headline facts, a few KB) is always "
-            "included; `dimensions` is the data reports (~60 KB), `debate` the "
-            "deep-analysis overview (~10 KB: outlook, summary outline, pools, "
-            "item count — the vote items themselves are paged at "
-            "`GET /runs/{task_id}/debate/items`), `plan` the trade-plan receipt."
+            "included; `data_reports` is the data reports (~60 KB), "
+            "`deep_analysis` the deep-analysis overview (~10 KB: outlook, "
+            "summary outline, pools, item count — the vote items themselves are "
+            "paged at `GET /runs/{run_id}/vote_items`), `plan` the trade-plan receipt."
         ),
     ),
-    dimension: Optional[List[str]] = Query(
+    data_report: Optional[List[str]] = Query(
         default=None,
         description=(
-            "With the dimensions section: keep only these data reports, e.g. "
-            "technicals, fundamentals, positioning, macro_economy, opinion, "
+            "With the data_reports section: keep only these data reports, e.g. "
+            "technicals, fundamentals, positioning, macro_economy, "
             "company_news, world_news."
         ),
     ),
@@ -425,55 +477,55 @@ def get_tiered_run(
 
     `result` is null while the run is queued or running and after a
     failure (see `status` and `error`). Whatever the sections, `result`
-    carries `dimension_index`: one light row per data report (name, kind,
-    whether it counted, warnings). 404 for an unknown task id.
+    carries `data_report_index`: one light row per data report (name, kind,
+    whether it counted, warnings). 404 for an unknown run id.
     """
     from src.tiered_analysis.report_sections import normalize_sections
 
     run = history.get_run(
-        task_id, sections=normalize_sections(section), dimensions=dimension,
+        run_id, sections=normalize_sections(section), data_reports=data_report,
     )
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return run
 
 
-@router.delete("/runs/{task_id}", response_model=RunDeleted)
-def delete_tiered_run(task_id: str) -> Dict[str, Any]:
+@router.delete("/runs/{run_id}", response_model=RunDeleted)
+def delete_tiered_run(run_id: str) -> Dict[str, Any]:
     """Delete a run and its transcript.
 
     A queued run is taken out of the line — this is how a run is
     cancelled. A finished or failed run is removed from the history.
 
-    - 404: unknown task id.
+    - 404: unknown run id.
     - 409 `run_in_progress`: the run is executing and cannot be stopped;
       wait for it to finish or fail, then delete it.
     """
     try:
-        deleted = run_queue.remove(task_id)
+        deleted = run_queue.remove(run_id)
     except history.RunInProgressError:
         raise HTTPException(status_code=409, detail={
-            "code": "run_in_progress", "task_id": task_id,
+            "code": "run_in_progress", "run_id": run_id,
         })
     if deleted is None:
         raise HTTPException(status_code=404, detail="run not found")
     logger.info("tiered run %s (%s, %s) deleted",
-                task_id, deleted["stock_code"], deleted["status"])
+                run_id, deleted["ticker"], deleted["status"])
     return {
-        "task_id": deleted["task_id"],
-        "stock_code": deleted["stock_code"],
+        "run_id": deleted["run_id"],
+        "ticker": deleted["ticker"],
         "status": deleted["status"],
     }
 
 
-@router.get("/runs/{task_id}/debate/items", response_model=DebateItemPage)
-def list_tiered_debate_items(
-    task_id: str,
-    dimension: Optional[List[str]] = Query(
+@router.get("/runs/{run_id}/vote_items", response_model=VoteItemPage, dependencies=[Depends(reject_unknown_query_params)])
+def list_tiered_vote_items(
+    run_id: str,
+    data_report: Optional[List[str]] = Query(
         default=None,
         description="Keep items about these data reports (any of), e.g. technicals, company_news.",
     ),
-    status: Optional[List[DebateItemStatus]] = Query(
+    status: Optional[List[VoteItemStatus]] = Query(
         default=None, description="Any of: counted, excluded.",
     ),
     page: int = Query(default=1, ge=1),
@@ -488,10 +540,10 @@ def list_tiered_debate_items(
     checkers voted on; `final_status` says whether it counted toward the
     score. Filters combine with AND. A run without a deep-analysis record
     (tier 1, unfinished, failed) has an empty page; 404 for an unknown
-    task id.
+    run id.
     """
-    items = history.get_debate_items(
-        task_id, dimensions=dimension, statuses=status,
+    items = history.get_vote_items(
+        run_id, data_reports=data_report, statuses=status,
         page=page, page_size=page_size,
     )
     if items is None:
@@ -499,28 +551,28 @@ def list_tiered_debate_items(
     return items
 
 
-@router.get("/runs/{task_id}/transcript", response_model=TranscriptIndex)
-def get_tiered_run_transcript(task_id: str) -> Dict[str, List[Dict[str, Any]]]:
+@router.get("/runs/{run_id}/transcript", response_model=TranscriptIndex)
+def get_tiered_run_transcript(run_id: str) -> Dict[str, List[Dict[str, Any]]]:
     """The run's LLM calls in call order, without their text.
 
-    Each row carries the call's facts (step, model, time, tokens, error)
-    and the size of its prompt and reply in characters; fetch the text
-    of one call with `GET /runs/{task_id}/transcript/{seq}`. Empty when
+    Each row carries the call's facts (stage, llm, time, tokens, error)
+    and the size of its input and output in characters; fetch the text
+    of one call with `GET /runs/{run_id}/transcript/{call_number}`. Empty when
     the run made no call or its rows expired (kept 14 days). 404 for an
-    unknown task id.
+    unknown run id.
     """
-    if not history.run_exists(task_id):
+    if not history.run_exists(run_id):
         raise HTTPException(status_code=404, detail="run not found")
-    return {"items": history.list_transcript(task_id)}
+    return {"items": history.list_transcript(run_id)}
 
 
-@router.get("/runs/{task_id}/transcript/{seq}", response_model=TranscriptCall)
-def get_tiered_run_transcript_call(task_id: str, seq: int) -> Dict[str, Any]:
-    """One LLM call of a run with its full prompt and raw reply.
+@router.get("/runs/{run_id}/transcript/{call_number}", response_model=TranscriptCall)
+def get_tiered_run_transcript_call(run_id: str, call_number: int) -> Dict[str, Any]:
+    """One LLM call of a run with its full input and raw output.
 
-    404 when the run is unknown or has no call numbered `seq`.
+    404 when the run is unknown or has no call numbered `call_number`.
     """
-    call = history.get_transcript_call(task_id, seq)
+    call = history.get_transcript_call(run_id, call_number)
     if call is None:
         raise HTTPException(status_code=404, detail="transcript call not found")
     return call

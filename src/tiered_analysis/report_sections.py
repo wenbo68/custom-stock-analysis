@@ -2,28 +2,28 @@
 """Partial reads of a stored report (2026-09-21).
 
 A finished report is 60-150 KB of JSON, and almost all of it sits in two
-places: the per-dimension data reports (``dimensions``, ~60 KB) and the
-deep-analysis debate record (``tier2.debate_detail``, ~80 KB). Everything
+places: the data reports (``data_reports``, ~60 KB) and the deep-analysis
+record (``deep_analysis.detail``, ~80 KB). Everything
 else — the outlook, scores, levels, warnings, usage — is under 5 KB.
 
-``GET /runs/{task_id}`` therefore takes a list of sections and returns
-only those, so a caller after the trade plan (or a chatbot after one
-data report) never pays for the debate. The sections are:
+``GET /runs/{run_id}`` therefore takes a list of sections and returns
+only those, so a caller after the trade plan (or the chat bot after one
+data report) never pays for the deep analysis. The sections are:
 
 - ``core``: the light headline facts. Always present, so the answer
   stands on its own whatever else was asked for.
-- ``dimensions``: the data reports (optionally narrowed to named ones).
-- ``debate``: the deep-analysis record, ``tier2.debate_detail``, as an
-  overview — the outlook, the summary outline, the pools and the item
-  count, ~11 KB. The vote items themselves (~70 KB, one per piece of
-  evidence) are a list, so they are served like one: paged and
-  filtered, by ``page_debate_items`` behind ``GET
-  /runs/{task_id}/debate/items``.
+- ``data_reports``: the data reports (optionally narrowed to named ones).
+- ``deep_analysis``: the deep-analysis record, ``deep_analysis.detail``,
+  as an overview — the outlook, the summary outline, the pools and the
+  item count, ~11 KB. The vote items themselves (~70 KB, one per piece
+  of evidence) are a list, so they are served like one: paged and
+  filtered, by ``page_vote_items`` behind ``GET
+  /runs/{run_id}/vote_items``.
 - ``plan``: the trade-plan receipt — ``levels_detail``, ``sizing`` and
   ``plan_warnings``. (The levels themselves are core: they are the
   headline of the plan and tiny.)
 
-Whatever the sections, the answer carries ``dimension_index``: one light
+Whatever the sections, the answer carries ``data_report_index``: one light
 row per data report (its name, kind, whether it counted, its warnings),
 so a caller can see which reports exist and which went wrong without
 paying for the reports themselves.
@@ -35,19 +35,19 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 SECTION_CORE = "core"
-SECTION_DIMENSIONS = "dimensions"
-SECTION_DEBATE = "debate"
+SECTION_DATA_REPORTS = "data_reports"
+SECTION_DEEP_ANALYSIS = "deep_analysis"
 SECTION_PLAN = "plan"
 ALL_SECTIONS: Tuple[str, ...] = (
-    SECTION_CORE, SECTION_DIMENSIONS, SECTION_DEBATE, SECTION_PLAN,
+    SECTION_CORE, SECTION_DATA_REPORTS, SECTION_DEEP_ANALYSIS, SECTION_PLAN,
 )
 
 #: Top-level report keys owned by a heavy section.
 _PLAN_KEYS = ("levels_detail", "sizing", "plan_warnings")
-_DEBATE_KEY = "debate_detail"
-_DEBATE_ITEMS_KEY = "items"
+_DETAIL_KEY = "detail"
+_VOTE_ITEMS_KEY = "items"
 #: The light per-report rows every answer carries.
-DIMENSION_INDEX_KEY = "dimension_index"
+DATA_REPORT_INDEX_KEY = "data_report_index"
 
 #: A vote item's ``final_status`` values: counted toward the score, or
 #: excluded (struck for a failed citation, outvoted, or unresolved).
@@ -84,58 +84,58 @@ def normalize_sections(requested: Optional[Iterable[str]]) -> Tuple[str, ...]:
 def select_sections(
     result: Mapping[str, Any],
     sections: Sequence[str],
-    dimensions: Optional[Iterable[str]] = None,
+    data_reports: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
-    """A copy of ``result`` holding only the given sections. ``dimensions``
+    """A copy of ``result`` holding only the given sections. ``data_reports``
     narrows the data reports to the named ones (case-insensitive) when the
-    dimensions section is included; an empty match yields an empty list,
-    never an error, so a report from before a dimension existed reads as
+    data_reports section is included; an empty match yields an empty list,
+    never an error, so a report from before a data report existed reads as
     "not there" rather than failing."""
-    keep_dimensions = SECTION_DIMENSIONS in sections
-    keep_debate = SECTION_DEBATE in sections
+    keep_data_reports = SECTION_DATA_REPORTS in sections
+    keep_deep_analysis = SECTION_DEEP_ANALYSIS in sections
     keep_plan = SECTION_PLAN in sections
 
     out: Dict[str, Any] = {}
     for key, value in result.items():
-        if key == SECTION_DIMENSIONS:
-            if keep_dimensions:
-                out[key] = _pick_dimensions(value, dimensions)
+        if key == SECTION_DATA_REPORTS:
+            if keep_data_reports:
+                out[key] = _pick_data_reports(value, data_reports)
             continue
         if key in _PLAN_KEYS:
             if keep_plan:
                 out[key] = value
             continue
-        if key == "tier2" and isinstance(value, Mapping):
-            out[key] = _tier2_view(value, keep_debate)
+        if key == "deep_analysis" and isinstance(value, Mapping):
+            out[key] = _deep_analysis_view(value, keep_deep_analysis)
             continue
         out[key] = value
-    out[DIMENSION_INDEX_KEY] = dimension_index(result)
+    out[DATA_REPORT_INDEX_KEY] = data_report_index(result)
     return out
 
 
-def _tier2_view(section: Mapping[str, Any], keep_debate: bool) -> Dict[str, Any]:
-    """The tier-2 section without the debate record, or with it cut down
-    to the overview."""
-    if not keep_debate:
-        return {k: v for k, v in section.items() if k != _DEBATE_KEY}
+def _deep_analysis_view(section: Mapping[str, Any], keep_deep_analysis: bool) -> Dict[str, Any]:
+    """The deep-analysis section without its record, or with the record
+    cut down to the overview."""
+    if not keep_deep_analysis:
+        return {k: v for k, v in section.items() if k != _DETAIL_KEY}
     return {
-        k: (debate_overview(v) if k == _DEBATE_KEY else v)
+        k: (deep_analysis_overview(v) if k == _DETAIL_KEY else v)
         for k, v in section.items()
     }
 
 
-def dimension_index(result: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def data_report_index(result: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """One light row per data report: its name, kind, whether it counted
     (numeric with data), and its warnings. Empty for a report without
-    dimensions."""
-    reports = result.get("dimensions")
+    data_reports."""
+    reports = result.get("data_reports")
     if not isinstance(reports, list):
         return []
     return [
         {
-            "dimension": report.get("dimension"),
+            "name": report.get("name"),
             "kind": report.get("kind"),
-            "is_actionable": bool(report.get("is_actionable")),
+            "counted": bool(report.get("counted")),
             "warnings": list(report.get("warnings") or []),
         }
         for report in reports
@@ -143,26 +143,26 @@ def dimension_index(result: Mapping[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
-def debate_record(result: Optional[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
-    """The stored deep-analysis record (``tier2.debate_detail``), or None
-    when the report has none (tier 1, or an old shape)."""
+def deep_analysis_record(result: Optional[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """The stored deep-analysis record (``deep_analysis.detail``), or
+    None when the report has none (tier 1, or an old shape)."""
     if not isinstance(result, Mapping):
         return None
-    tier2 = result.get("tier2")
-    if not isinstance(tier2, Mapping):
+    deep_analysis = result.get("deep_analysis")
+    if not isinstance(deep_analysis, Mapping):
         return None
-    detail = tier2.get(_DEBATE_KEY)
+    detail = deep_analysis.get(_DETAIL_KEY)
     return detail if isinstance(detail, Mapping) else None
 
 
-def debate_overview(detail: Any) -> Any:
-    """The debate record without its vote items, plus ``item_count`` so
+def deep_analysis_overview(detail: Any) -> Any:
+    """The deep-analysis record without its vote items, plus ``item_count`` so
     the reader knows how many there are to page through. Anything that
     is not a record passes through untouched."""
     if not isinstance(detail, Mapping):
         return detail
-    items = detail.get(_DEBATE_ITEMS_KEY)
-    overview = {k: v for k, v in detail.items() if k != _DEBATE_ITEMS_KEY}
+    items = detail.get(_VOTE_ITEMS_KEY)
+    overview = {k: v for k, v in detail.items() if k != _VOTE_ITEMS_KEY}
     overview["item_count"] = len(items) if isinstance(items, list) else 0
     return overview
 
@@ -173,23 +173,23 @@ def page_count(total: int, page_size: int) -> int:
     return max(1, -(-int(total) // max(1, int(page_size))))
 
 
-def page_debate_items(
+def page_vote_items(
     detail: Optional[Mapping[str, Any]],
-    dimensions: Optional[Iterable[str]] = None,
+    data_reports: Optional[Iterable[str]] = None,
     statuses: Optional[Iterable[str]] = None,
     page: int = 1,
     page_size: int = DEFAULT_ITEM_PAGE_SIZE,
 ) -> Dict[str, Any]:
     """One page of the record's vote items in stored order, narrowed to
-    the named dimensions and ``final_status`` values (empty means no
+    the named data_reports and ``final_status`` values (empty means no
     filter): {items, page, page_size, total, page_count}. A missing
     record reads as an empty list, never an error, so a tier-1 or
     unfinished run simply has no items."""
-    items = detail.get(_DEBATE_ITEMS_KEY) if isinstance(detail, Mapping) else None
+    items = detail.get(_VOTE_ITEMS_KEY) if isinstance(detail, Mapping) else None
     rows = [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
-    wanted_dimensions = _wanted(dimensions)
-    if wanted_dimensions:
-        rows = [r for r in rows if str(r.get("dimension", "")).lower() in wanted_dimensions]
+    wanted_reports = _wanted(data_reports)
+    if wanted_reports:
+        rows = [r for r in rows if str(r.get("data_report", "")).lower() in wanted_reports]
     wanted_statuses = _wanted(statuses)
     if wanted_statuses:
         rows = [r for r in rows if str(r.get("final_status", "")).lower() in wanted_statuses]
@@ -211,7 +211,7 @@ def _wanted(names: Optional[Iterable[str]]) -> set:
     return {name.strip().lower() for name in names if name and name.strip()}
 
 
-def _pick_dimensions(value: Any, names: Optional[Iterable[str]]) -> Any:
+def _pick_data_reports(value: Any, names: Optional[Iterable[str]]) -> Any:
     if not isinstance(value, list):
         return value
     wanted = _wanted(names)
@@ -220,5 +220,5 @@ def _pick_dimensions(value: Any, names: Optional[Iterable[str]]) -> Any:
     return [
         item for item in value
         if isinstance(item, Mapping)
-        and str(item.get("dimension", "")).lower() in wanted
+        and str(item.get("name", "")).lower() in wanted
     ]

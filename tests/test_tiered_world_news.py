@@ -14,7 +14,7 @@ from datetime import date
 from unittest import mock
 
 from src.tiered_analysis.cache_store import MemoryCacheStore
-from src.tiered_analysis.debate import gradable_field_refs
+from src.tiered_analysis.deep_analysis import gradable_field_refs
 from src.tiered_analysis.news_screen import (
     COMPANY_PROMPTS,
     WORLD_PROMPTS,
@@ -22,7 +22,7 @@ from src.tiered_analysis.news_screen import (
     judge_news_cached,
 )
 from src.tiered_analysis.providers.base import (
-    DimensionResult,
+    DataReport,
     Market,
     SourceKind,
 )
@@ -118,7 +118,7 @@ class TestWorldNewsProvider(unittest.TestCase):
     def test_payload_shape_span_and_citation_alignment(self):
         provider, _ = self.make_provider()
         result = provider.collect("AAPL")
-        self.assertEqual(result.dimension, "world_news")
+        self.assertEqual(result.name, "world_news")
         self.assertEqual(result.kind, SourceKind.TEXTUAL)
         self.assertIsNotNone(result.payload)  # no card-level grade anymore
         news = result.payload["news_coverage"]
@@ -194,11 +194,11 @@ class TestWorldNewsProvider(unittest.TestCase):
 
         failing_loader.calls = 0
         tomorrow, _ = self.make_provider(
-            loader=failing_loader, today=lambda: date(2026, 8, 18)
+            loader=failing_loader, today=lambda: date(2026, 8, 17)
         )
         result = tomorrow.collect("AAPL")
-        # The pooled articles inside the later run's 3-day window
-        # (08-16..18) still make the card, loudly warned (the warning is
+        # The pooled articles inside the later run's 2-day window
+        # (08-16..17) still make the card, loudly warned (the warning is
         # the degradation signal now — no card-level grade); the 08-15
         # article ages out.
         self.assertEqual(len(result.payload["news_coverage"]["items"]), 1)
@@ -222,18 +222,18 @@ class TestWorldNewsProvider(unittest.TestCase):
                 "title": "ECB cuts rates",
                 "publisher": "FT",
                 "url": "https://example.com/ecb-cut",
-                "date": "2026-08-18",
+                "date": "2026-08-17",
                 "summary": "The ECB cut its policy rate.",
             }
         ]
         tomorrow, _ = self.make_provider(
-            news=extra, today=lambda: date(2026, 8, 18)
+            news=extra, today=lambda: date(2026, 8, 17)
         )
         result = tomorrow.collect("AAPL")
         news = result.payload["news_coverage"]
         # The later run's single-article fetch screens WITH the earlier
-        # pooled articles that are still inside the 3-day window
-        # (08-16..18); the 08-15 article ages out of it.
+        # pooled articles that are still inside the 2-day window
+        # (08-16..17); the 08-15 article ages out of it.
         self.assertEqual(
             [item["text"] for item in news["items"]],
             [
@@ -242,7 +242,7 @@ class TestWorldNewsProvider(unittest.TestCase):
             ],
         )
         self.assertEqual(news["oldest"], "2026-08-16")
-        self.assertEqual(news["newest"], "2026-08-18")
+        self.assertEqual(news["newest"], "2026-08-17")
 
     def test_pool_prunes_past_retention(self):
         stale = [
@@ -260,9 +260,9 @@ class TestWorldNewsProvider(unittest.TestCase):
         self.assertNotIn("Ancient story", texts)
 
     def test_screen_reads_only_the_calendar_day_window(self):
-        # TODAY is 2026-08-16: the 3-calendar-day window starts
-        # 2026-08-14. An article inside the pool's retention but before
-        # that boundary stays pooled (failure-fallback depth) yet never
+        # TODAY is 2026-08-16: the 2-calendar-day window starts
+        # 2026-08-15. An article inside the pool's retention but before
+        # that boundary stays pooled (failure-fallback tier) yet never
         # reaches the screen or the card.
         aged = [
             {
@@ -589,8 +589,8 @@ class TestWorldPromptSet(unittest.TestCase):
 
 class TestDebateEnumeration(unittest.TestCase):
     def test_world_news_rows_enumerate_by_textual_kind(self):
-        world = DimensionResult(
-            dimension="world_news",
+        world = DataReport(
+            name="world_news",
             kind=SourceKind.TEXTUAL,
             payload={
                 "news_coverage": {

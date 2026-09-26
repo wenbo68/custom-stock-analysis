@@ -12,8 +12,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.v1.endpoints import chat
-from src.chatbot.harness import ChatHarness
-from src.chatbot.model import ModelReply
+from src.chat.harness import ChatHarness
+from src.chat.model import ModelReply
 from src.tiered_analysis import history
 
 
@@ -47,7 +47,7 @@ class ScriptedModel:
 
 
 def text(content):
-    return ModelReply(content=content, prompt_tokens=20, completion_tokens=4, model="fake")
+    return ModelReply(content=content, input_tokens=20, output_tokens=4, llm="fake")
 
 
 def call(name, args, call_id="c1"):
@@ -85,7 +85,7 @@ class TestConversations:
 
         listed = client.get("/chat/conversations").json()["items"]
         assert [c["id"] for c in listed] == [body["id"]]
-        assert (listed[0]["question_count"], listed[0]["total_tokens"], listed[0]["last_question_at"]) == (0, 0, None)
+        assert (listed[0]["user_input_count"], listed[0]["total_tokens"], listed[0]["ended_at"]) == (0, 0, None)
 
         assert client.get(f"/chat/conversations/{body['id']}").status_code == 200
         assert client.get("/chat/conversations/nope").status_code == 404
@@ -108,12 +108,14 @@ class TestMessages:
         assert [r["role"] for r in rows] == ["user", "assistant", "tool", "assistant"]
         assert rows[0]["text"] == "what did I run?"
         assert rows[1]["tool_calls"] == [{"id": "c1", "name": "list_tickers", "arguments": {}}]
-        assert rows[2]["tool_name"] == "list_tickers"
-        assert rows[2]["result"] == {"items": ["AAPL"]}
-        assert rows[2]["result_chars"] == len('{"items": ["AAPL"]}')
-        assert isinstance(rows[2]["duration_ms"], int)
+        assert rows[2]["name"] == "list_tickers"
+        assert rows[2]["output"] == {"items": ["AAPL"]}
+        assert rows[2]["output_chars"] == len('{"items": ["AAPL"]}')
+        assert isinstance(rows[2]["time_ms"], int)
+        # The tool row carries the inputs with defaults filled in (2026-09-24).
+        assert rows[2]["input"] == {}
         assert rows[3]["text"] == "You ran AAPL."
-        assert rows[3]["usage"] == {"prompt_tokens": 20, "completion_tokens": 4}
+        assert rows[3]["usage"] == {"input_tokens": 20, "output_tokens": 4}
         assert body["pending"] is None
         # The transcript text stays out of the conversation; only its size rides along.
         assert rows[3]["transcript_chars"] > 0 and "transcript" not in rows[3]
@@ -127,20 +129,46 @@ class TestMessages:
         first = client.get(f"/chat/conversations/{conversation_id}/messages/2/transcript")
         assert first.status_code == 200
         body = first.json()
-        assert body["stage"] == "chat" and body["seq"] == 2
-        assert body["prompt"].startswith("=== system ===")
-        assert "=== user ===\nruns?" in body["prompt"]
-        assert body["reply"].startswith("[tool calls]")
-        assert body["temperature"] == 0.0 and isinstance(body["duration_ms"], int)
+        assert body["stage"] == "chat" and body["call_number"] == 2
+        assert body["input"].startswith("=== system ===")
+        assert "=== user ===\nruns?" in body["input"]
+        assert body["output"].startswith("[tool calls]")
+        assert body["temperature"] == 0.0 and isinstance(body["time_ms"], int)
 
         last = client.get(f"/chat/conversations/{conversation_id}/messages/4/transcript").json()
-        assert last["reply"] == "Nothing yet."
-        assert last["prompt_tokens"] == 20 and last["completion_tokens"] == 4 and last["model"] == "fake"
+        assert last["output"] == "Nothing yet."
+        assert last["input_tokens"] == 20 and last["output_tokens"] == 4 and last["llm"] == "fake"
         # User lines and tool results hold no model call.
         assert client.get(f"/chat/conversations/{conversation_id}/messages/1/transcript").status_code == 404
         assert client.get(f"/chat/conversations/{conversation_id}/messages/3/transcript").status_code == 404
         assert client.get(f"/chat/conversations/{conversation_id}/messages/99/transcript").status_code == 404
         assert client.get("/chat/conversations/nope/messages/1/transcript").status_code == 404
+
+    def test_language_reaches_the_prompt_and_the_retry(self, client, scripted):
+        english = "The latest run on AAPL is bullish with a score of 7.2 out of 10."
+        model = scripted([text(english), text("苹果最近一次分析的展望是看涨，评分 7.2。")])
+        model.requests = []
+        original = model.complete
+
+        def complete(messages, tools):
+            model.requests.append(messages)
+            return original(messages, tools)
+
+        model.complete = complete
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        body = client.post(f"/chat/conversations/{conversation_id}/messages",
+                           json={"text": "AAPL 怎么样？", "language": "zh"}).json()
+        assert "Reply in Simplified Chinese" in model.requests[0][0]["content"]
+        assert [m["role"] for m in body["messages"]] == ["user", "assistant", "assistant"]
+        assert body["messages"][1]["notice"] == "wrong_language"
+        assert body["messages"][2]["notice"] is None
+
+    def test_an_unknown_language_is_rejected(self, client, scripted):
+        scripted([text("hi")])
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        response = client.post(f"/chat/conversations/{conversation_id}/messages",
+                               json={"text": "hi", "language": "fr"})
+        assert response.status_code == 422
 
     def test_blank_message_is_rejected(self, client, scripted):
         scripted([])
@@ -160,14 +188,14 @@ class TestMessages:
 class TestConfirmation:
     def test_pending_action_then_yes(self, client, scripted):
         history.create_run("q1", "MSFT", inputs={"tier": 2}, status="queued")
-        scripted([call("delete_run", {"task_id": "q1"}), text("Cancelled.")])
+        scripted([call("delete_run", {"run_id": "q1"}), text("Cancelled.")])
         conversation_id = client.post("/chat/conversations").json()["id"]
 
         held = client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "cancel it"}).json()
         pending = held["pending"]["calls"][0]
         assert pending["name"] == "delete_run"
-        assert pending["arguments"] == {"task_id": "q1"}
-        assert pending["facts"]["run"]["stock_code"] == "MSFT"
+        assert pending["input"] == {"run_id": "q1"}
+        assert pending["facts"]["run"]["ticker"] == "MSFT"
 
         again = client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "hurry"})
         assert again.status_code == 409
@@ -176,7 +204,7 @@ class TestConfirmation:
         done = client.post(f"/chat/conversations/{conversation_id}/confirm", json={"approved": True}).json()
         assert done["pending"] is None
         assert done["messages"][2]["approved"] is True
-        assert done["messages"][2]["result"]["deleted"] is True
+        assert done["messages"][2]["output"]["deleted"] is True
         assert done["messages"][3]["text"] == "Cancelled."
         assert not history.run_exists("q1")
 

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Deterministic position sizing (docs/tiered-analysis-design.md §3.2; v2 slice 1).
+"""Deterministic position sizing (v2 slice 1).
 
 Fixed-fractional risk sizing: the user picks the loss they can accept
-(capital * risk_fraction); the entry-to-stop distance gives the loss per
+(capital × risk % ÷ 100); the entry-to-stop distance gives the loss per
 share; division gives the share count. Pure functions, no I/O, no LLM —
 every refusal carries an explicit reason instead of a silent zero,
 mirroring the provider layer's no-silent-blanks rule.
@@ -21,8 +21,8 @@ from typing import List, Optional, Tuple
 from .providers.base import Market
 from .schema import Outlook, SizingSlots
 
-#: Above this per-trade risk fraction we still size, but flag it as unusual.
-HIGH_RISK_FRACTION_NOTE_THRESHOLD = 0.05
+#: Above this per-trade risk percent we still size, but flag it as unusual.
+HIGH_RISK_PCT_WARNING_THRESHOLD = 5.0
 
 #: Minimum tradeable increment per market family. CN cash equities trade in
 #: board lots of 100; HK board lots vary per stock (we size in single shares
@@ -68,10 +68,10 @@ class RefusalReason(str, Enum):
 
 @dataclass(frozen=True)
 class SizingInputs:
-    """Everything the engine needs; capital/risk_fraction come from the user."""
+    """Everything the engine needs; capital/risk_pct come from the user."""
 
     capital: Optional[float]
-    risk_fraction: Optional[float]
+    risk_pct: Optional[float]
     entry: Optional[float]
     stop_loss: Optional[float]
     outlook: Outlook
@@ -90,7 +90,7 @@ class SizingResult:
     lot_size: int = _DEFAULT_LOT_SIZE
     reason_code: Optional[RefusalReason] = None
     refusal_reason: Optional[str] = None
-    notes: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def is_sized(self) -> bool:
@@ -98,33 +98,33 @@ class SizingResult:
 
 
 def _refuse(code: RefusalReason, message: str, *, lot_size: int = _DEFAULT_LOT_SIZE,
-            notes: Optional[List[str]] = None) -> SizingResult:
+            warnings: Optional[List[str]] = None) -> SizingResult:
     return SizingResult(
         lot_size=lot_size,
         reason_code=code,
         refusal_reason=message,
-        notes=notes or [],
+        warnings=warnings or [],
     )
 
 
 def _validate(inputs: SizingInputs) -> Tuple[Optional[SizingResult], List[str]]:
-    """Refusal-or-notes gate, run before any arithmetic."""
-    notes: List[str] = []
+    """Refusal-or-warnings gate, run before any arithmetic."""
+    warnings: List[str] = []
 
     if inputs.outlook is not Outlook.BULLISH:
         return _refuse(
             RefusalReason.NOT_BULLISH,
             "Sizing only applies when opening a position (outlook is "
             f"'{inputs.outlook.value}', not 'bullish').",
-        ), notes
-    if inputs.capital is None or inputs.risk_fraction is None:
+        ), warnings
+    if inputs.capital is None or inputs.risk_pct is None:
         # Name exactly what is missing — "capital not provided" when the
         # user did provide capital reads as a bug, not a refusal.
         missing = [
             label
             for label, value in (
                 ("capital", inputs.capital),
-                ("risk per trade", inputs.risk_fraction),
+                ("risk per trade", inputs.risk_pct),
             )
             if value is None
         ]
@@ -132,61 +132,61 @@ def _validate(inputs: SizingInputs) -> Tuple[Optional[SizingResult], List[str]]:
         return _refuse(
             RefusalReason.SIZING_OFF,
             f"Sizing is off: {' and '.join(missing)} {verb} not provided.",
-        ), notes
-    if inputs.capital <= 0 or not 0 < inputs.risk_fraction < 1:
+        ), warnings
+    if inputs.capital <= 0 or not 0 < inputs.risk_pct < 100:
         return _refuse(
             RefusalReason.INVALID_INPUT,
-            "capital must be positive and risk per trade strictly between 0 and 1.",
-        ), notes
+            "capital must be positive and risk % strictly between 0 and 100.",
+        ), warnings
     if inputs.entry is None:
         return _refuse(
             RefusalReason.NO_ENTRY, "No usable entry price — cannot size a position."
-        ), notes
+        ), warnings
     if inputs.stop_loss is None:
         return _refuse(
             RefusalReason.NO_STOP,
             "No stop-loss price — without it the risk per share is unmeasurable, "
             "so no share count is printed.",
-        ), notes
+        ), warnings
     # None means "level missing"; a zero/negative price means garbage input.
     if inputs.entry <= 0 or inputs.stop_loss <= 0:
         return _refuse(
             RefusalReason.INVALID_INPUT, "entry and stop-loss prices must be positive."
-        ), notes
+        ), warnings
     if inputs.stop_loss >= inputs.entry:
         return _refuse(
             RefusalReason.STOP_NOT_BELOW_ENTRY,
             "Stop-loss is at or above the entry price for a buy — levels are "
             "inconsistent, refusing to size.",
-        ), notes
+        ), warnings
 
-    if inputs.risk_fraction > HIGH_RISK_FRACTION_NOTE_THRESHOLD:
-        notes.append(
-            f"Risk per trade of {inputs.risk_fraction:.1%} is unusually high; "
+    if inputs.risk_pct > HIGH_RISK_PCT_WARNING_THRESHOLD:
+        warnings.append(
+            f"Risk per trade of {inputs.risk_pct:g}% is unusually high; "
             "1-2% is the common range."
         )
     if inputs.market is Market.HK:
-        notes.append(
+        warnings.append(
             "HK board lot sizes vary per stock; the count below is in single "
             "shares — round to the stock's board lot before ordering."
         )
-    return None, notes
+    return None, warnings
 
 
 def size_position(inputs: SizingInputs) -> SizingResult:
     """Compute a share count, or refuse with an explicit reason."""
-    refusal, notes = _validate(inputs)
+    refusal, warnings = _validate(inputs)
     lot_size = _LOT_SIZES.get(inputs.market, _DEFAULT_LOT_SIZE)
     if refusal is not None:
         return SizingResult(
             lot_size=lot_size,
             reason_code=refusal.reason_code,
             refusal_reason=refusal.refusal_reason,
-            notes=notes,
+            warnings=warnings,
         )
 
     loss_per_share = inputs.entry - inputs.stop_loss
-    risk_budget = inputs.capital * inputs.risk_fraction
+    risk_budget = inputs.capital * inputs.risk_pct / 100.0
     raw_shares = risk_budget / loss_per_share
 
     shares = floor_to_tradeable(raw_shares, lot_size)
@@ -198,7 +198,7 @@ def size_position(inputs: SizingInputs) -> SizingResult:
             + ("board lot" if lot_size > 1 else f"{FRACTIONAL_SHARE_STEP:g} of a share")
             + " at this price.",
             lot_size=lot_size,
-            notes=notes,
+            warnings=warnings,
         )
 
     return SizingResult(
@@ -207,7 +207,7 @@ def size_position(inputs: SizingInputs) -> SizingResult:
         risk_amount=shares * loss_per_share,
         loss_per_share=loss_per_share,
         lot_size=lot_size,
-        notes=notes,
+        warnings=warnings,
     )
 
 
@@ -217,6 +217,6 @@ def to_sizing_slots(inputs: SizingInputs, result: SizingResult) -> SizingSlots:
         return SizingSlots()
     return SizingSlots(
         capital=inputs.capital,
-        risk_fraction=inputs.risk_fraction,
+        risk_pct=inputs.risk_pct,
         shares=float(result.shares),
     )

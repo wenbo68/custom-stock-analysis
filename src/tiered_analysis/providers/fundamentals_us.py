@@ -9,7 +9,7 @@ block; the short-lived dividend group was dropped from the list on
 2026-07-31). Every published metric ships as a
 ``{name, explanation, interpretation, value}`` envelope — the same
 contract as technicals v2 — and computed metrics carry UI formula
-receipts in ``DimensionResult.formulas``. Fields that cannot be
+receipts in ``DataReport.formulas``. Fields that cannot be
 computed stay present with ``value: null`` (blank), never omitted.
 
 Sources, split by what each can actually answer:
@@ -44,11 +44,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .base import (
     Citation,
-    DimensionProvider,
-    DimensionResult,
+    DataReportProvider,
+    DataReport,
     Market,
     SourceKind,
-    note_fields,
+    warn_fields,
 )
 from .edgar_series import (
     EPS_CONCEPTS,
@@ -69,8 +69,8 @@ EDGAR_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010
 #: The Yahoo Finance pages showing the cited figures: yfinance itself has
 #: no per-request page, but the same numbers are published on the quote
 #: subpages — cited so readers can verify at the source.
-YAHOO_KEY_STATISTICS_URL = "https://finance.yahoo.com/quote/{symbol}/key-statistics"
-YAHOO_ANALYSIS_URL = "https://finance.yahoo.com/quote/{symbol}/analysis"
+YAHOO_KEY_STATISTICS_URL = "https://finance.yahoo.com/quote/{ticker}/key-statistics"
+YAHOO_ANALYSIS_URL = "https://finance.yahoo.com/quote/{ticker}/analysis"
 EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _EDGAR_TIMEOUT_SECONDS = 15
 
@@ -427,7 +427,7 @@ def _edgar_user_agent() -> str:
 _cik_cache: Dict[str, int] = {}
 
 
-def _resolve_cik(symbol: str) -> int:
+def _resolve_cik(ticker: str) -> int:
     """Ticker -> CIK via SEC's public mapping file (cached in-process)."""
     global _cik_cache
     if not _cik_cache:
@@ -444,16 +444,16 @@ def _resolve_cik(symbol: str) -> int:
             for row in response.json().values()
             if isinstance(row, Mapping) and row.get("cik_str") is not None
         }
-    cik = _cik_cache.get(symbol.upper())
+    cik = _cik_cache.get(ticker.upper())
     if cik is None:
-        raise LookupError(f"no SEC CIK found for ticker {symbol!r}")
+        raise LookupError(f"no SEC CIK found for ticker {ticker!r}")
     return cik
 
 
-def _default_facts_loader(symbol: str) -> Mapping[str, Any]:
+def _default_facts_loader(ticker: str) -> Mapping[str, Any]:
     import requests
 
-    cik = _resolve_cik(symbol)
+    cik = _resolve_cik(ticker)
     response = requests.get(
         EDGAR_COMPANYFACTS_URL.format(cik=cik),
         headers={"User-Agent": _edgar_user_agent()},
@@ -463,19 +463,19 @@ def _default_facts_loader(symbol: str) -> Mapping[str, Any]:
     return response.json()
 
 
-def _default_info_loader(symbol: str) -> Mapping[str, Any]:
+def _default_info_loader(ticker: str) -> Mapping[str, Any]:
     import yfinance as yf
 
-    ticker = yf.Ticker(symbol)
+    ticker = yf.Ticker(ticker)
     info = ticker.get_info() if hasattr(ticker, "get_info") else (ticker.info or {})
     return info if isinstance(info, Mapping) else {}
 
 
-def _default_earnings_lookup(symbol: str) -> Mapping[str, Any]:
+def _default_earnings_lookup(ticker: str) -> Mapping[str, Any]:
     """Next earnings date as payload-ready fields (empty dict = unknown)."""
     from ..earnings import next_earnings_info
 
-    info = next_earnings_info(symbol, Market.US)
+    info = next_earnings_info(ticker, Market.US)
     if info.next_date is None:
         return {}
     return {
@@ -484,11 +484,11 @@ def _default_earnings_lookup(symbol: str) -> Mapping[str, Any]:
     }
 
 
-def _default_earnings_history_loader(symbol: str) -> List[Dict[str, Any]]:
+def _default_earnings_history_loader(ticker: str) -> List[Dict[str, Any]]:
     """Past + upcoming earnings rows from yfinance's earnings-dates table."""
     import yfinance as yf
 
-    frame = yf.Ticker(symbol).get_earnings_dates(limit=12)
+    frame = yf.Ticker(ticker).get_earnings_dates(limit=12)
     if frame is None or getattr(frame, "empty", True):
         return []
     rows: List[Dict[str, Any]] = []
@@ -505,11 +505,11 @@ def _default_earnings_history_loader(symbol: str) -> List[Dict[str, Any]]:
     return rows
 
 
-def _default_eps_trend_loader(symbol: str) -> Mapping[str, Any]:
+def _default_eps_trend_loader(ticker: str) -> Mapping[str, Any]:
     """Current-quarter consensus EPS estimate now vs 30 days ago."""
     import yfinance as yf
 
-    frame = yf.Ticker(symbol).eps_trend
+    frame = yf.Ticker(ticker).eps_trend
     if frame is None or getattr(frame, "empty", True):
         return {}
     if "0q" not in frame.index:
@@ -518,14 +518,14 @@ def _default_eps_trend_loader(symbol: str) -> Mapping[str, Any]:
     return {"current": row.get("current"), "days_ago_30": row.get("30daysAgo")}
 
 
-def _default_eps_revisions_loader(symbol: str) -> Mapping[str, Any]:
+def _default_eps_revisions_loader(ticker: str) -> Mapping[str, Any]:
     """How many analysts raised / cut their current-quarter EPS estimate
     in the last 30 days (Yahoo's revisions table; columns verified live
     2026-08-23: upLast7days, upLast30days, downLast30days,
     downLast7Days)."""
     import yfinance as yf
 
-    frame = yf.Ticker(symbol).eps_revisions
+    frame = yf.Ticker(ticker).eps_revisions
     if frame is None or getattr(frame, "empty", True):
         return {}
     if "0q" not in frame.index:
@@ -568,10 +568,10 @@ REACTION_FIELDS = (
 )
 
 
-class FundamentalsUSProvider(DimensionProvider):
+class FundamentalsUSProvider(DataReportProvider):
     """NUMERIC US fundamentals: EDGAR statements + Yahoo market data."""
 
-    dimension = "fundamentals"
+    name = "fundamentals"
     kind = SourceKind.NUMERIC
 
     def __init__(
@@ -601,14 +601,14 @@ class FundamentalsUSProvider(DimensionProvider):
     def supports(self, market: Market) -> bool:
         return market == Market.US
 
-    def collect(self, symbol: str) -> DimensionResult:
+    def collect(self, ticker: str) -> DataReport:
         citations: List[Citation] = []
         warnings: List[str] = []
-        field_notes: Dict[str, List[str]] = {}
+        field_warnings: Dict[str, List[str]] = {}
         formulas: Dict[str, Any] = {}
 
-        info = self._load_info(symbol, warnings, field_notes)
-        facts = self._load_facts(symbol, warnings, field_notes)
+        info = self._load_info(ticker, warnings, field_warnings)
+        facts = self._load_facts(ticker, warnings, field_warnings)
 
         # Group order = display order (TODO.md final-truth list).
         payload: Dict[str, Any] = {
@@ -617,10 +617,10 @@ class FundamentalsUSProvider(DimensionProvider):
             "profitability": self._profitability_group(facts, formulas),
             "growth": self._growth_group(facts, formulas),
             "valuation": self._valuation_group(
-                symbol, info, citations, warnings, field_notes
+                ticker, info, citations, warnings, field_warnings
             ),
             "quarterly_report": self._quarterly_report_group(
-                symbol, citations, warnings, field_notes, formulas
+                ticker, citations, warnings, field_warnings, formulas
             ),
         }
 
@@ -629,9 +629,9 @@ class FundamentalsUSProvider(DimensionProvider):
             for group in ("growth", "profitability", "balance")
         )
         if facts is not None and not edgar_ok:
-            note_fields(
-                warnings, field_notes,
-                f"EDGAR returned no usable statement facts for {symbol}",
+            warn_fields(
+                warnings, field_warnings,
+                f"EDGAR returned no usable statement facts for {ticker}",
                 EDGAR_FIELDS,
             )
         if edgar_ok:
@@ -649,46 +649,46 @@ class FundamentalsUSProvider(DimensionProvider):
         # Even with both sources down the payload ships (every field
         # blank, each with its note) — degradation lives on the fields,
         # never on a card-level grade (2026-08-19).
-        return DimensionResult(
-            dimension=self.dimension,
+        return DataReport(
+            name=self.name,
             kind=self.kind,
             payload=payload,
             citations=citations,
             warnings=warnings,
             formulas=formulas or None,
-            field_notes=field_notes or None,
+            field_warnings=field_warnings or None,
         )
 
     # ---- source fetches -------------------------------------------------
 
     def _load_info(
         self,
-        symbol: str,
+        ticker: str,
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Optional[Mapping[str, Any]]:
         try:
-            return self._info_loader(symbol) or {}
+            return self._info_loader(ticker) or {}
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
-                f"Yahoo summary failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"Yahoo summary failed for {ticker}: {exc}",
                 VALUATION_FIELDS + PROFILE_FIELDS,
             )
             return None
 
     def _load_facts(
         self,
-        symbol: str,
+        ticker: str,
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Optional[Mapping[str, Any]]:
         try:
-            return self._facts_loader(symbol)
+            return self._facts_loader(ticker)
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
-                f"EDGAR fundamentals failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"EDGAR fundamentals failed for {ticker}: {exc}",
                 EDGAR_FIELDS,
             )
             return None
@@ -697,23 +697,23 @@ class FundamentalsUSProvider(DimensionProvider):
 
     def _quarterly_report_group(
         self,
-        symbol: str,
+        ticker: str,
         citations: List[Citation],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
         formulas: Dict[str, Any],
     ) -> Dict[str, Any]:
         today = self._today()
 
         next_date: Optional[str] = None
         try:
-            fields = self._earnings_lookup(symbol) or {}
+            fields = self._earnings_lookup(ticker) or {}
             raw_date = fields.get("next_earnings_date")
             next_date = raw_date if isinstance(raw_date, str) else None
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
-                f"earnings date lookup failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"earnings date lookup failed for {ticker}: {exc}",
                 ("quarterly_report.next_earnings_date",),
             )
 
@@ -721,12 +721,12 @@ class FundamentalsUSProvider(DimensionProvider):
             "beats": None, "avg_surprise_pct": None, "report_dates": []
         }
         try:
-            rows = self._earnings_history_loader(symbol)
+            rows = self._earnings_history_loader(ticker)
         except Exception as exc:
             rows = []
-            note_fields(
-                warnings, field_notes,
-                f"earnings history failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"earnings history failed for {ticker}: {exc}",
                 SURPRISE_FIELDS + REACTION_FIELDS,
             )
         if rows:
@@ -734,13 +734,13 @@ class FundamentalsUSProvider(DimensionProvider):
             citations.append(
                 Citation(
                     source_name="Earnings history via Yahoo Finance (yfinance)",
-                    url=YAHOO_ANALYSIS_URL.format(symbol=symbol),
+                    url=YAHOO_ANALYSIS_URL.format(ticker=ticker),
                 )
             )
         else:
-            note_fields(
-                warnings, field_notes,
-                f"no earnings history rows for {symbol} — the beat and "
+            warn_fields(
+                warnings, field_warnings,
+                f"no earnings history rows for {ticker} — the beat and "
                 "report-day-move fields are blank",
                 SURPRISE_FIELDS + REACTION_FIELDS,
             )
@@ -748,19 +748,19 @@ class FundamentalsUSProvider(DimensionProvider):
         reaction: Dict[str, Any] = {"avg_abs_pct": None, "worst_pct": None, "count": 0}
         if surprises["report_dates"] and self._bars_loader is not None:
             try:
-                bars = self._bars_loader(symbol)
+                bars = self._bars_loader(ticker)
             except Exception as exc:
                 bars = []
-                note_fields(
-                    warnings, field_notes,
+                warn_fields(
+                    warnings, field_warnings,
                     f"bars for earnings reaction failed: {exc}",
                     REACTION_FIELDS,
                 )
             if bars:
                 reaction = reaction_metrics(bars, surprises["report_dates"])
                 if reaction["avg_abs_pct"] is None and reaction["count"]:
-                    note_fields(
-                        warnings, field_notes,
+                    warn_fields(
+                        warnings, field_warnings,
                         "too few earnings reports inside the bar history "
                         f"({reaction['count']}) for the earnings-day move",
                         REACTION_FIELDS,
@@ -768,12 +768,12 @@ class FundamentalsUSProvider(DimensionProvider):
 
         revision: Optional[float] = None
         try:
-            trend = self._eps_trend_loader(symbol) or {}
+            trend = self._eps_trend_loader(ticker) or {}
         except Exception as exc:
             trend = {}
-            note_fields(
-                warnings, field_notes,
-                f"EPS estimate trend failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"EPS estimate trend failed for {ticker}: {exc}",
                 ("quarterly_report.eps_rev_30d_pct",),
             )
         if trend:
@@ -781,11 +781,11 @@ class FundamentalsUSProvider(DimensionProvider):
 
         revisions: Mapping[str, Any] = {}
         try:
-            revisions = self._eps_revisions_loader(symbol) or {}
+            revisions = self._eps_revisions_loader(ticker) or {}
         except Exception as exc:
-            note_fields(
-                warnings, field_notes,
-                f"EPS revision counts failed for {symbol}: {exc}",
+            warn_fields(
+                warnings, field_warnings,
+                f"EPS revision counts failed for {ticker}: {exc}",
                 (
                     "quarterly_report.eps_up_revisions_30d",
                     "quarterly_report.eps_down_revisions_30d",
@@ -1186,11 +1186,11 @@ class FundamentalsUSProvider(DimensionProvider):
 
     @staticmethod
     def _valuation_group(
-        symbol: str,
+        ticker: str,
         info: Optional[Mapping[str, Any]],
         citations: List[Citation],
         warnings: List[str],
-        field_notes: Dict[str, List[str]],
+        field_warnings: Dict[str, List[str]],
     ) -> Dict[str, Any]:
         values = {
             target: _to_float(info.get(source)) if info else None
@@ -1198,16 +1198,16 @@ class FundamentalsUSProvider(DimensionProvider):
         }
         if info is not None and not any(v is not None for v in values.values()):
             # ok-but-empty is the silent-blank trap: surface it explicitly.
-            note_fields(
-                warnings, field_notes,
-                f"Yahoo returned no valuation ratios for {symbol}",
+            warn_fields(
+                warnings, field_warnings,
+                f"Yahoo returned no valuation ratios for {ticker}",
                 VALUATION_FIELDS,
             )
         elif any(v is not None for v in values.values()):
             citations.append(
                 Citation(
                     source_name="Yahoo Finance summary (yfinance)",
-                    url=YAHOO_KEY_STATISTICS_URL.format(symbol=symbol),
+                    url=YAHOO_KEY_STATISTICS_URL.format(ticker=ticker),
                 )
             )
 

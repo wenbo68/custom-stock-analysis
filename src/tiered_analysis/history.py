@@ -10,8 +10,8 @@ server restarts. Queued rows outlive the process: the queue resumes them
 at startup, whereas running rows die with their thread and are failed.
 
 The list is served one page at a time, filtered and sorted in SQL
-(2026-09-21): the facts a row shows — tier, sizing inputs, hold window,
-outlook, shares — are real columns (see run_digest.py), so the endpoint
+(2026-09-21): the facts a row shows — capital, risk %, reward ratio, max
+hold, tier, outlook, shares — are real columns (see run_digest.py), so the endpoint
 never ships the whole table for the browser to sift.
 
 Storage is the product's database via DatabaseManager (sqlite by
@@ -30,12 +30,12 @@ from .llm_support import TRANSCRIPT_MAX_AGE_DAYS
 from .report_sections import (
     ALL_SECTIONS,
     DEFAULT_ITEM_PAGE_SIZE,
-    debate_record,
+    deep_analysis_record,
     page_count,
-    page_debate_items,
+    page_vote_items,
     select_sections,
 )
-from .run_digest import DIGEST_COLUMNS, digest_from_inputs, digest_from_result
+from .run_digest import DUPLICATE_KEYS, INPUT_KEYS, digest_from_inputs, digest_from_result
 
 logger = logging.getLogger(__name__)
 
@@ -57,26 +57,25 @@ STATUS_FAILED = "failed"
 ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
 ALL_STATUSES = (STATUS_QUEUED, STATUS_RUNNING, STATUS_DONE, STATUS_FAILED)
 
-#: The outlooks that count as an opinion. A finished run whose judge
-#: produced nothing stores "unknown", which the list treats like no
-#: outlook at all (the dash), as does any unfinished or failed run.
+#: The outlooks that count as an opinion. A finished run whose analysis
+#: produced nothing stores "no_outlook" (the page's "No outlook"), which
+#: the list treats like no outlook at all (the dash), as does any
+#: unfinished or failed run.
 OUTLOOK_WORDS = ("bullish", "neutral", "bearish")
-#: The outlook filter value meaning "rows with no opinion" (the dash).
-NO_OUTLOOK = "none"
+#: The outlook filter value meaning "rows with no outlook" (the dash):
+#: the same word the stored no-outlook value uses, so one word covers
+#: "the analysis produced none" and "there is none yet".
+NO_OUTLOOK = "no_outlook"
 FILTERABLE_OUTLOOKS = OUTLOOK_WORDS + (NO_OUTLOOK,)
-
-#: The creation-time inputs that make two runs "the same run" (and that
-#: the history row shows while a run is in flight).
-INPUT_KEYS = ("tier", "capital", "risk_fraction", "reward_risk", "hold_weeks")
 
 
 class RunInProgressError(RuntimeError):
     """The run is executing. Its thread cannot be stopped from outside,
     so the row stays until the run finishes or fails."""
 
-    def __init__(self, task_id: str) -> None:
-        super().__init__(f"run {task_id} is in progress")
-        self.task_id = task_id
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run {run_id} is in progress")
+        self.run_id = run_id
 
 
 def _session():
@@ -91,24 +90,24 @@ def _session():
 
 
 def create_run(
-    task_id: str,
-    stock_code: str,
+    run_id: str,
+    ticker: str,
     inputs: Optional[Dict[str, Any]] = None,
     status: str = STATUS_RUNNING,
 ) -> None:
-    """``inputs`` are the run's effective settings (tier, capital,
-    risk_fraction, reward_risk, hold_weeks) — recorded at creation so the
-    history row shows them while the run is still in flight — plus, under
-    ``sizing_overrides``, the raw per-run sizing the caller sent, which
-    the queue hands to the engine when the run starts. The web endpoint
-    creates runs ``queued``; the default keeps direct callers (tests)
-    that start their own thread on ``running``."""
+    """``inputs`` are the run's effective settings in the form's words
+    (capital, risk_pct, reward_ratio, max_hold_weeks, tier; see
+    ``run_digest.INPUT_KEYS``) — recorded at creation so the history row
+    shows them while the run is still in flight, and handed to the
+    engine when the queue starts the run. The web endpoint creates runs
+    ``queued``; the default keeps direct callers (tests) that start
+    their own thread on ``running``."""
     from src.storage import TieredRunRecord
 
     with _session() as session:
         session.add(TieredRunRecord(
-            task_id=task_id,
-            stock_code=stock_code,
+            run_id=run_id,
+            ticker=ticker,
             status=status,
             inputs_json=json.dumps(inputs) if inputs else None,
             **digest_from_inputs(inputs),
@@ -116,49 +115,49 @@ def create_run(
         session.commit()
 
 
-def _update_run(task_id: str, **fields: Any) -> None:
+def _update_run(run_id: str, **fields: Any) -> None:
     from src.storage import TieredRunRecord
 
     with _session() as session:
         row = (
             session.query(TieredRunRecord)
-            .filter_by(task_id=task_id)
+            .filter_by(run_id=run_id)
             .one_or_none()
         )
         if row is None:
-            logger.warning("tiered run %s vanished before update", task_id)
+            logger.warning("tiered run %s vanished before update", run_id)
             return
         for key, value in fields.items():
             setattr(row, key, value)
         session.commit()
 
 
-def mark_done(task_id: str, result: Dict[str, Any]) -> None:
+def mark_done(run_id: str, result: Dict[str, Any]) -> None:
     """Store the finished report, and lay its own facts (outlook, shares,
     the sizing it actually used) over the creation-time columns."""
     _update_run(
-        task_id,
+        run_id,
         status=STATUS_DONE,
         result_json=json.dumps(result),
         **digest_from_result(result),
     )
 
 
-def mark_failed(task_id: str, error: str) -> None:
-    _update_run(task_id, status=STATUS_FAILED, error=str(error))
+def mark_failed(run_id: str, error: str) -> None:
+    _update_run(run_id, status=STATUS_FAILED, error=str(error))
 
 
-def mark_running(task_id: str) -> None:
+def mark_running(run_id: str) -> None:
     """A queued run took a slot (the queue calls this as it starts the
     thread)."""
-    _update_run(task_id, status=STATUS_RUNNING)
+    _update_run(run_id, status=STATUS_RUNNING)
 
 
-def delete_run(task_id: str) -> Optional[Dict[str, Any]]:
+def delete_run(run_id: str) -> Optional[Dict[str, Any]]:
     """Delete a run and its transcript rows. A queued run is simply taken
     out of the line (that is how one is cancelled); a finished or failed
     run is removed from the history. Returns the deleted row's summary,
-    or None for an unknown task id. Raises ``RunInProgressError`` for a
+    or None for an unknown run id. Raises ``RunInProgressError`` for a
     running row. Go through ``RunQueue.remove`` rather than calling this
     directly, so a queued row cannot be promoted to running between the
     check and the delete."""
@@ -167,17 +166,17 @@ def delete_run(task_id: str) -> Optional[Dict[str, Any]]:
     with _session() as session:
         row = (
             session.query(TieredRunRecord)
-            .filter_by(task_id=task_id)
+            .filter_by(run_id=run_id)
             .one_or_none()
         )
         if row is None:
             return None
         if row.status == STATUS_RUNNING:
-            raise RunInProgressError(task_id)
+            raise RunInProgressError(run_id)
         summary = _row_summary(row)
         (
             session.query(TieredRunTranscriptRecord)
-            .filter_by(task_id=task_id)
+            .filter_by(run_id=run_id)
             .delete(synchronize_session=False)
         )
         session.delete(row)
@@ -209,7 +208,7 @@ def fail_stale_running_runs(error: str = STALE_RUN_ERROR) -> int:
 
 
 def next_queued_run(exclude: Collection[str] = ()) -> Optional[Dict[str, Any]]:
-    """The oldest queued run not in ``exclude`` (task_id, stock_code,
+    """The oldest queued run not in ``exclude`` (run_id, ticker,
     inputs), or None when nothing is waiting. First come, first served:
     ordered by creation time, then id."""
     from src.storage import TieredRunRecord
@@ -220,24 +219,24 @@ def next_queued_run(exclude: Collection[str] = ()) -> Optional[Dict[str, Any]]:
             .filter_by(status=STATUS_QUEUED)
             .order_by(TieredRunRecord.created_at.asc(), TieredRunRecord.id.asc())
         )
-        skipped = [str(task_id) for task_id in exclude]
+        skipped = [str(run_id) for run_id in exclude]
         if skipped:
-            query = query.filter(TieredRunRecord.task_id.notin_(skipped))
+            query = query.filter(TieredRunRecord.run_id.notin_(skipped))
         row = query.first()
         if row is None:
             return None
         return {
-            "task_id": row.task_id,
-            "stock_code": row.stock_code,
+            "run_id": row.run_id,
+            "ticker": row.ticker,
             "inputs": _inputs_of(row),
         }
 
 
 def find_active_duplicate(
-    stock_code: str, inputs: Optional[Dict[str, Any]]
+    ticker: str, inputs: Optional[Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
     """A queued or running run for the same ticker with the same
-    effective inputs (``INPUT_KEYS``), as {task_id, status}, or None.
+    effective inputs (``INPUT_KEYS``), as {run_id, status}, or None.
     Ticker comparison ignores case. A finished or failed run is never a
     duplicate — re-running yesterday's analysis is legitimate."""
     from sqlalchemy import func
@@ -249,13 +248,13 @@ def find_active_duplicate(
         rows = (
             session.query(TieredRunRecord)
             .filter(TieredRunRecord.status.in_(ACTIVE_STATUSES))
-            .filter(func.upper(TieredRunRecord.stock_code) == stock_code.strip().upper())
+            .filter(func.upper(TieredRunRecord.ticker) == ticker.strip().upper())
             .order_by(TieredRunRecord.created_at.asc(), TieredRunRecord.id.asc())
             .all()
         )
         for row in rows:
             if _digest_inputs(_inputs_of(row)) == wanted:
-                return {"task_id": row.task_id, "status": row.status}
+                return {"run_id": row.run_id, "status": row.status}
     return None
 
 
@@ -279,18 +278,18 @@ def status_counts() -> Dict[str, int]:
     return counts
 
 
-def _queue_ahead(session: Any) -> Dict[str, int]:
-    """task_id -> how many queued runs are ahead of it in the line, for
-    the "Queued (2nd in line)" wording."""
+def _queue_positions(session: Any) -> Dict[str, int]:
+    """run_id -> the run's place in the line, from 1 (the page's
+    "Queued (2nd)" wording)."""
     from src.storage import TieredRunRecord
 
     waiting = (
-        session.query(TieredRunRecord.task_id)
+        session.query(TieredRunRecord.run_id)
         .filter_by(status=STATUS_QUEUED)
         .order_by(TieredRunRecord.created_at.asc(), TieredRunRecord.id.asc())
         .all()
     )
-    return {task_id: position for position, (task_id,) in enumerate(waiting)}
+    return {run_id: position for position, (run_id,) in enumerate(waiting, start=1)}
 
 
 # ---------------------------------------------------------------------------
@@ -302,22 +301,22 @@ def _queue_ahead(session: Any) -> Dict[str, int]:
 class RunFilters:
     """What the list endpoint can narrow the history by. Every field is
     optional; an empty list or None means "don't filter on this".
-    Multi-value fields match any of their values. Ranges are inclusive.
-    ``risk_min``/``risk_max`` are fractions (0.01 = 1%), like the column.
-    Datetimes are compared in UTC (aware values are converted, naive
+    Multi-value fields match any of their values. Ranges are inclusive
+    and named after the row's fields; risk is a percent (1 = 1%), like
+    the column. Datetimes are compared in UTC (aware values are converted, naive
     values are taken as UTC already)."""
 
     tickers: Sequence[str] = field(default_factory=tuple)
     statuses: Sequence[str] = field(default_factory=tuple)
     outlooks: Sequence[str] = field(default_factory=tuple)
     tiers: Sequence[int] = field(default_factory=tuple)
-    hold_weeks: Sequence[int] = field(default_factory=tuple)
+    max_hold_weeks: Sequence[int] = field(default_factory=tuple)
     capital_min: Optional[float] = None
     capital_max: Optional[float] = None
-    risk_min: Optional[float] = None
-    risk_max: Optional[float] = None
-    reward_min: Optional[float] = None
-    reward_max: Optional[float] = None
+    risk_pct_min: Optional[float] = None
+    risk_pct_max: Optional[float] = None
+    reward_ratio_min: Optional[float] = None
+    reward_ratio_max: Optional[float] = None
     created_after: Optional[datetime] = None
     created_before: Optional[datetime] = None
 
@@ -329,7 +328,7 @@ def _apply_filters(query: Any, filters: RunFilters) -> Any:
 
     if filters.tickers:
         wanted = {ticker.strip().upper() for ticker in filters.tickers if ticker.strip()}
-        query = query.filter(func.upper(R.stock_code).in_(sorted(wanted)))
+        query = query.filter(func.upper(R.ticker).in_(sorted(wanted)))
     if filters.statuses:
         query = query.filter(R.status.in_(list(filters.statuses)))
     if filters.outlooks:
@@ -346,12 +345,12 @@ def _apply_filters(query: Any, filters: RunFilters) -> Any:
         query = query.filter(or_(*clauses))
     if filters.tiers:
         query = query.filter(R.tier.in_(list(filters.tiers)))
-    if filters.hold_weeks:
-        query = query.filter(R.hold_weeks.in_(list(filters.hold_weeks)))
+    if filters.max_hold_weeks:
+        query = query.filter(R.max_hold_weeks.in_(list(filters.max_hold_weeks)))
     for column, low, high in (
         (R.capital, filters.capital_min, filters.capital_max),
-        (R.risk_fraction, filters.risk_min, filters.risk_max),
-        (R.reward_risk, filters.reward_min, filters.reward_max),
+        (R.risk_pct, filters.risk_pct_min, filters.risk_pct_max),
+        (R.reward_ratio, filters.reward_ratio_min, filters.reward_ratio_max),
     ):
         if low is not None:
             query = query.filter(column >= low)
@@ -388,13 +387,13 @@ def list_runs(
             .limit(safe_size)
             .all()
         )
-        ahead = (
-            _queue_ahead(session)
+        positions = (
+            _queue_positions(session)
             if any(row.status == STATUS_QUEUED for row in rows)
             else {}
         )
         items = [
-            {**_row_summary(row), "queue_ahead": ahead.get(row.task_id)}
+            {**_row_summary(row), "queue_position": positions.get(row.run_id)}
             for row in rows
         ]
     return {
@@ -412,24 +411,30 @@ def list_tickers() -> List[str]:
     from src.storage import TieredRunRecord
 
     with _session() as session:
-        rows = session.query(TieredRunRecord.stock_code).distinct().all()
+        rows = session.query(TieredRunRecord.ticker).distinct().all()
     return sorted({code for (code,) in rows if code})
 
 
 def _row_summary(row: Any) -> Dict[str, Any]:
-    """The history row: identity, status, timestamps, and the digest
-    columns (tier, sizing inputs, hold, outlook, shares)."""
-    summary = {
-        "task_id": row.task_id,
-        "stock_code": row.stock_code,
+    """The history row as clients see it: identity, status, timestamps,
+    the run's inputs in the form's own words and order (ticker, capital,
+    risk %, reward ratio, max hold weeks, tier), then the outlook and
+    shares. The columns carry these same names, so nothing translates."""
+    return {
+        "run_id": row.run_id,
+        "ticker": row.ticker,
         "status": row.status,
         "error": row.error,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "capital": row.capital,
+        "risk_pct": row.risk_pct,
+        "reward_ratio": row.reward_ratio,
+        "max_hold_weeks": row.max_hold_weeks,
+        "tier": row.tier,
+        "outlook": row.outlook,
+        "shares": row.shares,
     }
-    for column in DIGEST_COLUMNS:
-        summary[column] = getattr(row, column, None)
-    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -438,27 +443,27 @@ def _row_summary(row: Any) -> Dict[str, Any]:
 
 
 def get_run(
-    task_id: str,
+    run_id: str,
     sections: Sequence[str] = ALL_SECTIONS,
-    dimensions: Optional[Iterable[str]] = None,
+    data_reports: Optional[Iterable[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """One run: its summary row plus ``result``, the stored report cut
     down to ``sections`` (see report_sections.py; None while the run is
     unfinished or failed), and ``sections`` naming what ``result`` holds.
-    None for an unknown task id."""
+    None for an unknown run id."""
     from src.storage import TieredRunRecord
 
     with _session() as session:
         row = (
             session.query(TieredRunRecord)
-            .filter_by(task_id=task_id)
+            .filter_by(run_id=run_id)
             .one_or_none()
         )
         if row is None:
             return None
         summary = _row_summary(row)
-        summary["queue_ahead"] = (
-            _queue_ahead(session).get(task_id)
+        summary["queue_position"] = (
+            _queue_positions(session).get(run_id)
             if row.status == STATUS_QUEUED
             else None
         )
@@ -474,36 +479,36 @@ def get_run(
                 ).strip()
             else:
                 summary["result"] = (
-                    select_sections(result, sections, dimensions)
+                    select_sections(result, sections, data_reports)
                     if isinstance(result, dict) else result
                 )
         return summary
 
 
-def get_debate_items(
-    task_id: str,
-    dimensions: Optional[Iterable[str]] = None,
+def get_vote_items(
+    run_id: str,
+    data_reports: Optional[Iterable[str]] = None,
     statuses: Optional[Iterable[str]] = None,
     page: int = 1,
     page_size: int = DEFAULT_ITEM_PAGE_SIZE,
 ) -> Optional[Dict[str, Any]]:
     """One page of the run's deep-analysis vote items (see
-    ``report_sections.page_debate_items``), or None for an unknown task
-    id. A run without a debate record — tier 1, unfinished, failed, or
+    ``report_sections.page_vote_items``), or None for an unknown run
+    id. A run without a deep-analysis record — tier 1, unfinished, failed, or
     its stored report unreadable — has an empty page, not an error."""
     from src.storage import TieredRunRecord
 
     with _session() as session:
         row = (
             session.query(TieredRunRecord.result_json)
-            .filter_by(task_id=task_id)
+            .filter_by(run_id=run_id)
             .one_or_none()
         )
         if row is None:
             return None
         result = _parse_result(row.result_json)
-    return page_debate_items(
-        debate_record(result), dimensions, statuses, page=page, page_size=page_size,
+    return page_vote_items(
+        deep_analysis_record(result), data_reports, statuses, page=page, page_size=page_size,
     )
 
 
@@ -518,25 +523,25 @@ def _parse_result(raw: Optional[str]) -> Optional[Dict[str, Any]]:
     return result if isinstance(result, dict) else None
 
 
-def run_exists(task_id: str) -> bool:
+def run_exists(run_id: str) -> bool:
     from src.storage import TieredRunRecord
 
     with _session() as session:
         return session.query(
-            session.query(TieredRunRecord.id).filter_by(task_id=task_id).exists()
+            session.query(TieredRunRecord.id).filter_by(run_id=run_id).exists()
         ).scalar()
 
 
-def get_run_summary(task_id: str) -> Optional[Dict[str, Any]]:
+def get_run_summary(run_id: str) -> Optional[Dict[str, Any]]:
     """The run's history row alone (no report, no queue position) — what
     a client needs to name a run before acting on it. None for an
-    unknown task id."""
+    unknown run id."""
     from src.storage import TieredRunRecord
 
     with _session() as session:
         row = (
             session.query(TieredRunRecord)
-            .filter_by(task_id=task_id)
+            .filter_by(run_id=run_id)
             .one_or_none()
         )
         return _row_summary(row) if row is not None else None
@@ -556,9 +561,9 @@ def _inputs_of(row: Any) -> Dict[str, Any]:
 
 
 def _digest_inputs(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """Just the ``INPUT_KEYS`` that are set — what the duplicate check
-    compares."""
-    return {key: inputs[key] for key in INPUT_KEYS if inputs.get(key) is not None}
+    """Just the ``DUPLICATE_KEYS`` that are set — what the duplicate
+    check compares."""
+    return {key: inputs[key] for key in DUPLICATE_KEYS if inputs.get(key) is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -566,10 +571,10 @@ def _digest_inputs(inputs: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 #: The transcript columns every index row carries (everything but the
-#: prompt and reply text, which is what makes a transcript big).
+#: input and output text, which is what makes a transcript big).
 _TRANSCRIPT_FACTS = (
-    "seq", "created_at", "stage", "model", "temperature", "duration_ms",
-    "prompt_tokens", "completion_tokens", "structured", "error",
+    "call_number", "created_at", "stage", "llm", "temperature", "time_ms",
+    "input_tokens", "output_tokens", "structured", "error",
 )
 
 
@@ -579,10 +584,10 @@ def _transcript_facts(row: Any) -> Dict[str, Any]:
     return facts
 
 
-def list_transcript(task_id: str) -> List[Dict[str, Any]]:
+def list_transcript(run_id: str) -> List[Dict[str, Any]]:
     """The run's LLM calls in call order, as an index: every fact about
-    each call plus the size of its prompt and reply in characters
-    (``prompt_chars``/``reply_chars``), but not the text itself — see
+    each call plus the size of its input and output in characters
+    (``input_chars``/``output_chars``), but not the text itself — see
     ``get_transcript_call``. Empty for unknown runs and runs that made no
     LLM call. The text columns are never loaded here."""
     from sqlalchemy import func
@@ -593,37 +598,37 @@ def list_transcript(task_id: str) -> List[Dict[str, Any]]:
         rows = (
             session.query(
                 *(getattr(T, name) for name in _TRANSCRIPT_FACTS),
-                func.length(T.prompt).label("prompt_chars"),
-                func.length(T.reply).label("reply_chars"),
+                func.length(T.input).label("input_chars"),
+                func.length(T.output).label("output_chars"),
             )
-            .filter(T.task_id == task_id)
-            .order_by(T.seq.asc())
+            .filter(T.run_id == run_id)
+            .order_by(T.call_number.asc())
             .all()
         )
         return [
             {
                 **_transcript_facts(row),
-                "prompt_chars": int(row.prompt_chars or 0),
-                "reply_chars": int(row.reply_chars or 0),
+                "input_chars": int(row.input_chars or 0),
+                "output_chars": int(row.output_chars or 0),
             }
             for row in rows
         ]
 
 
-def get_transcript_call(task_id: str, seq: int) -> Optional[Dict[str, Any]]:
-    """One LLM call of a run, with its full prompt and raw reply, or None
-    when the run has no call numbered ``seq``."""
+def get_transcript_call(run_id: str, call_number: int) -> Optional[Dict[str, Any]]:
+    """One LLM call of a run, with its full input and raw output, or None
+    when the run has no call numbered ``call_number``."""
     from src.storage import TieredRunTranscriptRecord
 
     with _session() as session:
         row = (
             session.query(TieredRunTranscriptRecord)
-            .filter_by(task_id=task_id, seq=seq)
+            .filter_by(run_id=run_id, call_number=call_number)
             .one_or_none()
         )
         if row is None:
             return None
-        return {**_transcript_facts(row), "prompt": row.prompt, "reply": row.reply}
+        return {**_transcript_facts(row), "input": row.input, "output": row.output}
 
 
 def prune_transcripts(max_age_days: int = TRANSCRIPT_MAX_AGE_DAYS) -> int:

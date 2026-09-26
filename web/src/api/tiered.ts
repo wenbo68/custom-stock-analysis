@@ -1,6 +1,7 @@
 import apiClient from './index';
+import type { UiLanguage } from '../i18n/uiText';
 
-// Types mirror the backend JSON verbatim (snake_case). Dimension payloads
+// Types mirror the backend JSON verbatim (snake_case). DataReport payloads
 // hold metric names like revenue_yoy_pct — do not camelize them.
 export type TieredCitation = {
   source_name: string;
@@ -30,29 +31,30 @@ export type TieredMetricFormula = {
   inputs: Record<string, number | string>;
 };
 
-export type TieredDimension = {
-  dimension: string;
+export type TieredDataReport = {
+  /** Which report this is: technicals, fundamentals, positioning, macro_economy, company_news, world_news. */
+  name: string;
   kind: 'numeric' | 'textual';
-  is_actionable: boolean;
+  counted: boolean;
   payload: Record<string, unknown> | null;
   /** Computation receipts keyed "group.key". Technicals ships them from
       2026-07-27, fundamentals from 2026-07-29; absent on the other
-      dimensions and on old stored runs. */
+      data_reports and on old stored runs. */
   formulas?: Record<string, TieredMetricFormula> | null;
-  narrative: string | null;
+  summary: string | null;
   warnings: string[];
-  /** The same notes as `warnings`, keyed by the payload field
+  /** The same warnings as `warnings`, keyed by the payload field
       ("group.key") each is about (2026-08-05). A warning absent from
-      this map has no field to live on and stays a card-level note.
+      this map has no field to live on and stays a card-level warning.
       Absent on old stored runs. */
-  field_notes?: Record<string, string[]> | null;
+  field_warnings?: Record<string, string[]> | null;
   citations: TieredCitation[];
 };
 
 export type TieredLevels = {
   entry: number | null;
   stop_loss: number | null;
-  take_profit: number | null;
+  target: number | null;
 };
 
 // v2 slice 3 audit trail: per-level formula base + validated AI adjustment.
@@ -64,7 +66,7 @@ export type TieredLevels = {
 export type TieredLevelReason = {
   check: string;
   text: string;
-  links?: TieredDebateLink[];
+  links?: TieredCitationLink[];
 };
 
 export type TieredLevelDetail = {
@@ -113,105 +115,106 @@ export type TieredAxisGrade = {
   why?: string | null;
 };
 
-// --- v5/v6/v7 debate tree (defender/attacker/judge) ---
+// --- the vote tree (listers, checkers, the deciding vote) ---
 
 // Inline citation. v6: text = the words underlined in the claim, value =
 // the claimed number (mismatch marks a code-detected contradiction).
 // v7: payload links carry value (the report's display string; the claim
 // contains it verbatim) with text null; sentiment links carry text (the
 // words resting on that news source) with value null.
-export type TieredDebateLink = {
+export type TieredCitationLink = {
   text?: string | null;
   ref: string;
   value: number | string | null;
   mismatch?: boolean;
 };
 
-// One v8 vote on a bullet: the check round's second vote or the
+// One v8 vote on a vote item: the check round's second vote or the
 // deciding round's tiebreaker. Reasons carry the same code-verified
-// links the bullets use. v10 votes carry the voter's own importance
-// rating of the bullet (1-3; 1-5 since v11); v11 adds one plain
-// sentence saying why (weight_reason).
-export type TieredDebateVote = {
+// links the vote items use. v10 votes carry the voter's own importance
+// rating of the vote item (1-3; 1-5 since v11); v11 adds one plain
+// sentence saying why (score_reason).
+export type TieredVote = {
   role: 'checker' | 'decider';
   validity: 'valid' | 'invalid';
   reason: string | null;
-  links: TieredDebateLink[];
-  weight?: number;
-  weight_reason?: string | null;
+  links: TieredCitationLink[];
+  score?: number;
+  score_reason?: string | null;
 };
 
-// v11: one lister's own rating of a bullet they authored — which lister
+// v11: one lister's own rating of a vote item they listed — which lister
 // (1 or 2), the 1-5 importance score, and why.
-export type TieredDebateAuthorVote = {
+export type TieredListerVote = {
   lister: number;
-  weight: number;
-  weight_reason?: string | null;
+  score: number;
+  score_reason?: string | null;
 };
 
 // One evidence item of the vote tree with everything that happened to it.
-export type TieredDebateItem = {
+export type TieredVoteItem = {
   id: string;
-  dimension: string;
-  // Which way this one bullet leans; the run's outlook is counted from these.
-  bullet_outlook: 'bullish' | 'bearish';
+  data_report: string;
+  // Which way this one vote item leans; the run's outlook is counted from these.
+  item_outlook: 'bullish' | 'bearish';
   claim: string;
-  links?: TieredDebateLink[];
+  links?: TieredCitationLink[];
   struck?: boolean;
   problems?: string[];
-  authors?: number;
-  votes?: TieredDebateVote[];
-  // v10 weighted votes: the authors' own ratings (one or two), and the
-  // final median of every voter's rating (null on struck bullets).
-  // v11 adds author_votes: the same ratings with the lister number and
+  // How many listers listed it independently (2 = confirmed at birth).
+  lister_count?: number;
+  votes?: TieredVote[];
+  // v10 weighted votes: the listers' own ratings (one or two), and the
+  // final median of every voter's rating (null on struck vote items).
+  // v11 adds lister_votes: the same ratings with the lister number and
   // the reason attached.
-  author_weights?: number[];
-  author_votes?: TieredDebateAuthorVote[];
-  weight?: number | null;
+  lister_scores?: number[];
+  lister_votes?: TieredListerVote[];
+  score?: number | null;
   final_status?: 'counted' | 'excluded' | null;
   exclusion_reason?: string | null;
 };
 
-// Pool snapshot: per-dimension bullish/bearish counts plus the
-// pool-wide totals and score. v6-v8 store a per-dimension score and an
+// Pool snapshot: per-data_report bullish/bearish counts plus the
+// pool-wide totals and score. v6-v8 store a per-data_report score and an
 // averaged overall score; v9 stores flat counting (10 × bullish/total)
-// and no per-dimension score; v10 adds importance-weight sums and a
-// weighted score (10 × bullish weight / total weight).
-export type TieredDebatePool = {
-  dimensions: Record<
+// and no per-data_report score; v10 adds importance-score sums and a
+// weighted score (10 × bullish score / total score).
+export type TieredVotePool = {
+  data_reports: Record<
     string,
     {
       bullish: number;
       bearish: number;
       total: number;
       score?: number | null;
-      bullish_weight?: number;
-      bearish_weight?: number;
-      total_weight?: number;
+      bullish_score_sum?: number;
+      bearish_score_sum?: number;
+      total_score_sum?: number;
     }
   >;
   bullish: number;
   bearish: number;
   total: number;
-  bullish_weight?: number;
-  bearish_weight?: number;
-  total_weight?: number;
+  bullish_score_sum?: number;
+  bearish_score_sum?: number;
+  total_score_sum?: number;
   score: number | null;
 };
 
-// Bull/bear debate audit trail (tier-2 section). Four generations coexist
+// Bull/bear deep analysis audit trail (tier-2 section). Four generations coexist
 // in stored runs: the v2 judged shape (confidence, reasons, would_change_
-// One bullet of the structured deep-analysis report. Bullets carry the
+// One bullet of the structured deep-analysis summary outline. Bullets carry the
 // same code-verified {ref, value} links as the evidence list — cited
 // values render as jumps to their report row. Children are sub-bullets
 // one level deep with the same contract.
 export type TieredSummaryChild = {
   text: string;
-  links?: TieredDebateLink[] | null;
+  links?: TieredCitationLink[] | null;
 };
 export type TieredSummaryBullet = {
   text: string;
-  links?: TieredDebateLink[] | null;
+  links?: TieredCitationLink[] | null;
   children?: TieredSummaryChild[] | null;
 };
 
@@ -223,9 +226,7 @@ export type TieredSummaryStructure = {
   fundamentals?: TieredSummaryBullet[] | null;
   positioning?: TieredSummaryBullet[] | null;
   macro_economy?: TieredSummaryBullet[] | null;
-  // Opinion (analyst + crowd) joined 2026-08-18; absent on older runs.
-  opinion?: TieredSummaryBullet[] | null;
-  // Company news joined the debate 2026-08-16; absent on older runs.
+  // Company news joined the deep analysis 2026-08-16; absent on older runs.
   company_news?: TieredSummaryBullet[] | null;
   // World news (macro backdrop card) joined the same day; absent on
   // older runs.
@@ -234,36 +235,36 @@ export type TieredSummaryStructure = {
 
 // mind), the v3 scored shape (final_score, scoring, corrected bull/bear
 // summaries), the v4 threaded shape (turn kinds, axis-grade comments),
-// and the v5 tree (format: 5, items, weight ledger) — every
+// and the v5 tree (format: 5, items, score ledger) — every
 // generation-specific field is optional.
-export type TieredDebateDetail = {
+export type TieredDeepAnalysisDetail = {
   // 5/6/7 on tree-format runs; absent on everything stored before.
   format?: number;
   // The server serves the record as an overview (2026-09-21): the items
-  // are never in it — they are paged at GET /runs/{id}/debate/items —
+  // are never in it — they are paged at GET /runs/{id}/vote_items —
   // only their count. `items` remains for a caller that already holds
   // the whole stored record.
-  items?: TieredDebateItem[];
+  items?: TieredVoteItem[];
   item_count?: number;
   outlook: {
     outlook: TieredOutlook;
     summary: string;
     // The fixed-outline report the summary stage fills (summary + one
-    // group per dimension); `summary` above is its flat-text rendering.
+    // group per data_report); `summary` above is its flat-text rendering.
     summary_structure?: TieredSummaryStructure | null;
     final_score?: number | null;
     initial_score?: number | null;
     pools?: {
-      initial: TieredDebatePool;
-      adjusted?: TieredDebatePool;
-      final: TieredDebatePool;
+      initial: TieredVotePool;
+      adjusted?: TieredVotePool;
+      final: TieredVotePool;
     } | null;
   } | null;
   warnings: string[];
 };
 
-export type TieredOutlook = 'bullish' | 'neutral' | 'bearish' | 'unknown';
-export type TieredAction = 'enter' | 'enter_later' | 'no_trade' | 'unknown';
+export type TieredOutlook = 'bullish' | 'neutral' | 'bearish' | 'no_outlook';
+export type TieredAction = 'buy_now' | 'buy_later' | 'no_trade' | 'unknown';
 export type TieredEarnings = {
   next_date: string | null;
   days_until: number | null;
@@ -287,9 +288,9 @@ export type TieredTierSection = {
   confidence: string | null;
   score: number | null;
   levels: TieredLevels;
-  narrative: string | null;
+  summary: string | null;
   warnings: string[];
-  debate_detail?: TieredDebateDetail;
+  detail?: TieredDeepAnalysisDetail;
 };
 
 // v2 slice 6: deterministic sizing block (share count or explicit refusal).
@@ -302,81 +303,90 @@ export type TieredSizing = {
   lot_size: number;
   reason_code: string | null;
   refusal_reason: string | null;
-  notes: string[];
+  warnings: string[];
   // Fee rate and the position cap were removed 2026-07-22 (they return
   // later as user inputs); old stored runs may still carry those keys.
   inputs: {
     capital: number | null;
-    risk_fraction: number | null;
+    risk_pct: number | null;
     // Absent on runs stored before the reward filter existed.
-    reward_risk?: number | null;
+    reward_ratio?: number | null;
     entry: number | null;
     stop_loss: number | null;
   };
 };
 
 export type TieredLlmUsage = {
-  stages: Record<string, { calls: number; prompt_tokens: number; completion_tokens: number }>;
-  total: { calls: number; prompt_tokens: number; completion_tokens: number };
+  stages: Record<string, { calls: number; input_tokens: number; output_tokens: number }>;
+  total: { calls: number; input_tokens: number; output_tokens: number };
   scope: string;
   // How many LLM exchanges the run's stored transcript holds (absent on
   // runs that made no call, and on runs stored before transcripts).
   transcript_entries?: number | null;
 };
 
-// Everything about one LLM call of a run except its text.
+// Everything about one LLM call of a run except its text, in the
+// transcript's own words: call_number, stage, llm, time, tokens.
 export type TieredTranscriptCallFacts = {
-  seq: number;
+  call_number: number;
   created_at: string | null;
   stage: string | null;
-  model: string | null;
+  llm: string | null;
   temperature: number | null;
-  duration_ms: number | null;
-  prompt_tokens: number | null;
-  completion_tokens: number | null;
+  time_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
   structured: string | null;
   error: string | null;
 };
 
-// One row of the transcript index (GET /runs/{task_id}/transcript): the
-// facts plus how big the prompt and reply are, so a reader can decide
+// One row of the transcript index (GET /runs/{run_id}/transcript): the
+// facts plus how big the input and output are, so a reader can decide
 // whether to open them. The text is one more call away.
 export type TieredTranscriptCallSummary = TieredTranscriptCallFacts & {
-  prompt_chars: number;
-  reply_chars: number;
+  input_chars: number;
+  output_chars: number;
 };
 
-// One call with its text (GET /runs/{task_id}/transcript/{seq}).
+// One call with its text (GET /runs/{run_id}/transcript/{call_number}).
 export type TieredTranscriptCall = TieredTranscriptCallFacts & {
-  prompt: string | null;
-  reply: string | null;
+  input: string | null;
+  output: string | null;
 };
 
 // One light row per data report, on every report whatever sections
 // were asked for (2026-09-21): which reports exist and which went wrong,
 // without the reports themselves.
-export type TieredDimensionIndexEntry = {
-  dimension: string;
+export type TieredDataReportIndexEntry = {
+  name: string;
   kind: string | null;
-  is_actionable: boolean;
+  counted: boolean;
   warnings: string[];
 };
 
+// The preliminary analysis's record on a tier-1 run: its 0-10 score.
+export type TieredPreliminaryAnalysis = {
+  format?: string;
+  outlook?: { outlook: TieredOutlook; final_score: number } | null;
+};
+
 export type TieredResult = {
-  symbol: string;
+  ticker: string;
   market: string;
+  // The tier the run was asked for: 1 (preliminary analysis) or 2 (deep analysis).
   tier: number;
   score: number | null;
   confidence: string | null;
   levels: TieredLevels;
   levels_detail?: TieredLevelsDetail | null;
-  narrative: string | null;
+  summary: string | null;
   warnings: string[];
-  dimensions: TieredDimension[];
-  // v2 slice 6 additions — absent on old stored runs, so all optional.
-  depth?: number;
+  data_reports: TieredDataReport[];
+  // Tier-1 runs: the preliminary analysis's record; null on tier-2 runs.
+  preliminary_analysis?: TieredPreliminaryAnalysis | null;
   final?: TieredFinal | null;
-  tier2?: TieredTierSection | null;
+  // Tier-2 runs: the deep-analysis section; null on tier-1 runs.
+  deep_analysis?: TieredTierSection | null;
   sizing?: TieredSizing | null;
   llm_usage?: TieredLlmUsage | null;
   // Outlook redesign additions — absent on old stored runs.
@@ -387,48 +397,48 @@ export type TieredResult = {
   plan_warnings?: TieredPlanWarnings | null;
   // Max hold time in weeks the run was judged against (2026-08-08);
   // absent on old stored runs.
-  hold_weeks?: number | null;
-  dimension_index?: TieredDimensionIndexEntry[];
+  max_hold_weeks?: number | null;
+  data_report_index?: TieredDataReportIndexEntry[];
 };
 
 // queued (2026-09-15): waiting for a free slot in the server's global run
 // queue; it becomes running by itself.
 export type TieredRunStatus = 'queued' | 'running' | 'done' | 'failed';
 
+// A history row speaks the run form's own words and order (2026-09-24):
+// ticker, capital, risk_pct, reward_ratio, max_hold_weeks, tier — the
+// same names the request takes (TieredRunRequest).
 export type TieredRunSummary = {
-  task_id: string;
-  stock_code: string;
+  run_id: string;
+  ticker: string;
   status: TieredRunStatus;
   error: string | null;
   created_at: string | null;
   updated_at: string | null;
-  // Queued rows only: how many runs are ahead in the line.
-  queue_ahead?: number | null;
-  // The facts the history row shows (real columns since 2026-09-21).
-  // Outlook and shares are set once the run is done: shares mirrors the
-  // report card, 0 = sizing ran but bought nothing, null = no sizing
-  // block (shown as a dash). Tier and the inputs are known from the
-  // moment the run is created.
+  // Queued rows only: the run's place in the line, from 1.
+  queue_position?: number | null;
+  // The run's inputs, known from the moment it is created; null on runs
+  // stored before a field existed. Capital is in the ticker's own
+  // currency; risk is the percent the user typed (1 = 1%).
+  capital?: number | null;
+  risk_pct?: number | null;
+  // The reward-to-risk goal the run planned toward (target = entry +
+  // ratio × risk).
+  reward_ratio?: number | null;
+  // Max hold time in weeks the run was judged against.
+  max_hold_weeks?: number | null;
+  tier?: number | null;
+  // Set once the run is done: shares mirrors the report card, 0 = sizing
+  // ran but bought nothing, null = no sizing block (shown as a dash).
   outlook?: TieredOutlook | null;
   shares?: number | null;
-  tier?: number | null;
-  // The sizing inputs the run used (capital in the ticker's own currency,
-  // risk as a 0-1 fraction); null when the run had no sizing block.
-  capital?: number | null;
-  risk_fraction?: number | null;
-  // The reward-to-risk goal the run planned toward (target = entry +
-  // reward × risk); null on runs stored before it was recorded.
-  reward_risk?: number | null;
-  // Max hold time in weeks the run was judged against; null on runs
-  // stored before it existed.
-  hold_weeks?: number | null;
 };
 
-// The parts of a stored report GET /runs/{task_id} can return
+// The parts of a stored report GET /runs/{run_id} can return
 // (2026-09-21). `core` is the light headline and always comes back;
-// `dimensions` (the data reports), `debate` (the deep-analysis record)
+// `data_reports` (the data reports), `deep_analysis` (the deep-analysis record)
 // and `plan` (the trade-plan receipt) are the heavy parts.
-export type TieredReportSection = 'core' | 'dimensions' | 'debate' | 'plan';
+export type TieredReportSection = 'core' | 'data_reports' | 'deep_analysis' | 'plan';
 
 export type TieredRun = TieredRunSummary & {
   // Which sections `result` holds.
@@ -438,20 +448,21 @@ export type TieredRun = TieredRunSummary & {
 
 // The run-list filters as the server takes them (GET /runs). Every
 // field is optional and they combine with AND; a list matches any of
-// its values. Ranges are inclusive; risk is a fraction (0.01 = 1%);
-// dates are ISO instants (after inclusive, before exclusive).
+// its values. Ranges are inclusive and named after the row's fields;
+// risk is a percent (1 = 1%), as typed; dates are ISO instants (after
+// inclusive, before exclusive).
 export type TieredRunListQuery = {
   ticker?: string[];
   status?: string[];
   outlook?: string[];
-  tier?: number[];
-  hold_weeks?: number[];
   capital_min?: number;
   capital_max?: number;
-  risk_min?: number;
-  risk_max?: number;
-  reward_min?: number;
-  reward_max?: number;
+  risk_pct_min?: number;
+  risk_pct_max?: number;
+  reward_ratio_min?: number;
+  reward_ratio_max?: number;
+  max_hold_weeks?: number[];
+  tier?: number[];
   created_after?: string;
   created_before?: string;
   page?: number;
@@ -471,23 +482,23 @@ export type TieredRunPage = {
 // DELETE /runs/{id}: what the run was. `queued` means it was cancelled
 // before it started.
 export type TieredRunDeleted = {
-  task_id: string;
-  stock_code: string;
+  run_id: string;
+  ticker: string;
   status: 'queued' | 'done' | 'failed';
 };
 
-// GET /runs/{id}/debate/items: one page of a deep run's vote items.
-export type TieredDebateItemStatus = 'counted' | 'excluded';
+// GET /runs/{id}/vote_items: one page of a deep run's vote items.
+export type TieredVoteItemStatus = 'counted' | 'excluded';
 
-export type TieredDebateItemQuery = {
-  dimension?: string[];
-  status?: TieredDebateItemStatus[];
+export type TieredVoteItemQuery = {
+  data_report?: string[];
+  status?: TieredVoteItemStatus[];
   page?: number;
   page_size?: number;
 };
 
-export type TieredDebateItemPage = {
-  items: TieredDebateItem[];
+export type TieredVoteItemPage = {
+  items: TieredVoteItem[];
   page: number;
   page_size: number;
   total: number;
@@ -495,7 +506,7 @@ export type TieredDebateItemPage = {
 };
 
 // The most vote items one page may hold (the server's cap).
-export const DEBATE_ITEMS_PAGE_MAX = 200;
+export const VOTE_ITEMS_PAGE_MAX = 200;
 
 // GET /status: what the server can do right now (2026-09-21).
 export type TieredMarketClock = {
@@ -513,34 +524,45 @@ export type TieredServerStatus = {
   llm: { main_model: string | null; sub_model: string | null; api_key_set: boolean };
   data_sources: { finnhub: boolean; alphavantage: boolean; fred: boolean; sec_edgar: boolean };
   runs: { max_concurrent: number; running: number; queued: number };
+  // What a run uses when a field is left out, in the form's order.
   defaults: {
-    tier: number;
-    hold_weeks: number;
     capital: number | null;
-    risk_fraction: number | null;
-    reward_risk: number;
+    risk_pct: number | null;
+    reward_ratio: number;
+    max_hold_weeks: number;
+    tier: number;
   };
   transcript_retention_days: number;
   markets: TieredMarketClock[];
 };
 
-// Tier 3 retired (outlook redesign): the backend rejects depth 3 with a
-// validation error and the alt form offers 1-2 only. The type keeps 3 so
-// the legacy /tiered page (deliberately untouched) still compiles.
-export type TieredDepth = 1 | 2 | 3;
+// The tiers a run can be asked for: 1 = preliminary analysis, 2 = deep
+// analysis. Tier 3 is retired (outlook redesign).
+export type TieredTier = 1 | 2;
 
-export type TieredSizingRequest = {
+// POST /analyze: the run form, field for field, in its order. The
+// server fills the form defaults for whatever is left out. Risk is the
+// percent the user typed (1 = 1%); run_anyway is the market-open-check override
+// ("run anyway" after a 409 market-open rejection).
+export type TieredRunRequest = {
+  ticker: string;
   capital?: number;
-  risk_fraction?: number;
-  // Reward-to-risk ratio the plan aims for (target = entry + R × risk).
-  reward_risk?: number;
+  risk_pct?: number;
+  reward_ratio?: number;
+  max_hold_weeks?: number;
+  tier?: TieredTier;
+  run_anyway?: boolean;
+  // The language the user chose for the app (2026-09-26): every
+  // sentence the model writes for the report is in it. Left out, the
+  // server runs in English.
+  language?: UiLanguage;
 };
 
-// Extra run inputs (2026-08-08): the max hold time and the clock-gate
-// override ("run anyway" after a 409 market-open rejection).
-export type TieredStartOptions = {
-  holdWeeks?: number;
-  runAnyway?: boolean;
+export type TieredRunAccepted = {
+  run_id: string;
+  ticker: string;
+  tier: number;
+  status: TieredRunStatus;
 };
 
 // The 409 market-open rejection body (2026-08-11): which market blocked
@@ -556,24 +578,14 @@ export type TieredMarketOpenGate = {
 // with the same ticker and inputs — the Start popup names it and the
 // history expands it.
 export type TieredDuplicateRun = {
-  taskId: string;
+  runId: string;
   status: 'queued' | 'running';
 };
 
 export const tieredApi = {
-  start: async (
-    stockCode: string,
-    depth: TieredDepth = 1,
-    sizing?: TieredSizingRequest,
-    options?: TieredStartOptions,
-  ): Promise<{ task_id: string; status: TieredRunStatus }> => {
-    const response = await apiClient.post<{ task_id: string; status: TieredRunStatus }>('/api/v1/tiered/analyze', {
-      stock_code: stockCode,
-      depth,
-      ...(sizing && Object.keys(sizing).length > 0 ? { sizing } : {}),
-      ...(options?.holdWeeks != null ? { hold_weeks: options.holdWeeks } : {}),
-      ...(options?.runAnyway ? { run_anyway: true } : {}),
-    });
+  // The request is the form's own fields, name for name (2026-09-24).
+  start: async (request: TieredRunRequest): Promise<TieredRunAccepted> => {
+    const response = await apiClient.post<TieredRunAccepted>('/api/v1/tiered/analyze', request);
     return response.data;
   },
 
@@ -594,8 +606,8 @@ export const tieredApi = {
   },
 
   // One run with its report, whole (no sections named) or by section.
-  getRun: async (taskId: string, sections?: TieredReportSection[]): Promise<TieredRun> => {
-    const response = await apiClient.get<TieredRun>(`/api/v1/tiered/runs/${taskId}`, {
+  getRun: async (runId: string, sections?: TieredReportSection[]): Promise<TieredRun> => {
+    const response = await apiClient.get<TieredRun>(`/api/v1/tiered/runs/${runId}`, {
       params: sections && sections.length > 0 ? { section: sections } : undefined,
       paramsSerializer: { indexes: null },
     });
@@ -604,28 +616,28 @@ export const tieredApi = {
 
   // The run's LLM calls without their text (the index is small; the
   // text of every call together runs to half a megabyte).
-  getTranscript: async (taskId: string): Promise<TieredTranscriptCallSummary[]> => {
+  getTranscript: async (runId: string): Promise<TieredTranscriptCallSummary[]> => {
     const response = await apiClient.get<{ items: TieredTranscriptCallSummary[] }>(
-      `/api/v1/tiered/runs/${taskId}/transcript`,
+      `/api/v1/tiered/runs/${runId}/transcript`,
     );
     return response.data.items;
   },
 
-  // One call with its full prompt and raw reply.
-  getTranscriptCall: async (taskId: string, seq: number): Promise<TieredTranscriptCall> => {
+  // One call with its full input (the prompt) and raw output (the reply).
+  getTranscriptCall: async (runId: string, callNumber: number): Promise<TieredTranscriptCall> => {
     const response = await apiClient.get<TieredTranscriptCall>(
-      `/api/v1/tiered/runs/${taskId}/transcript/${seq}`,
+      `/api/v1/tiered/runs/${runId}/transcript/${callNumber}`,
     );
     return response.data;
   },
 
   // One page of a deep run's vote items, filtered by the server.
-  getDebateItems: async (
-    taskId: string,
-    query: TieredDebateItemQuery = {},
-  ): Promise<TieredDebateItemPage> => {
-    const response = await apiClient.get<TieredDebateItemPage>(
-      `/api/v1/tiered/runs/${taskId}/debate/items`,
+  getVoteItems: async (
+    runId: string,
+    query: TieredVoteItemQuery = {},
+  ): Promise<TieredVoteItemPage> => {
+    const response = await apiClient.get<TieredVoteItemPage>(
+      `/api/v1/tiered/runs/${runId}/vote_items`,
       { params: query, paramsSerializer: { indexes: null } },
     );
     return response.data;
@@ -633,11 +645,11 @@ export const tieredApi = {
 
   // Every vote item of a deep run, in stored order — the vote tree shows
   // them all at once, so it pages through at the largest page size.
-  getAllDebateItems: async (taskId: string): Promise<TieredDebateItem[]> => {
-    const first = await tieredApi.getDebateItems(taskId, { page_size: DEBATE_ITEMS_PAGE_MAX });
+  getAllVoteItems: async (runId: string): Promise<TieredVoteItem[]> => {
+    const first = await tieredApi.getVoteItems(runId, { page_size: VOTE_ITEMS_PAGE_MAX });
     const rest = await Promise.all(
       Array.from({ length: first.page_count - 1 }, (_, index) =>
-        tieredApi.getDebateItems(taskId, { page: index + 2, page_size: DEBATE_ITEMS_PAGE_MAX }),
+        tieredApi.getVoteItems(runId, { page: index + 2, page_size: VOTE_ITEMS_PAGE_MAX }),
       ),
     );
     return [first, ...rest].flatMap((page) => page.items);
@@ -646,8 +658,8 @@ export const tieredApi = {
   // Delete a run and its transcript; a queued run is thereby cancelled.
   // A running run is refused with a 409 whose detail.code is
   // run_in_progress.
-  deleteRun: async (taskId: string): Promise<TieredRunDeleted> => {
-    const response = await apiClient.delete<TieredRunDeleted>(`/api/v1/tiered/runs/${taskId}`);
+  deleteRun: async (runId: string): Promise<TieredRunDeleted> => {
+    const response = await apiClient.delete<TieredRunDeleted>(`/api/v1/tiered/runs/${runId}`);
     return response.data;
   },
 

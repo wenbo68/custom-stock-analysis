@@ -58,8 +58,8 @@ class TestServerStatus:
         }
         assert status["runs"] == {"max_concurrent": 4, "running": 0, "queued": 0}
         assert status["defaults"] == {
-            "tier": 1, "hold_weeks": 2, "capital": 100_000.0,
-            "risk_fraction": 0.01, "reward_risk": 2.0,
+            "capital": 100_000.0, "risk_pct": 1.0, "reward_ratio": 2.0,
+            "max_hold_weeks": 2, "tier": 1,
         }
         assert status["transcript_retention_days"] == 14
 

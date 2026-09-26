@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """Shared plumbing for the tiered package's own LLM calls (v2).
 
-Used by the level adjuster (slice 3) and the tier-2 debate (slice 4).
+Used by the level adjuster (slice 3) and the deep analysis (slice 4).
 These calls are owned by the tiered package — Tier 1's synthesis happens
 inside DSA's decision path, which this package never modifies.
 
 The evidence helpers implement the anchoring contract: LLM claims may only
-reference collected evidence — a dimension payload key path that actually
+reference collected evidence — a data_report payload key path that actually
 resolves (``technicals.rsi_14``).
 """
 from __future__ import annotations
@@ -19,11 +19,19 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .providers.base import DimensionResult
+from src.languages import (
+    DEFAULT_LANGUAGE,
+    LANGUAGE_RETRY_LIMIT,
+    language_name,
+    language_problem,
+    reply_language_rule,
+)
+
+from .providers.base import DataReport
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +50,8 @@ TranscriptWriter = Callable[[Dict[str, Any]], None]
 class LlmTranscript:
     """Record of every LLM exchange in one run.
 
-    One entry per call: stage, model, the full prompt and raw reply,
-    token counts, duration, and the error when the call itself raised.
+    One entry per call: stage, llm, the full input and raw output,
+    token counts, time, and the error when the call itself raised.
     Exists so a "returned no usable JSON" warning is diagnosable from
     stored evidence instead of a re-run (owner request 2026-08-25).
 
@@ -64,7 +72,7 @@ class LlmTranscript:
 
     @classmethod
     def for_run(cls, run_id: str) -> "LlmTranscript":
-        """The production transcript: rows keyed by the run's task id."""
+        """The production transcript: rows keyed by the run's run id."""
         return cls(run_id, writer=_database_transcript_writer(run_id))
 
     @classmethod
@@ -84,13 +92,13 @@ class LlmTranscript:
         self,
         *,
         stage: str,
-        model: str,
+        llm: str,
         temperature: float,
-        prompt: str,
-        reply: Optional[str],
-        prompt_tokens: Optional[int] = None,
-        completion_tokens: Optional[int] = None,
-        duration_ms: Optional[int] = None,
+        input: str,
+        output: Optional[str],
+        input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+        time_ms: Optional[int] = None,
         error: Optional[str] = None,
         structured: Optional[str] = None,
     ) -> None:
@@ -98,21 +106,21 @@ class LlmTranscript:
             return
         with self._lock:
             entry = {
-                "task_id": self._run_id,
-                "seq": self._entries + 1,
+                "run_id": self._run_id,
+                "call_number": self._entries + 1,
                 "stage": stage,
-                "model": model,
+                "llm": llm,
                 "temperature": temperature,
-                "duration_ms": duration_ms,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
+                "time_ms": time_ms,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 # Which reply enforcement the provider was asked for:
                 # "schema" (exact shape), "json" (valid JSON, any keys),
                 # or None (prompt-only).
                 "structured": structured,
                 "error": error,
-                "prompt": prompt,
-                "reply": reply,
+                "input": input,
+                "output": output,
             }
             try:
                 if self._writer is not None:
@@ -141,20 +149,20 @@ def _database_transcript_writer(run_id: str) -> TranscriptWriter:
 @dataclass
 class _StageUsage:
     calls: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
     def as_dict(self) -> Dict[str, int]:
         return {
             "calls": self.calls,
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
         }
 
 
 #: What the usage numbers cover — stored with them so a reader of an old
 #: run is never left guessing. Since 2026-08-10 every LLM stage (the
-#: tier-1 quick judge, the debate, the plan review) is a tiered-package
+#: tier-1 preliminary analysis, the deep analysis, the plan review) is a tiered-package
 #: call and counted; on older runs the tier-1 blob ran inside the DSA
 #: pipeline and was billed there.
 USAGE_SCOPE_NOTE = (
@@ -178,13 +186,24 @@ class LlmUsageTracker:
     A ``transcript`` attached here rides the same activation into worker
     threads (they re-``activate()`` the tracker), so every real LLM call
     of the run lands in one file without extra plumbing.
+
+    The run's ``language`` (owner decision 2026-09-26: every sentence a
+    reader sees is written in the language the user chose for the app)
+    rides here for the same reason: every prompt builder, down to the
+    news screens inside the providers, reads it with ``run_language()``
+    instead of taking one more argument.
     """
 
-    def __init__(self, transcript: Optional[LlmTranscript] = None) -> None:
+    def __init__(
+        self,
+        transcript: Optional[LlmTranscript] = None,
+        language: str = DEFAULT_LANGUAGE,
+    ) -> None:
         self._stages: Dict[str, _StageUsage] = {}
         self._current: Optional[str] = None
         self.transcript = transcript
-        # Debate stages run two LLM calls in parallel threads; both report
+        self.language = language
+        # Deep analysis stages run two LLM calls in parallel threads; both report
         # into the same tracker.
         self._lock = threading.Lock()
 
@@ -207,15 +226,15 @@ class LlmUsageTracker:
             self._current = previous
 
     def record(
-        self, prompt_tokens: Optional[int], completion_tokens: Optional[int]
+        self, input_tokens: Optional[int], output_tokens: Optional[int]
     ) -> None:
         with self._lock:
             stage = self._stages.setdefault(
                 self._current or _UNKNOWN_STAGE, _StageUsage()
             )
             stage.calls += 1
-            stage.prompt_tokens += int(prompt_tokens or 0)
-            stage.completion_tokens += int(completion_tokens or 0)
+            stage.input_tokens += int(input_tokens or 0)
+            stage.output_tokens += int(output_tokens or 0)
 
     def current_stage(self) -> str:
         return self._current or _UNKNOWN_STAGE
@@ -224,8 +243,8 @@ class LlmUsageTracker:
         total = _StageUsage()
         for usage in self._stages.values():
             total.calls += usage.calls
-            total.prompt_tokens += usage.prompt_tokens
-            total.completion_tokens += usage.completion_tokens
+            total.input_tokens += usage.input_tokens
+            total.output_tokens += usage.output_tokens
         detail: Dict[str, Any] = {
             "stages": {name: u.as_dict() for name, u in self._stages.items()},
             "total": total.as_dict(),
@@ -239,23 +258,83 @@ class LlmUsageTracker:
 
 
 def record_llm_usage(
-    prompt_tokens: Optional[int], completion_tokens: Optional[int]
+    input_tokens: Optional[int], output_tokens: Optional[int]
 ) -> None:
     """Report one LLM call to the active tracker, if any."""
     tracker = getattr(_active, "tracker", None)
     if tracker is not None:
-        tracker.record(prompt_tokens, completion_tokens)
+        tracker.record(input_tokens, output_tokens)
 
 
 def active_tracker() -> Optional["LlmUsageTracker"]:
     """The tracker active on this thread, or None.
 
     The tracker lives in thread-local storage, so code that fans LLM calls
-    out to worker threads (the debate's parallel stages) must capture it
+    out to worker threads (the deep analysis's parallel stages) must capture it
     here and re-``activate()`` it inside each worker — otherwise those
     calls silently vanish from the run's usage numbers.
     """
     return getattr(_active, "tracker", None)
+
+
+def run_language() -> str:
+    """The language of the run on this thread — the app's default when
+    no tracker is active (v1 call sites, tests with fake summarizers)."""
+    tracker = active_tracker()
+    return tracker.language if tracker is not None else DEFAULT_LANGUAGE
+
+
+def language_rule() -> str:
+    """The prompt line naming the run's language (``reply_language_rule``)."""
+    return reply_language_rule(run_language())
+
+
+T = TypeVar("T")
+
+_LANGUAGE_RETRY_TEMPLATE = (
+    "{prompt}\n\nYour previous reply was invalid: {problem}.\n"
+    "Reply again with the same JSON shape, every sentence in {name}; copy "
+    "cited values exactly as displayed. JSON only."
+)
+
+
+def in_language(
+    ask: Callable[[str], Optional[T]],
+    prompt: str,
+    texts_of: Callable[[T], Iterable[Optional[str]]],
+    stage: str,
+    warnings: List[str],
+) -> Optional[T]:
+    """``ask(prompt)`` once, then again with a correction — up to
+    ``LANGUAGE_RETRY_LIMIT`` times — while the reader-facing texts of the
+    reply (``texts_of``) are not written in the run's language. The
+    check is plain code (src/languages.py); a reply still in the wrong
+    language after the retries is kept as written, with a warning, so a
+    stubborn model costs wording, never the run.
+
+    ``ask`` is the stage's own validated request (its JSON shape retry
+    included) and returns None when that failed, which ends this loop
+    too: there is no language to check on a reply that never parsed."""
+    language = run_language()
+    result = ask(prompt)
+    problem: Optional[str] = None
+    for _attempt in range(LANGUAGE_RETRY_LIMIT):
+        if result is None:
+            return None
+        problem = language_problem(texts_of(result), language)
+        if problem is None:
+            return result
+        warnings.append(f"{stage} needed a retry — {problem}")
+        result = ask(_LANGUAGE_RETRY_TEMPLATE.format(
+            prompt=prompt, problem=problem, name=language_name(language),
+        ))
+    if result is not None:
+        problem = language_problem(texts_of(result), language)
+        if problem is not None:
+            warnings.append(
+                f"{stage} {problem} after {LANGUAGE_RETRY_LIMIT} retries — shown as written"
+            )
+    return result
 
 
 def _record_transcript(
@@ -272,7 +351,7 @@ def _record_transcript(
 
 
 #: Schema sentinel for reply shapes whose KEYS are decided at run time
-#: (the debate's one-vote-per-bullet-id forms): the provider is asked to
+#: (the deep analysis's one-vote-per-vote-item-id forms): the provider is asked to
 #: guarantee syntactically valid JSON, but the exact keys stay a
 #: pydantic-and-retry concern — no portable decode-time schema can name
 #: keys that don't exist until the run.
@@ -372,16 +451,18 @@ def _summarize(
         # The failed exchange is exactly what a transcript exists for.
         _record_transcript(
             tracker,
-            model=resolved,
+            llm=resolved,
             temperature=temperature,
-            prompt=prompt,
-            reply=None,
-            duration_ms=int((time.monotonic() - started) * 1000),
+            input=prompt,
+            output=None,
+            time_ms=int((time.monotonic() - started) * 1000),
             error=repr(exc),
             structured=enforcement,
         )
         raise
     usage = getattr(response, "usage", None)
+    # litellm's usage object speaks the provider's words (prompt_tokens,
+    # completion_tokens); everything downstream says input/output tokens.
     record_llm_usage(
         getattr(usage, "prompt_tokens", None),
         getattr(usage, "completion_tokens", None),
@@ -389,13 +470,13 @@ def _summarize(
     raw = response.choices[0].message.content or ""
     _record_transcript(
         tracker,
-        model=resolved,
+        llm=resolved,
         temperature=temperature,
-        prompt=prompt,
-        reply=raw,
-        prompt_tokens=getattr(usage, "prompt_tokens", None),
-        completion_tokens=getattr(usage, "completion_tokens", None),
-        duration_ms=int((time.monotonic() - started) * 1000),
+        input=prompt,
+        output=raw,
+        input_tokens=getattr(usage, "prompt_tokens", None),
+        output_tokens=getattr(usage, "completion_tokens", None),
+        time_ms=int((time.monotonic() - started) * 1000),
         structured=enforcement,
     )
     return raw
@@ -421,7 +502,7 @@ def screen_summarizer(prompt: str, schema: Any = None) -> str:
 
 
 def deterministic_summarizer(prompt: str, schema: Any = None) -> str:
-    """Zero-temperature summarizer: the scored tier-2 debate uses it so the
+    """Zero-temperature summarizer: the scored deep analysis uses it so the
     same evidence grades the same way on every run."""
     return _summarize(prompt, temperature=0.0, schema=schema)
 
@@ -487,7 +568,7 @@ def request_structured(
     reply_model: Type[BaseModel],
 ) -> StructuredReply:
     """One LLM call validated against a pydantic form, with ONE retry
-    that shows the model what was wrong (the debate's convention — at
+    that shows the model what was wrong (the deep analysis's convention — at
     temperature 0 a bare re-ask would reproduce the same reply).
 
     Belt and suspenders: the provider is asked to ENFORCE the shape
@@ -541,7 +622,7 @@ def display_value(value: Any) -> str:
 
     A Python port of the frontend's ``formatValue`` (termHelpers.ts): whole
     numbers stay whole, decimals get 2 places, millions/billions/trillions
-    are worded. The v7 debate shows the AI this rendering, requires cited
+    are worded. The v7 deep analysis shows the AI this rendering, requires cited
     values to match it, and checks the claim sentence for the same string —
     so the report page, the sentence, and the check all carry one number.
     """
@@ -561,7 +642,7 @@ def display_value(value: Any) -> str:
 
 def display_payload(node: Any) -> Any:
     """A payload copy with every numeric leaf replaced by its display
-    string — what the v7 debate prompts show instead of raw floats."""
+    string — what the v7 deep analysis prompts show instead of raw floats."""
     if isinstance(node, dict):
         return {key: display_payload(value) for key, value in node.items()}
     if isinstance(node, bool) or not isinstance(node, (int, float)):
@@ -569,18 +650,18 @@ def display_payload(node: Any) -> Any:
     return display_value(node)
 
 
-def evidence_block(dimensions: Sequence[DimensionResult], display: bool = False) -> str:
+def evidence_block(data_reports: Sequence[DataReport], display: bool = False) -> str:
     """The evidence bundle LLM stages may cite, with the ref grammar shown.
 
-    ``display=True`` (the v7 debate) renders numeric leaves as their
+    ``display=True`` (the v7 deep analysis) renders numeric leaves as their
     report-page display strings so the model cites what the user sees.
     """
     blocks: List[str] = []
-    for dim in dimensions:
+    for dim in data_reports:
         if dim.payload:
             payload = display_payload(dim.payload) if display else dim.payload
             blocks.append(
-                f"[{dim.dimension} payload — cite as \"{dim.dimension}.<key>\"]\n"
+                f"[{dim.name} payload — cite as \"{dim.name}.<key>\"]\n"
                 + json.dumps(payload, ensure_ascii=False, default=str)
             )
     return "\n\n".join(blocks) if blocks else "(no evidence collected)"

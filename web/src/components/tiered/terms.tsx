@@ -144,7 +144,7 @@ interface EvidenceRefProps {
 }
 
 // One evidence reference as a link: "citation:N" opens the numbered news
-// source; a payload path scrolls to that metric's row on its dimension
+// source; a payload path scrolls to that metric's row on its data_report
 // card (closing any open modal first via onNavigate). Unresolvable refs
 // render as plain text — never a dead link.
 export const EvidenceRef = ({ refPath, citations, onNavigate }: EvidenceRefProps) => {

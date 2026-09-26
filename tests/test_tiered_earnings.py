@@ -67,7 +67,7 @@ class TestNextEarningsInfo(unittest.TestCase):
         self.assertIn("not yet available", info.note)
 
     def test_fetch_failure_never_raises(self):
-        def _boom(symbol):
+        def _boom(ticker):
             raise RuntimeError("api down")
 
         info = next_earnings_info("AAPL", Market.US, today=TODAY, fetcher=_boom)

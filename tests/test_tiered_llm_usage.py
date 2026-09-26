@@ -20,20 +20,20 @@ class TestLlmUsageTracker(unittest.TestCase):
     def test_records_into_current_stage(self):
         tracker = LlmUsageTracker()
         with tracker.activate():
-            with tracker.stage("tier2_analysis"):
+            with tracker.stage("deep_analysis"):
                 record_llm_usage(100, 20)
                 record_llm_usage(50, 10)
             with tracker.stage("trade_plan"):
                 record_llm_usage(200, 40)
 
         detail = tracker.to_detail()
-        self.assertEqual(detail["stages"]["tier2_analysis"],
-                         {"calls": 2, "prompt_tokens": 150,
-                          "completion_tokens": 30})
+        self.assertEqual(detail["stages"]["deep_analysis"],
+                         {"calls": 2, "input_tokens": 150,
+                          "output_tokens": 30})
         self.assertEqual(detail["stages"]["trade_plan"]["calls"], 1)
         self.assertEqual(detail["total"],
-                         {"calls": 3, "prompt_tokens": 350,
-                          "completion_tokens": 70})
+                         {"calls": 3, "input_tokens": 350,
+                          "output_tokens": 70})
 
     def test_scope_note_present(self):
         # Readers of a stored run must know tier 1's synthesis (inside the
@@ -59,8 +59,8 @@ class TestLlmUsageTracker(unittest.TestCase):
             with tracker.stage("level_adjuster"):
                 record_llm_usage(None, None)
         stage = tracker.to_detail()["stages"]["level_adjuster"]
-        self.assertEqual(stage, {"calls": 1, "prompt_tokens": 0,
-                                 "completion_tokens": 0})
+        self.assertEqual(stage, {"calls": 1, "input_tokens": 0,
+                                 "output_tokens": 0})
 
     def test_activation_restores_previous_tracker(self):
         outer, inner = LlmUsageTracker(), LlmUsageTracker()
@@ -70,7 +70,7 @@ class TestLlmUsageTracker(unittest.TestCase):
             record_llm_usage(2, 2)
         self.assertEqual(inner.to_detail()["total"]["calls"], 1)
         self.assertEqual(outer.to_detail()["total"]["calls"], 1)
-        self.assertEqual(outer.to_detail()["total"]["prompt_tokens"], 2)
+        self.assertEqual(outer.to_detail()["total"]["input_tokens"], 2)
 
     def test_trackers_are_thread_local(self):
         tracker = LlmUsageTracker()

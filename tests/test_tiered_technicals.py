@@ -344,16 +344,16 @@ class TestEnvelopeHelpers(unittest.TestCase):
 
 class TestTechnicalsProvider(unittest.TestCase):
     def test_provider_is_numeric(self):
-        provider = TechnicalsProvider(bars_loader=lambda symbol: [])
+        provider = TechnicalsProvider(bars_loader=lambda ticker: [])
         self.assertEqual(provider.kind, SourceKind.NUMERIC)
-        self.assertEqual(provider.dimension, "technicals")
+        self.assertEqual(provider.name, "technicals")
 
     def test_collect_with_a_year_of_bars_leaves_no_field_blank(self):
         bars = _wave_bars(320)
         index = [Bar(high=1, low=1, close=1000 * (1.0007 ** i))
                  for i in range(320)]
         result = _full_provider(bars, index).collect("AAPL")
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
         # Enough history + a wired benchmark: no field is missing data.
         self.assertFalse(
             any("indicators lacking history" in w for w in result.warnings)
@@ -505,7 +505,7 @@ class TestTechnicalsProvider(unittest.TestCase):
         self.assertIn("200-day", payload["market"]["regime"]["explanation"])
 
     def test_collect_insufficient_bars_still_ships_payload_from_real_bars(self):
-        provider = TechnicalsProvider(bars_loader=lambda symbol: _flat_bars(3))
+        provider = TechnicalsProvider(bars_loader=lambda ticker: _flat_bars(3))
         result = provider.collect("AAPL")
         self.assertTrue(
             any("insufficient history" in w for w in result.warnings)
@@ -524,10 +524,10 @@ class TestTechnicalsProvider(unittest.TestCase):
         )
         # A NUMERIC card with a payload is actionable; consumers gate on
         # each field's value, which is where the blanks live.
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
 
     def test_collect_loader_failure_ships_all_blank_payload_with_warning(self):
-        def _boom(symbol):
+        def _boom(ticker):
             raise RuntimeError("source down")
 
         provider = TechnicalsProvider(bars_loader=_boom)
@@ -546,7 +546,7 @@ class TestTechnicalsProvider(unittest.TestCase):
         self.assertTrue(
             any("indicators lacking history" in w for w in result.warnings)
         )
-        self.assertTrue(result.is_actionable)  # payload present; fields gate
+        self.assertTrue(result.counted)  # payload present; fields gate
 
     def test_collect_short_history_blanks_missing_fields_with_named_gaps(self):
         # 80 bars: RSI/ATR fine, but no 200-day average and no honest
@@ -556,7 +556,7 @@ class TestTechnicalsProvider(unittest.TestCase):
             bars_loader=lambda s: _trend_bars(closes),
         )
         result = provider.collect("AAPL")
-        self.assertTrue(result.is_actionable)
+        self.assertTrue(result.counted)
         self.assertIsNone(result.payload["daily"]["sma_200"]["value"])
         # Fields the 80 bars do support still carry values.
         self.assertIsNotNone(result.payload["daily"]["rsi_14"]["value"])
@@ -627,7 +627,7 @@ class TestTechnicalsProvider(unittest.TestCase):
 
 
 class TestFormulaReceipts(unittest.TestCase):
-    """UI receipts (DimensionResult.formulas): formula words + this run's
+    """UI receipts (DataReport.formulas): formula words + this run's
     plugged-in inputs, living OUTSIDE the payload so the LLM prompt and
     the envelope contract stay untouched."""
 

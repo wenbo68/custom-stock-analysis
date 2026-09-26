@@ -71,14 +71,14 @@ class TestSchema(unittest.TestCase):
     def test_sizing_slots_default_empty(self):
         slots = SizingSlots()
         self.assertIsNone(slots.capital)
-        self.assertIsNone(slots.risk_fraction)
+        self.assertIsNone(slots.risk_pct)
         self.assertIsNone(slots.shares)
         self.assertTrue(slots.is_empty)
 
     def test_tier_report_sizing_always_present_and_empty_in_v1(self):
         report = TierReport(
             tier=1,
-            symbol="AAPL",
+            ticker="AAPL",
             market=Market.US,
             outlook=Outlook.BULLISH,
         )
@@ -87,20 +87,20 @@ class TestSchema(unittest.TestCase):
 
 class TestTier2Failures(unittest.TestCase):
     def test_tier2_without_foundation_report_fails_unknown(self):
-        report = Tier2Stage().run(TierState(symbol="AAPL", market=Market.US))
+        report = Tier2Stage().run(TierState(ticker="AAPL", market=Market.US))
         self.assertEqual(report.tier, 2)
-        self.assertEqual(report.outlook, Outlook.UNKNOWN)
+        self.assertEqual(report.outlook, Outlook.NO_OUTLOOK)
         self.assertTrue(any("foundation" in w for w in report.warnings))
 
     def test_tier2_failure_never_falls_back_to_tier1_outlook(self):
         # Outlook redesign: a failed vote is UNKNOWN, never the blob's call.
-        state = TierState(symbol="AAPL", market=Market.US)
+        state = TierState(ticker="AAPL", market=Market.US)
         state.reports[1] = TierReport(
-            tier=1, symbol="AAPL", market=Market.US,
+            tier=1, ticker="AAPL", market=Market.US,
             outlook=Outlook.BULLISH,
         )
-        report = Tier2Stage().run(state)  # no dimensions -> failure
-        self.assertEqual(report.outlook, Outlook.UNKNOWN)
+        report = Tier2Stage().run(state)  # no data_reports -> failure
+        self.assertEqual(report.outlook, Outlook.NO_OUTLOOK)
         self.assertTrue(any("re-run" in w for w in report.warnings))
 
 

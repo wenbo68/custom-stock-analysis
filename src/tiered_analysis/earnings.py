@@ -28,7 +28,7 @@ EARNINGS_WARNING_DAYS = 7
 
 @dataclass(frozen=True)
 class EarningsInfo:
-    """Next earnings date for one symbol; empty fields are honest gaps."""
+    """Next earnings date for one ticker; empty fields are honest gaps."""
 
     next_date: Optional[str] = None  # ISO date, e.g. "2026-07-29"
     days_until: Optional[int] = None
@@ -69,11 +69,11 @@ def _as_date(value: Any) -> Optional[_dt.date]:
     return None
 
 
-def _yfinance_earnings_dates(symbol: str) -> List[_dt.date]:
-    """All earnings dates yfinance knows for a US symbol (may be empty)."""
+def _yfinance_earnings_dates(ticker: str) -> List[_dt.date]:
+    """All earnings dates yfinance knows for a US ticker (may be empty)."""
     import yfinance as yf
 
-    calendar = yf.Ticker(symbol).calendar
+    calendar = yf.Ticker(ticker).calendar
     raw: List[Any] = []
     if isinstance(calendar, dict):
         value = calendar.get("Earnings Date")
@@ -90,7 +90,7 @@ def _yfinance_earnings_dates(symbol: str) -> List[_dt.date]:
 
 
 def next_earnings_info(
-    symbol: str,
+    ticker: str,
     market: Market,
     today: Optional[_dt.date] = None,
     fetcher: Optional[Callable[[str], List[_dt.date]]] = None,
@@ -107,9 +107,9 @@ def next_earnings_info(
         fetcher = _yfinance_earnings_dates
 
     try:
-        dates = fetcher(symbol)
+        dates = fetcher(ticker)
     except Exception as exc:
-        logger.warning("earnings date fetch failed for %s: %s", symbol, exc)
+        logger.warning("earnings date fetch failed for %s: %s", ticker, exc)
         return EarningsInfo(note=f"earnings date fetch failed: {exc}")
 
     future = sorted(d for d in dates if d >= today)
@@ -133,8 +133,8 @@ def earnings_warning(info: EarningsInfo) -> Optional[str]:
     )
 
 
-def earnings_from_dimensions(
-    dimensions: Any, today: Optional[_dt.date] = None
+def earnings_from_data_reports(
+    data_reports: Any, today: Optional[_dt.date] = None
 ) -> EarningsInfo:
     """The next earnings date the fundamentals provider already fetched
     (no second network call). Shared by the run-detail block and the
@@ -148,8 +148,8 @@ def earnings_from_dimensions(
 
     if today is None:
         today = _dt.date.today()
-    for dim in dimensions:
-        if getattr(dim, "dimension", None) != "fundamentals" or not dim.payload:
+    for dim in data_reports:
+        if getattr(dim, "name", None) != "fundamentals" or not dim.payload:
             continue
         group = dim.payload.get("quarterly_report") or dim.payload.get("earnings")
         source = group if isinstance(group, dict) else dim.payload

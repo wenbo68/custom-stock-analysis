@@ -4,7 +4,7 @@
 
 The web page learns most of this the hard way — a run refused with a 400
 says the model is missing, a 409 says the market is open. A second
-client, the chatbot, cannot read ``.env`` or a wall clock, so one small
+client, the chat bot, cannot read ``.env`` or a wall clock, so one small
 route answers up front: which model will do the analysis (and whether a
 key is set — never the key itself), which data sources are configured
 (so a missing news report has an explanation), how many run slots exist
@@ -27,7 +27,7 @@ from .llm_support import TRANSCRIPT_MAX_AGE_DAYS
 from .run_context import DATA_KEY_ENV, llm_api_key, llm_model, llm_sub_model
 from .run_gate import MarketClock, known_markets, market_clock
 from .run_queue import max_concurrent_runs
-from .settings import DEFAULT_HOLD_WEEKS, DEFAULT_TIER, SizingSettings
+from .settings import DEFAULT_MAX_HOLD_WEEKS, DEFAULT_TIER, SizingSettings
 
 #: Data source -> the environment variable that enables it. The three
 #: keyed vendors come from run_context; SEC EDGAR only wants a contact
@@ -84,12 +84,13 @@ def server_status(now: Optional[datetime] = None) -> Dict[str, Any]:
             "running": counts[history.STATUS_RUNNING],
             "queued": counts[history.STATUS_QUEUED],
         },
+        # In the run form's words and order (owner request 2026-09-24).
         "defaults": {
-            "tier": DEFAULT_TIER,
-            "hold_weeks": DEFAULT_HOLD_WEEKS,
             "capital": sizing.capital,
-            "risk_fraction": sizing.risk_fraction,
-            "reward_risk": sizing.reward_risk,
+            "risk_pct": sizing.risk_pct,
+            "reward_ratio": sizing.reward_ratio,
+            "max_hold_weeks": DEFAULT_MAX_HOLD_WEEKS,
+            "tier": DEFAULT_TIER,
         },
         "transcript_retention_days": TRANSCRIPT_MAX_AGE_DAYS,
         "markets": [

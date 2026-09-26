@@ -82,9 +82,14 @@ from .cache_store import CacheStore, default_cache_store
 
 from pydantic import BaseModel
 
+from src.languages import DEFAULT_LANGUAGE, language_name
+
 from .llm_support import (
     active_tracker,
+    StructuredReply,
+    in_language,
     request_structured,
+    run_language,
     screen_summarizer,
 )
 
@@ -118,7 +123,7 @@ _MAX_PARALLEL_BATCHES = 8
 CACHE_MAX_AGE_DAYS = 35
 
 
-_JUDGE_PROMPT = """You are screening news articles fetched for the US stock {symbol} ({company}).
+_JUDGE_PROMPT = """You are screening news articles fetched for the US stock {ticker} ({company}).
 For each numbered article you get the publish date, the outlet, the headline, and the feed's abstract.
 Judge ONLY from this text — never guess beyond it.
 
@@ -151,7 +156,7 @@ _ANSWER_REASONED = (
     "materiality (0-5), reason (one short phrase)]."
 )
 
-_GROUP_PROMPT = """These news headlines were all judged relevant to the US stock {symbol} ({company}).
+_GROUP_PROMPT = """These news headlines were all judged relevant to the US stock {ticker} ({company}).
 Group together the ones that cover the SAME underlying event or story — the same announcement, deal, lawsuit, product, or personnel change — even when different outlets word it differently. A headline with no sibling forms its own group.
 
 Answer with strict JSON only, no prose around it:
@@ -161,7 +166,7 @@ Every headline number must appear in exactly one group.
 Headlines:
 {headlines}"""
 
-_RANK_PROMPT = """These news events all concern the US stock {symbol} ({company}) and already passed an importance screen.
+_RANK_PROMPT = """These news events all concern the US stock {ticker} ({company}) and already passed an importance screen.
 Rank them from MOST to LEAST likely to move this stock over the coming weeks.
 
 Answer with strict JSON only, no prose around it:
@@ -171,9 +176,9 @@ listing every event number exactly once, most important first.
 Events:
 {headlines}"""
 
-_SUMMARIZE_PROMPT = """You are writing one-line news card bullets for the US stock {symbol} ({company}).
+_SUMMARIZE_PROMPT = """You are writing one-line news card bullets for the US stock {ticker} ({company}).
 For each numbered article you get the publish date, the outlet, the headline, and the feed's raw abstract. Abstracts are often messy — video-transcript dumps, press-release boilerplate, bare URLs, or several headlines glued together.
-For each article write ONE plain-English sentence, at most {max_words} words, stating what happened, including the key figures when given. Use ONLY facts present in the given text — never add outside knowledge, opinion, or advice. If the abstract is unusable, restate the headline plainly.
+For each article write ONE plain sentence in {language}, at most {max_words} words, stating what happened, including the key figures when given. Use ONLY facts present in the given text — never add outside knowledge, opinion, or advice. If the abstract is unusable, restate the headline plainly in {language}.
 
 Answer with strict JSON only, no prose around it:
 {{"summaries": [[n, "one-sentence summary"], ...]}}
@@ -248,7 +253,7 @@ Events:
 
 _WORLD_SUMMARIZE_PROMPT = """You are writing one-line bullets for a macro/world news card in a stock-trading report.
 For each numbered article you get the publish date, the outlet, the headline, and the feed's raw abstract. Abstracts are often messy — video-transcript dumps, boilerplate, bare URLs, or several headlines glued together.
-For each article write ONE plain-English sentence, at most {max_words} words, stating what happened, including the key figures when given. Use ONLY facts present in the given text — never add outside knowledge, opinion, or advice. If the abstract is unusable, restate the headline plainly.
+For each article write ONE plain sentence in {language}, at most {max_words} words, stating what happened, including the key figures when given. Use ONLY facts present in the given text — never add outside knowledge, opinion, or advice. If the abstract is unusable, restate the headline plainly in {language}.
 
 Answer with strict JSON only, no prose around it:
 {{"summaries": [[n, "one-sentence summary"], ...]}}
@@ -262,7 +267,7 @@ Articles:
 class ScreenPrompts:
     """The four stage templates one screen run uses. ``judge`` gets
     ``{answer_format}`` substituted from the compact/reasoned pair;
-    every template may also use ``{symbol}``/``{company}`` (unused
+    every template may also use ``{ticker}``/``{company}`` (unused
     placeholders passed to ``str.format`` are simply ignored — the
     world templates omit them)."""
 
@@ -305,7 +310,7 @@ def _article_line(index: int, entry: Mapping[str, Any], with_summary: bool) -> s
 
 
 def build_judge_prompt(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     company: Optional[str] = None,
     include_reasons: bool = False,
@@ -318,8 +323,8 @@ def build_judge_prompt(
     time dominates the whole pipeline's latency.
     """
     return prompts.judge.format(
-        symbol=symbol,
-        company=company or symbol,
+        ticker=ticker,
+        company=company or ticker,
         answer_format=(
             prompts.answer_reasoned if include_reasons else prompts.answer_compact
         ),
@@ -331,7 +336,7 @@ def build_judge_prompt(
 
 
 def build_group_prompt(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     company: Optional[str] = None,
     prompts: ScreenPrompts = COMPANY_PROMPTS,
@@ -339,8 +344,8 @@ def build_group_prompt(
     """The grouping prompt: headlines only — aboutness was already
     judged, and headlines suffice to recognize one story twice."""
     return prompts.group.format(
-        symbol=symbol,
-        company=company or symbol,
+        ticker=ticker,
+        company=company or ticker,
         headlines="\n".join(
             _article_line(i, entry, with_summary=False)
             for i, entry in enumerate(entries, start=1)
@@ -349,7 +354,7 @@ def build_group_prompt(
 
 
 def build_rank_prompt(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     company: Optional[str] = None,
     prompts: ScreenPrompts = COMPANY_PROMPTS,
@@ -357,8 +362,8 @@ def build_rank_prompt(
     """The ranking prompt: headlines only, like grouping — the finalists
     already carry importance grades; ranking is a comparative look."""
     return prompts.rank.format(
-        symbol=symbol,
-        company=company or symbol,
+        ticker=ticker,
+        company=company or ticker,
         headlines="\n".join(
             _article_line(i, entry, with_summary=False)
             for i, entry in enumerate(entries, start=1)
@@ -367,17 +372,19 @@ def build_rank_prompt(
 
 
 def build_summarize_prompt(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     company: Optional[str] = None,
     prompts: ScreenPrompts = COMPANY_PROMPTS,
+    language: str = DEFAULT_LANGUAGE,
 ) -> str:
     """The summarizing prompt: headline+abstract lines, one clean card
-    sentence back per article."""
+    sentence back per article, written in ``language`` (the run's)."""
     return prompts.summarize.format(
-        symbol=symbol,
-        company=company or symbol,
+        ticker=ticker,
+        company=company or ticker,
         max_words=SUMMARY_MAX_WORDS,
+        language=language_name(language),
         articles="\n".join(
             _article_line(i, entry, with_summary=True)
             for i, entry in enumerate(entries, start=1)
@@ -472,7 +479,7 @@ def _kept_fallback(index: int) -> Dict[str, Any]:
 
 
 def llm_judge_news(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     summarize: Callable[[str], str] = screen_summarizer,
     company: Optional[str] = None,
@@ -492,7 +499,7 @@ def llm_judge_news(
     warnings: List[str] = []
     count = len(entries)
     prompt = build_judge_prompt(
-        symbol, entries, company=company, include_reasons=include_reasons,
+        ticker, entries, company=company, include_reasons=include_reasons,
         prompts=prompts,
     )
     try:
@@ -534,7 +541,7 @@ class NewsJudgmentCache:
     """Cache of per-article judgments and card summaries, keyed by
     article URL.
 
-    One cache-store entry per symbol. Judgments and
+    One cache-store entry per ticker. Judgments and
     summaries are article-intrinsic, so there is no freshness TTL: an
     entry lives until its article's publish date is older than
     ``CACHE_MAX_AGE_DAYS`` (out of every possible card window), then is
@@ -549,12 +556,12 @@ class NewsJudgmentCache:
 
     def __init__(
         self,
-        symbol: str,
+        ticker: str,
         cache: Optional[CacheStore] = None,
         today: Callable[[], date] = date.today,
     ) -> None:
         self._store = cache if cache is not None else default_cache_store()
-        self._key = f"news_screen_{symbol.upper()}"
+        self._key = f"news_screen_{ticker.upper()}"
         self._today = today
         self._articles: Dict[str, Dict[str, Any]] = {}
         self._summaries: Dict[str, Dict[str, Any]] = {}
@@ -602,16 +609,27 @@ class NewsJudgmentCache:
                 "date": published,
             }
 
-    def get_summary(self, url: Optional[str]) -> Optional[str]:
-        entry = self._summaries.get(url) if url else None
+    # A summary is written in one language, so the cache keys by
+    # language too. English — the language every summary was written in
+    # before 2026-09-26 — keeps the bare URL as its key, so the summaries
+    # already on disk stay valid; other languages tag the URL.
+    @staticmethod
+    def _summary_key(url: str, language: str) -> str:
+        return url if language == DEFAULT_LANGUAGE else f"{language}:{url}"
+
+    def get_summary(
+        self, url: Optional[str], language: str = DEFAULT_LANGUAGE
+    ) -> Optional[str]:
+        entry = self._summaries.get(self._summary_key(url, language)) if url else None
         text = entry.get("text") if entry else None
         return str(text) if text else None
 
     def put_summary(
-        self, url: Optional[str], text: str, published: Optional[str]
+        self, url: Optional[str], text: str, published: Optional[str],
+        language: str = DEFAULT_LANGUAGE,
     ) -> None:
         if url and text:
-            self._summaries[url] = {"text": text, "date": published}
+            self._summaries[self._summary_key(url, language)] = {"text": text, "date": published}
 
     def save(self) -> None:
         # The store never raises: a cold cache tomorrow is acceptable,
@@ -627,7 +645,7 @@ class NewsJudgmentCache:
 
 
 def judge_news_cached(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     summarize: Callable[[str], str] = screen_summarizer,
     company: Optional[str] = None,
@@ -674,12 +692,12 @@ def judge_news_cached(
             batch = [entries[position] for position in positions]
             if tracker is None:
                 return llm_judge_news(
-                    symbol, batch, summarize=summarize, company=company,
+                    ticker, batch, summarize=summarize, company=company,
                     include_reasons=include_reasons, prompts=prompts,
                 )
             with tracker.activate():
                 return llm_judge_news(
-                    symbol, batch, summarize=summarize, company=company,
+                    ticker, batch, summarize=summarize, company=company,
                     include_reasons=include_reasons, prompts=prompts,
                 )
 
@@ -717,7 +735,7 @@ def judge_news_cached(
 
 
 def llm_group_events(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     summarize: Callable[[str], str] = screen_summarizer,
     company: Optional[str] = None,
@@ -737,7 +755,7 @@ def llm_group_events(
 
     count = len(entries)
     singletons = [[index] for index in range(count)]
-    prompt = build_group_prompt(symbol, entries, company=company, prompts=prompts)
+    prompt = build_group_prompt(ticker, entries, company=company, prompts=prompts)
     try:
         reply = request_structured(summarize, prompt, _GroupReplyForm)
     except Exception as exc:
@@ -787,7 +805,7 @@ def llm_group_events(
 
 
 def llm_rank_events(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     summarize: Callable[[str], str] = screen_summarizer,
     company: Optional[str] = None,
@@ -807,7 +825,7 @@ def llm_rank_events(
     if count <= 1:
         return {"order": fallback, "warnings": []}
 
-    prompt = build_rank_prompt(symbol, entries, company=company, prompts=prompts)
+    prompt = build_rank_prompt(ticker, entries, company=company, prompts=prompts)
     try:
         reply = request_structured(summarize, prompt, _RankReplyForm)
     except Exception as exc:
@@ -855,7 +873,7 @@ def llm_rank_events(
 
 
 def llm_summarize_articles(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     summarize: Callable[[str], str] = screen_summarizer,
     company: Optional[str] = None,
@@ -873,10 +891,23 @@ def llm_summarize_articles(
 
     count = len(entries)
     prompt = build_summarize_prompt(
-        symbol, entries, company=company, prompts=prompts
+        ticker, entries, company=company, prompts=prompts, language=run_language(),
     )
+    warnings: List[str] = []
+
+    def ask(attempt_prompt: str) -> StructuredReply:
+        reply = request_structured(summarize, attempt_prompt, _SummariesReplyForm)
+        if reply.retried and reply.valid:
+            warnings.append("news summary needed a retry — first reply was invalid")
+        return reply
+
     try:
-        reply = request_structured(summarize, prompt, _SummariesReplyForm)
+        # The card sentences are read on the report, so they must be in
+        # the run's language; a wrong-language batch is asked again.
+        reply = in_language(
+            ask, prompt, lambda found: _summary_texts(found.parsed, count),
+            "news summary", warnings,
+        )
     except Exception as exc:
         return {
             "summaries": [None] * count,
@@ -884,27 +915,8 @@ def llm_summarize_articles(
                 f"news summary LLM call failed: {exc} — feed abstracts shown verbatim"
             ],
         }
-    warnings: List[str] = []
-    if reply.retried and reply.valid:
-        warnings.append("news summary needed a retry — first reply was invalid")
-
-    parsed = reply.parsed
-    raw_summaries = parsed.get("summaries") if isinstance(parsed, Mapping) else None
-    texts: List[Optional[str]] = [None] * count
-    if isinstance(raw_summaries, list):
-        for pair in raw_summaries:
-            if (
-                isinstance(pair, list)
-                and len(pair) >= 2
-                and isinstance(pair[0], int)
-                and not isinstance(pair[0], bool)
-                and 1 <= pair[0] <= count
-                and isinstance(pair[1], str)
-                and pair[1].strip()
-            ):
-                # First summary per article wins; duplicates are noise.
-                if texts[pair[0] - 1] is None:
-                    texts[pair[0] - 1] = " ".join(pair[1].split())
+    assert reply is not None  # request_structured always answers
+    texts = _summary_texts(reply.parsed, count)
     missing = sum(1 for text in texts if text is None)
     if missing == count:
         warnings.append(
@@ -918,8 +930,29 @@ def llm_summarize_articles(
     return {"summaries": texts, "warnings": warnings}
 
 
+def _summary_texts(parsed: Any, count: int) -> List[Optional[str]]:
+    """The summaries in article order (None where the reply gave none),
+    whitespace flattened; the first summary per article wins."""
+    raw_summaries = parsed.get("summaries") if isinstance(parsed, Mapping) else None
+    texts: List[Optional[str]] = [None] * count
+    if isinstance(raw_summaries, list):
+        for pair in raw_summaries:
+            if (
+                isinstance(pair, list)
+                and len(pair) >= 2
+                and isinstance(pair[0], int)
+                and not isinstance(pair[0], bool)
+                and 1 <= pair[0] <= count
+                and isinstance(pair[1], str)
+                and pair[1].strip()
+            ):
+                if texts[pair[0] - 1] is None:
+                    texts[pair[0] - 1] = " ".join(pair[1].split())
+    return texts
+
+
 def summarize_articles_cached(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     summarize: Callable[[str], str] = screen_summarizer,
     company: Optional[str] = None,
@@ -932,8 +965,9 @@ def summarize_articles_cached(
     persist as fact."""
     texts: List[Optional[str]] = [None] * len(entries)
     uncached: List[int] = []
+    language = run_language()
     for position, entry in enumerate(entries):
-        hit = cache.get_summary(entry.get("url")) if cache else None
+        hit = cache.get_summary(entry.get("url"), language) if cache else None
         if hit is not None:
             texts[position] = hit
         else:
@@ -942,7 +976,7 @@ def summarize_articles_cached(
     warnings: List[str] = []
     if uncached:
         outcome = llm_summarize_articles(
-            symbol,
+            ticker,
             [entries[position] for position in uncached],
             summarize=summarize,
             company=company,
@@ -953,7 +987,7 @@ def summarize_articles_cached(
             texts[position] = text
             if cache and text:
                 entry = entries[position]
-                cache.put_summary(entry.get("url"), text, entry.get("date"))
+                cache.put_summary(entry.get("url"), text, entry.get("date"), language)
         if cache:
             cache.save()
     return {
@@ -1043,7 +1077,7 @@ def select_events(
 
 
 def screen_news(
-    symbol: str,
+    ticker: str,
     entries: Sequence[Mapping[str, Any]],
     summarize: Callable[[str], str] = screen_summarizer,
     company: Optional[str] = None,
@@ -1069,7 +1103,7 @@ def screen_news(
     one-sentence summary, or None when the feed's own words must serve.
     """
     judged = judge_news_cached(
-        symbol,
+        ticker,
         entries,
         summarize=summarize,
         company=company,
@@ -1086,7 +1120,7 @@ def screen_news(
         and (judgment["materiality"] is None or judgment["materiality"] >= threshold)
     ]
     grouping = llm_group_events(
-        symbol,
+        ticker,
         [entries[index] for index in candidates],
         summarize=summarize,
         company=company,
@@ -1112,7 +1146,7 @@ def screen_news(
     trimmed = 0
     if len(selected) > max_events:
         ranking = llm_rank_events(
-            symbol,
+            ticker,
             [event["entry"] for event in selected],
             summarize=summarize,
             company=company,
@@ -1128,7 +1162,7 @@ def screen_news(
         )
 
     summaries = summarize_articles_cached(
-        symbol,
+        ticker,
         [event["entry"] for event in selected],
         summarize=summarize,
         company=company,
