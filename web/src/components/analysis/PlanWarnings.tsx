@@ -549,7 +549,7 @@ export const WarningsCell = ({
   if (warnings.length === 0) {
     // Same quiet gray as the adjusted row's "keep".
     return (
-      <span data-testid={`plan-warnings-${column}`} className="text-gray-500">
+      <span data-testid={`plan-warnings-${column}`} className="text-ink-4">
         {t('tiered.warn.none')}
       </span>
     );

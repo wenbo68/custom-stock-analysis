@@ -77,6 +77,22 @@ export default {
         // color utility and silently drop the font-size one (bug found
         // 2026-09-24 — step titles inside a text-xs block rendered at 12px).
         elevated: 'hsl(var(--elevated))',
+        // App palette: the roles every component names instead of a raw
+        // gray/emerald/red shade. Light and dark values live in index.css.
+        // Text strength ladder (1 = strongest, 5 = faintest).
+        ink: {
+          1: 'var(--ink-1)',
+          2: 'var(--ink-2)',
+          3: 'var(--ink-3)',
+          4: 'var(--ink-4)',
+          5: 'var(--ink-5)',
+        },
+        // Meaning colors: good / bad / needs attention / in progress / link.
+        positive: { DEFAULT: 'var(--positive)', hover: 'var(--positive-hover)' },
+        negative: { DEFAULT: 'var(--negative)', hover: 'var(--negative-hover)' },
+        caution: { DEFAULT: 'var(--caution)', hover: 'var(--caution-hover)' },
+        info: 'var(--info)',
+        link: { DEFAULT: 'var(--link)', hover: 'var(--link-hover)' },
         hover: 'hsl(var(--hover))',
         'secondary-bg': 'hsl(var(--secondary))',
         'muted-bg': 'hsl(var(--muted))',

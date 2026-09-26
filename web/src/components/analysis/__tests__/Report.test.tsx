@@ -554,9 +554,9 @@ describe('Report evidence vote tree', () => {
   it('shows colored item-outlook words and counts them in the section headers', async () => {
     await renderTreeV9();
     const t1 = screen.getByTestId('tree-item-T1');
-    expect(within(t1).getByText(/bullish|看多/)).toHaveClass('text-emerald-300');
+    expect(within(t1).getByText(/bullish|看多/)).toHaveClass('text-positive');
     const t2 = screen.getByTestId('tree-item-T2');
-    expect(within(t2).getByText(/bearish|看空/)).toHaveClass('text-red-300');
+    expect(within(t2).getByText(/bearish|看空/)).toHaveClass('text-negative');
     // Headers count only the surviving vote items: technicals 1 bullish, 0 bearish.
     expect(screen.getByTestId('vote-tree')).toHaveTextContent(/1 bullish, 0 bearish|1 看多, 0 看空/);
   });

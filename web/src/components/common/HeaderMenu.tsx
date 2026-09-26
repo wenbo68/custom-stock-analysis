@@ -65,7 +65,7 @@ export function HeaderMenu<Value extends string>({
         <div
           role="menu"
           aria-label={menuLabel}
-          className="absolute right-0 z-[100] mt-2 min-w-[8rem] overflow-hidden rounded-2xl border border-border/70 bg-elevated p-1.5 shadow-[0_24px_48px_rgba(3,8,20,0.32)] backdrop-blur-xl"
+          className="absolute right-0 z-[100] mt-2 min-w-[8rem] overflow-hidden rounded-2xl border border-border/70 bg-popover p-1.5 shadow-[0_24px_48px_rgba(3,8,20,0.32)] backdrop-blur-xl"
         >
           {options.map(({ value: optionValue, label: optionLabel, icon: OptionIcon }) => {
             const isActive = value === optionValue;

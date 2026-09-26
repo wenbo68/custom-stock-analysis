@@ -528,7 +528,7 @@ describe('Report weighted vote formula', () => {
     // A cited value renders as a jump link — the same claim contract as
     // the vote items in the details fold.
     const valueLink = within(outline).getByRole('button', { name: '3.10' });
-    expect(valueLink.className).toContain('text-blue-300');
+    expect(valueLink.className).toContain('text-link');
   });
 
   it('the header score opens the score formula in a modal', () => {

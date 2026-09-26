@@ -130,7 +130,7 @@ export const LinkedClaimV7 = ({
       <button
         key={`l${index}`}
         type="button"
-        className="cursor-pointer text-blue-300 underline decoration-1 decoration-blue-400/60 underline-offset-2 hover:text-blue-200"
+        className="cursor-pointer text-link underline decoration-1 decoration-link/60 underline-offset-2 hover:text-link-hover"
         onClick={() => jumpToRef(marker.link.ref)}
       >
         {claim.slice(marker.start, marker.end)}
@@ -146,7 +146,7 @@ export const LinkedClaimV7 = ({
       <button
         key={`u${index}`}
         type="button"
-        className="ml-1 cursor-pointer text-blue-300 hover:text-blue-200"
+        className="ml-1 cursor-pointer text-link hover:text-link-hover"
         onClick={() => jumpToRef(link.ref)}
       >
         ↗
@@ -156,10 +156,10 @@ export const LinkedClaimV7 = ({
   return (
     <span
       className={cn(
-        'text-gray-200',
+        'text-ink-1',
         // The strikethrough IS the outlook: code could not verify this
         // vote item's citations even after the fix rounds.
-        struck && 'line-through decoration-gray-500 opacity-60',
+        struck && 'line-through decoration-ink-4 opacity-60',
       )}
     >
       {segments}
@@ -206,7 +206,7 @@ export const LinkedTextV8 = ({
       <button
         key={`v${index}`}
         type="button"
-        className="cursor-pointer text-blue-300 underline decoration-1 decoration-blue-400/60 underline-offset-2 hover:text-blue-200"
+        className="cursor-pointer text-link underline decoration-1 decoration-link/60 underline-offset-2 hover:text-link-hover"
         onClick={() => jumpToRef(marker.link.ref)}
       >
         {text.slice(marker.start, marker.end)}
@@ -222,7 +222,7 @@ export const LinkedTextV8 = ({
       className={cn(
         // The strikethrough IS the outlook: struck by the code citation
         // check, or voted out of the final pool.
-        struck && 'line-through decoration-gray-500 opacity-60',
+        struck && 'line-through decoration-ink-4 opacity-60',
       )}
     >
       {segments}
@@ -232,7 +232,7 @@ export const LinkedTextV8 = ({
           <button
             key={`c${index}`}
             type="button"
-            className="ml-1 cursor-pointer text-blue-300 underline decoration-1 decoration-blue-400/60 underline-offset-2 hover:text-blue-200"
+            className="ml-1 cursor-pointer text-link underline decoration-1 decoration-link/60 underline-offset-2 hover:text-link-hover"
             onClick={() => jumpToRef(link.ref)}
           >
             [{number}]
@@ -248,7 +248,7 @@ export const LinkedTextV8 = ({
 export const MarkButton = ({ label, onClick }: { label: string; onClick: () => void }) => (
   <button
     type="button"
-    className="cursor-pointer font-semibold text-gray-400 hover:text-gray-200"
+    className="cursor-pointer font-semibold text-ink-3 hover:text-ink-1"
     onClick={onClick}
   >
     {label}
@@ -350,7 +350,7 @@ const VoteItem = ({
       className="grid grid-cols-[auto_1fr] gap-x-2 text-xs"
     >
       <span className="flex items-baseline gap-1.5 whitespace-nowrap">
-        <span className="font-mono text-gray-500">{item.id}</span>
+        <span className="font-mono text-ink-4">{item.id}</span>
         <span className={cn('font-semibold', OUTLOOK_TEXT[item.item_outlook])}>
           {t(item.item_outlook === 'bullish' ? 'tiered.tree.bullish' : 'tiered.tree.bearish')}
         </span>
@@ -359,7 +359,7 @@ const VoteItem = ({
           <button
             type="button"
             data-testid={`tree-score-${item.id}`}
-            className="cursor-pointer font-mono text-gray-400 hover:text-gray-200"
+            className="cursor-pointer font-mono text-ink-3 hover:text-ink-1"
             onClick={showMedian}
           >
             {item.score}
@@ -398,7 +398,7 @@ const VoteItem = ({
           />
         ))}
       </span>
-      <span className="text-gray-200">
+      <span className="text-ink-1">
         <LinkedTextV8 text={item.claim} links={item.links ?? []} struck={dead} />
       </span>
     </li>
@@ -508,7 +508,7 @@ const VoteTreeBody = ({ runId, loader }: { runId: string; loader: VoteItemsLoade
         <div data-testid="vote-tree" className="flex flex-col gap-3">
           <div data-testid="tree-explain">
             <SectionLabel>{t('tiered.tree.howItWorks')}</SectionLabel>
-            <ol className="flex list-decimal flex-col gap-1 pl-4 text-xs text-gray-400">
+            <ol className="flex list-decimal flex-col gap-1 pl-4 text-xs text-ink-3">
               {EXPLAIN_KEYS.map((key) => (
                 <li key={key}>{t(key)}</li>
               ))}
@@ -516,10 +516,10 @@ const VoteTreeBody = ({ runId, loader }: { runId: string; loader: VoteItemsLoade
           </div>
 
           {state.kind === 'loading' ? (
-            <p className="text-xs text-gray-500">{t('tiered.tree.loading')}</p>
+            <p className="text-xs text-ink-4">{t('tiered.tree.loading')}</p>
           ) : null}
           {state.kind === 'error' ? (
-            <p className="text-xs text-amber-300">
+            <p className="text-xs text-caution">
               {t('tiered.tree.loadError', { error: state.message })}
             </p>
           ) : null}
@@ -536,9 +536,9 @@ const VoteTreeBody = ({ runId, loader }: { runId: string; loader: VoteItemsLoade
                     : group.dataReport}
                   {': '}
                   {/* Only the counts wear color — the words stay plain. */}
-                  <span className="text-emerald-300">{up}</span>
+                  <span className="text-positive">{up}</span>
                   {` ${t('tiered.tree.bullish')}, `}
-                  <span className="text-red-300">{down}</span>
+                  <span className="text-negative">{down}</span>
                   {` ${t('tiered.tree.bearish')}`}
                 </SectionLabel>
                 <ul className="flex flex-col gap-1.5">

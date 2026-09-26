@@ -23,13 +23,13 @@
 
   /* HSL tokens used by Tailwind-based components */
 
-  --background: 216 33% 97%;
+  --background: 220 20% 95%;
   --foreground: 228 35% 12%;
   --card: 0 0% 100%;
   --card-foreground: 228 35% 12%;
   --popover: 0 0% 100%;
   --popover-foreground: 228 35% 12%;
-  --primary: 193 100% 43%;
+  --primary: 193 100% 31%;
   --primary-foreground: 216 33% 97%;
   --secondary: 214 32% 91%;
   --secondary-foreground: 228 35% 16%;
@@ -39,14 +39,37 @@
   --accent-foreground: 228 35% 16%;
   --destructive: 349 82% 56%;
   --destructive-foreground: 210 33% 98%;
-  --border: 217 28% 84%;
-  --input: 217 28% 84%;
+  --border: 216 12% 84%;
+  --input: 216 12% 84%;
   --ring: 193 100% 43%;
   --radius: 1rem;
-  --elevated: 0 0% 100%;
-  --hover: 214 29% 90%;
+  --elevated: 220 14% 93%;
+  --hover: 220 13% 88%;
   --secondary-text: 224 18% 28%;
   --muted-text: 224 12% 35%;
+
+  /* ---- App palette (light). The components only ever name a role
+     below; the light and dark values live here and in .dark. ----
+     Surfaces: --card is level 1 (a panel on the page), --elevated is
+     level 2 (a card, input or menu on a panel), --hover is level 3. */
+
+  /* Text strength ladder, 1 = strongest, 5 = faintest. */
+  --ink-1: #101828;
+  --ink-2: #364153;
+  --ink-3: #4a5565;
+  --ink-4: #6a7282;
+  --ink-5: #99a1af;
+
+  /* Meaning colors: good / bad / needs attention / in progress / link. */
+  --positive: #007a55;
+  --positive-hover: #006045;
+  --negative: #c10007;
+  --negative-hover: #9f0712;
+  --caution: #bb4d00;
+  --caution-hover: #973c00;
+  --info: #0069a8;
+  --link: #1447e6;
+  --link-hover: #193cb8;
 
   --color-cyan: hsl(var(--primary));
   --color-cyan-dim: hsl(var(--primary) / 0.8);
@@ -304,9 +327,9 @@
 .dark {
   --background: 228 35% 7%;
   --foreground: 210 33% 98%;
-  --card: 230 24% 10%;
+  --card: 220 43% 11%;
   --card-foreground: 210 33% 98%;
-  --popover: 230 24% 10%;
+  --popover: 216 31% 17%;
   --popover-foreground: 210 33% 98%;
   --primary: 190 100% 50%;
   --primary-foreground: 228 35% 8%;
@@ -318,13 +341,30 @@
   --accent-foreground: 210 33% 98%;
   --destructive: 349 100% 63%;
   --destructive-foreground: 210 33% 98%;
-  --border: 226 19% 20%;
-  --input: 226 19% 20%;
+  --border: 217 21% 27%;
+  --input: 217 21% 27%;
   --ring: 190 100% 50%;
-  --elevated: 230 22% 12%;
-  --hover: 231 20% 16%;
+  --elevated: 216 31% 17%;
+  --hover: 217 21% 27%;
   --secondary-text: 228 16% 72%;
   --muted-text: 228 10% 48%;
+
+  /* ---- App palette (dark): the same roles as in :root. ---- */
+  --ink-1: #e5e7eb;
+  --ink-2: #d1d5dc;
+  --ink-3: #99a1af;
+  --ink-4: #6a7282;
+  --ink-5: #4a5565;
+
+  --positive: #5ee9b5;
+  --positive-hover: #a4f4cf;
+  --negative: #ffa2a2;
+  --negative-hover: #ffc9c9;
+  --caution: #ffd230;
+  --caution-hover: #fee685;
+  --info: #74d4ff;
+  --link: #8ec5ff;
+  --link-hover: #bedbff;
 
   --color-cyan: hsl(var(--primary));
   --color-cyan-dim: hsl(var(--primary) / 0.8);
@@ -847,12 +887,12 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: hsl(var(--foreground) / 0.15);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: hsl(var(--foreground) / 0.3);
 }
 
 /* ============ Animations ============ */

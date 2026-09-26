@@ -145,7 +145,7 @@ describe('ChatPage', () => {
     const band = screen.getByTestId('chat-band');
     expect(band).toHaveClass('absolute', 'top-0', 'right-0');
     expect(band.className).not.toMatch(/inset-x-0|bg-/);
-    expect(screen.getByTestId('chat-band-content').className).toMatch(/bg-black\/55.*shadow-/);
+    expect(screen.getByTestId('chat-band-content').className).toMatch(/bg-background\/85.*shadow-/);
     const controls = screen.getByTestId('header-controls');
     expect(band).toContainElement(controls);
     for (const menu of ['mode-menu', 'language-menu', 'theme-menu']) {
@@ -155,14 +155,14 @@ describe('ChatPage', () => {
     const sidebar = screen.getByTestId('chat-sidebar');
     expect(sidebar).not.toContainElement(controls);
     // The panel is level 1; the composer, directly on the page, is level 1 too.
-    expect(sidebar).toHaveClass('bg-gray-900');
-    expect(screen.getByTestId('chat-composer')).toHaveClass('bg-gray-900');
+    expect(sidebar).toHaveClass('bg-surface-1');
+    expect(screen.getByTestId('chat-composer')).toHaveClass('bg-surface-1');
     // The message box floats at the bottom of the chat column, on a shade.
     const dock = screen.getByTestId('chat-dock');
     expect(screen.getByTestId('chat-column')).toHaveClass('relative');
     expect(dock).toHaveClass('absolute', 'bottom-0');
     expect(dock.className).not.toMatch(/bg-/);
-    expect(screen.getByTestId('chat-dock-content').className).toMatch(/bg-black\/55.*shadow-/);
+    expect(screen.getByTestId('chat-dock-content').className).toMatch(/bg-background\/85.*shadow-/);
     expect(dock).toContainElement(screen.getByTestId('chat-composer'));
   });
 
@@ -180,7 +180,7 @@ describe('ChatPage', () => {
     const main = screen.getByRole('main');
     expect(main.className).not.toMatch(/max-w-|px-|gap-/);
     const column = screen.getByTestId('chat-column');
-    expect(column.className).not.toMatch(/max-w-|mx-auto|bg-gray-900|p-4/);
+    expect(column.className).not.toMatch(/max-w-|mx-auto|bg-surface-1|p-4/);
     // The text inside the scroll box is capped and centered, and keeps a bottom inset for the dock.
     fireEvent.click(await screen.findByTestId('chat-conversation'));
     const thread = await screen.findByTestId('chat-thread');

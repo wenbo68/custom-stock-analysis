@@ -389,10 +389,10 @@ const AnalysisPage = () => {
   return (
     <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 pb-8 pt-4 md:px-6 lg:px-8">
       <section className="flex flex-col gap-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-4">
           {t('tiered.form.title')}
         </h2>
-        <div className="rounded bg-gray-900 p-4 text-gray-400 sm:p-6">
+        <div className="rounded bg-surface-1 p-4 text-ink-3 sm:p-6">
           <RunForm
             ticker={ticker}
             tier={tier}
@@ -419,10 +419,10 @@ const AnalysisPage = () => {
       </section>
 
       <section className="flex flex-col gap-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-4">
           {t('tiered.history.title')}
         </h2>
-        <div className="rounded bg-gray-900 p-4 text-gray-400 sm:p-6">
+        <div className="rounded bg-surface-1 p-4 text-ink-3 sm:p-6">
           <RunHistory
             runs={runs}
             tickers={tickers}

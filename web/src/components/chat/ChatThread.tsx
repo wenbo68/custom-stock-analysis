@@ -158,7 +158,7 @@ const TypingDots = () => (
     {[0, 150, 300].map((delay) => (
       <span
         key={delay}
-        className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-500"
+        className="h-1.5 w-1.5 animate-bounce rounded-full bg-ink-4"
         style={{ animationDelay: `${delay}ms` }}
       />
     ))}
@@ -169,7 +169,7 @@ const TypingDots = () => (
 // same size and color as the clickable one.
 const PlainUsage = ({ text }: { text: string }) => (
   <div className="text-xs">
-    <p className="text-gray-600" data-testid="chat-usage">
+    <p className="text-ink-5" data-testid="chat-usage">
       {text}
     </p>
   </div>
@@ -181,15 +181,15 @@ const PlainUsage = ({ text }: { text: string }) => (
 // 2026-09-24). Everything under it is indented one step in, and what a
 // fold under that opens is indented one more (owner request
 // 2026-09-24): the token line's transcript, then an input's text.
-const StepLine = ({ text }: { text: string }) => <p className="text-base font-semibold text-gray-100">{text}</p>;
+const StepLine = ({ text }: { text: string }) => <p className="text-base font-semibold text-ink-1">{text}</p>;
 const STEP_BODY = 'flex min-w-0 flex-col gap-2 pl-4';
 const FOLD_INDENT = 'pl-4';
 /** The box an opened input/output sits in: level-1 backdrop, one indent in from its line. */
 const FOLD_CONTENT = cn(CHAT_SURFACE_1, 'ml-4');
 // A fact line: quiet label, bright value — the transcript's styling.
-const FACT_LABEL = 'text-gray-500';
-const FACT_VALUE = 'font-semibold text-gray-200';
-const FOLD_TEXT = 'min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] text-gray-400';
+const FACT_LABEL = 'text-ink-4';
+const FACT_VALUE = 'font-semibold text-ink-1';
+const FOLD_TEXT = 'min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] text-ink-3';
 
 const MessageRow = ({
   message,
@@ -206,7 +206,7 @@ const MessageRow = ({
   if (message.role === 'user') {
     return (
       <div className="flex justify-end" data-testid="chat-user">
-        <p className={cn('min-w-0 max-w-[85%] whitespace-pre-wrap rounded px-4 py-2.5 text-sm leading-relaxed text-gray-200', CHAT_SURFACE_1)}>
+        <p className={cn('min-w-0 max-w-[85%] whitespace-pre-wrap rounded px-4 py-2.5 text-sm leading-relaxed text-ink-1', CHAT_SURFACE_1)}>
           {message.text}
         </p>
       </div>
@@ -276,17 +276,17 @@ const ReplyRow = ({
       <StepLine text={stepText} />
       <div className={STEP_BODY}>
         {message.error ? (
-          <p className="text-sm text-red-300">{message.text}</p>
+          <p className="text-sm text-negative">{message.text}</p>
         ) : message.text ? (
-          <div className="text-sm leading-relaxed text-gray-300">
+          <div className="text-sm leading-relaxed text-ink-2">
             <ChatMarkdown text={message.text} />
           </div>
         ) : null}
         {message.notice === 'tool_call_limit' ? (
-          <p className="text-xs text-amber-300">{t('chat.notice.toolCallLimit')}</p>
+          <p className="text-xs text-caution">{t('chat.notice.toolCallLimit')}</p>
         ) : null}
         {message.notice === 'wrong_language' ? (
-          <p className="text-xs text-amber-300">{t('chat.notice.wrongLanguage')}</p>
+          <p className="text-xs text-caution">{t('chat.notice.wrongLanguage')}</p>
         ) : null}
         {canOpen ? (
           <UsageLine
@@ -337,8 +337,8 @@ const DECISION_TEXT = {
 // its red (styles.ts OUTLOOK_TEXT: bullish emerald-300, bearish red-300).
 const DECISION_COLOR: Record<Decision, string> = {
   ask: '',
-  approved: 'text-emerald-300',
-  declined: 'text-red-300',
+  approved: 'text-positive',
+  declined: 'text-negative',
 };
 
 // Where the tool call stands: waiting for the user's answer, processing
@@ -356,10 +356,10 @@ const STATUS_TEXT: Record<Status, `chat.tool.status.${Status}`> = {
 };
 
 const STATUS_COLOR: Record<Status, string> = {
-  waiting: 'text-amber-300',
-  processing: 'text-sky-300',
-  done: 'text-emerald-300',
-  failed: 'text-red-300',
+  waiting: 'text-caution',
+  processing: 'text-info',
+  done: 'text-positive',
+  failed: 'text-negative',
 };
 
 // One tool call, in the same shape as an LLM call's transcript (owner
@@ -437,7 +437,7 @@ const ToolStep = ({
               testId="chat-tool-output"
               surfaceClassName={FOLD_CONTENT}
             >
-              {output.truncated ? <p className="text-amber-300">{t('chat.tool.truncated')}</p> : null}
+              {output.truncated ? <p className="text-caution">{t('chat.tool.truncated')}</p> : null}
               <pre className={FOLD_TEXT}>{output.text}</pre>
             </FactFold>
           ) : null}
@@ -469,17 +469,17 @@ const DecisionLine = ({ decision, onDecide }: { decision: Decision; onDecide?: (
             data-testid="chat-pending-yes"
             disabled={onDecide == null}
             onClick={() => onDecide?.(true)}
-            className={cn('cursor-pointer hover:text-emerald-200 disabled:cursor-default', DECISION_COLOR.approved)}
+            className={cn('cursor-pointer hover:text-positive-hover disabled:cursor-default', DECISION_COLOR.approved)}
           >
             {t('chat.tool.approve')}
           </button>
-          <span className="mx-1.5 text-gray-600">|</span>
+          <span className="mx-1.5 text-ink-5">|</span>
           <button
             type="button"
             data-testid="chat-pending-no"
             disabled={onDecide == null}
             onClick={() => onDecide?.(false)}
-            className={cn('cursor-pointer hover:text-red-200 disabled:cursor-default', DECISION_COLOR.declined)}
+            className={cn('cursor-pointer hover:text-negative-hover disabled:cursor-default', DECISION_COLOR.declined)}
           >
             {t('chat.tool.decline')}
           </button>

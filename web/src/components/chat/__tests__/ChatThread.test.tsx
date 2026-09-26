@@ -60,7 +60,7 @@ describe('ChatThread', () => {
     // reply text, with everything else indented under it (owner
     // request 2026-09-24).
     for (const step of steps) {
-      expect(step.firstElementChild).toHaveClass('text-base', 'font-semibold', 'text-gray-100');
+      expect(step.firstElementChild).toHaveClass('text-base', 'font-semibold', 'text-ink-1');
       expect(step.children).toHaveLength(2);
       expect(step.lastElementChild).toHaveClass('pl-4');
     }
@@ -77,7 +77,7 @@ describe('ChatThread', () => {
     // decision line (owner request 2026-09-24).
     const status = within(trace).getByTestId('chat-tool-status');
     expect(status).toHaveTextContent(/^(status: done|状态: 已完成)$/);
-    expect(status.lastElementChild).toHaveClass('text-emerald-300');
+    expect(status.lastElementChild).toHaveClass('text-positive');
     expect(within(trace).queryByTestId('chat-tool-decision')).toBeNull();
     // The status line sits between the name and the input.
     expect(status.compareDocumentPosition(screen.getByTestId('chat-tool-input')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -92,7 +92,7 @@ describe('ChatThread', () => {
       expect.stringMatching(/^(This step used 0 tokens|本步骤使用了 0 tokens)$/),
       expect.stringMatching(/^(This step used 5040 tokens|本步骤使用了 5040 tokens)$/),
     ]);
-    expect(usages[0]).toHaveClass('text-gray-600');
+    expect(usages[0]).toHaveClass('text-ink-5');
     expect(usages[0].closest('.text-xs')).not.toBeNull();
     // Bot steps are bare text: no backdrop, no card padding (owner
     // request 2026-09-24); the user's line keeps the level-1 surface.
@@ -101,7 +101,7 @@ describe('ChatThread', () => {
     for (const step of [...replies, trace]) {
       expect(step.className).not.toMatch(/bg-gray-|p-5/);
     }
-    expect(screen.getByTestId('chat-user').firstElementChild).toHaveClass('bg-gray-900');
+    expect(screen.getByTestId('chat-user').firstElementChild).toHaveClass('bg-surface-1');
     expect(replies[0]).toContainElement(usages[0]);
     expect(trace).toContainElement(usages[1]);
     expect(replies[1]).toContainElement(usages[2]);
@@ -147,7 +147,7 @@ describe('ChatThread', () => {
     expect(trace.lastElementChild).toContainElement(toolUsage);
     expect(toolUsage.tagName).toBe('P');
     expect(replyUsage.tagName).toBe('BUTTON');
-    expect(toolUsage).toHaveClass('text-gray-600');
+    expect(toolUsage).toHaveClass('text-ink-5');
     expect(toolUsage.closest('.text-xs')).not.toBeNull();
   });
 
@@ -163,13 +163,13 @@ describe('ChatThread', () => {
     const card = screen.getByTestId('chat-transcript');
     // Inside the reply's own card, not a second card on top of it.
     expect(screen.getAllByTestId('chat-assistant').at(-1)).toContainElement(card);
-    expect(card).not.toHaveClass('bg-gray-800', 'bg-gray-900');
+    expect(card).not.toHaveClass('bg-surface-2', 'bg-surface-1');
     // The transcript is indented under its token line, and an opened
     // reply is indented once more under its own line, on level 1 (the
     // step under it is bare).
     expect(card).toHaveClass('pl-4');
     fireEvent.click(screen.getByTestId('transcript-output'));
-    expect(screen.getByTestId('transcript-output').nextElementSibling).toHaveClass('bg-gray-900', 'ml-4');
+    expect(screen.getByTestId('transcript-output').nextElementSibling).toHaveClass('bg-surface-1', 'ml-4');
     fireEvent.click(screen.getByTestId('transcript-output'));
     // No "LLM call" title and no "for: chat" fact: in the chat they never
     // vary (owner request 2026-09-24). The facts that do vary stay.
@@ -220,7 +220,7 @@ describe('ChatThread', () => {
     const output = screen.getByText(/"total": 1/);
     expect(output).toBeInTheDocument();
     // The opened text is on level 1, indented under its line; the step under it is bare.
-    expect(output.parentElement).toHaveClass('bg-gray-900', 'ml-4');
+    expect(output.parentElement).toHaveClass('bg-surface-1', 'ml-4');
     // Shown whole: no capped, scrolling box around the text.
     expect(output.className).not.toMatch(/max-h-|overflow-y/);
   });
@@ -240,12 +240,12 @@ describe('ChatThread', () => {
     expect(screen.getByText(/^(Step 2: tool call|第 2 步：工具调用)$/)).toBeVisible();
     const decision = within(trace).getByTestId('chat-tool-decision');
     expect(decision).toHaveTextContent(/^(decision: declined|决定: 已拒绝)$/);
-    expect(decision.lastElementChild).toHaveClass('text-red-300');
+    expect(decision.lastElementChild).toHaveClass('text-negative');
     // An answer with an error code is a failed step, in the run history's
     // red, right under the decision (owner request 2026-09-24).
     const status = within(trace).getByTestId('chat-tool-status');
     expect(status).toHaveTextContent(/^(status: failed|状态: 失败)$/);
-    expect(status.lastElementChild).toHaveClass('text-red-300');
+    expect(status.lastElementChild).toHaveClass('text-negative');
     expect(decision.nextElementSibling).toBe(status);
     // No error line of its own (owner request 2026-09-25): the code is
     // in the output fold.
@@ -262,7 +262,7 @@ describe('ChatThread', () => {
         { seq: 3, role: 'assistant', created_at: null, text: 'Hello in the wrong tongue', notice: 'wrong_language' },
       ],
     });
-    expect(screen.getByText('The model call failed: quota')).toHaveClass('text-red-300');
+    expect(screen.getByText('The model call failed: quota')).toHaveClass('text-negative');
     expect(screen.getByText(/tool-call limit|工具调用上限/)).toBeInTheDocument();
     expect(screen.getByText(/not in the chosen language|不是所选的语言/)).toBeInTheDocument();
   });
@@ -285,7 +285,7 @@ describe('ChatThread', () => {
     // under the decision (owner request 2026-09-24).
     const status = within(held).getByTestId('chat-tool-status');
     expect(status).toHaveTextContent(/^(status: waiting|状态: 等待中)$/);
-    expect(status.lastElementChild).toHaveClass('text-amber-300');
+    expect(status.lastElementChild).toHaveClass('text-caution');
     expect(decision.nextElementSibling).toBe(status);
     fireEvent.click(within(held).getByTestId('chat-tool-input'));
     expect(screen.getByText(/"run_id": "q"/)).toBeInTheDocument();
@@ -347,10 +347,10 @@ describe('ChatThread', () => {
     rerender(view({ working: true }));
     const decision = screen.getByTestId('chat-tool-decision');
     expect(decision).toHaveTextContent(/^(decision: approved|决定: 已同意)$/);
-    expect(decision.lastElementChild).toHaveClass('text-emerald-300');
+    expect(decision.lastElementChild).toHaveClass('text-positive');
     const status = screen.getByTestId('chat-tool-status');
     expect(status).toHaveTextContent(/^(status: processing|状态: 处理中)$/);
-    expect(status.lastElementChild).toHaveClass('text-sky-300');
+    expect(status.lastElementChild).toHaveClass('text-info');
     expect(screen.queryByTestId('chat-pending-yes')).toBeNull();
     expect(screen.queryByTestId('chat-working')).toBeNull();
     // The request failed and the call is still held: the question is
@@ -358,7 +358,7 @@ describe('ChatThread', () => {
     rerender(view({ working: false }));
     expect(decision).toHaveTextContent(/^(decision: approve\s*\|\s*decline|决定: 同意\s*\|\s*拒绝)$/);
     expect(status).toHaveTextContent(/^(status: waiting|状态: 等待中)$/);
-    expect(status.lastElementChild).toHaveClass('text-amber-300');
+    expect(status.lastElementChild).toHaveClass('text-caution');
   });
 
   it('never says processing on the decision line, disables the answers while working, and shows the pulsing dots otherwise', () => {

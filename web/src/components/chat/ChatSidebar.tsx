@@ -47,19 +47,19 @@ export const ChatSidebar = ({ conversations, activeId, onSelect, onNew, onDelete
   return (
     <nav
       aria-label={t('chat.sidebar.title')}
-      className={cn('flex min-h-0 flex-1 flex-col py-3 text-gray-400', CHAT_SURFACE_1)}
+      className={cn('flex min-h-0 flex-1 flex-col py-3 text-ink-3', CHAT_SURFACE_1)}
       data-testid="chat-sidebar"
     >
       {/* No right inset on the row: the "+" carries the trash buttons' own side padding, so the icons line up. */}
       <div className="flex items-center justify-between gap-2 pl-3" data-testid="chat-sidebar-heading">
-        <h2 className="py-1.5 text-xs font-semibold uppercase tracking-wider text-gray-500">{t('chat.sidebar.title')}</h2>
+        <h2 className="py-1.5 text-xs font-semibold uppercase tracking-wider text-ink-4">{t('chat.sidebar.title')}</h2>
         <button
           type="button"
           data-testid="chat-new"
           aria-label={t('chat.new')}
           title={t('chat.new')}
           onClick={onNew}
-          className={cn(ROW_END_BUTTON, 'py-1.5 text-gray-400 hover:text-gray-100')}
+          className={cn(ROW_END_BUTTON, 'py-1.5 text-ink-3 hover:text-ink-1')}
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
@@ -89,10 +89,10 @@ export const ChatSidebar = ({ conversations, activeId, onSelect, onNew, onDelete
                 className="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 px-3 py-2 text-left"
               >
                 {facts.map(([label, value]) => (
-                  <span key={label} className="text-gray-500">
+                  <span key={label} className="text-ink-4">
                     {label}
                     {': '}
-                    <span className="font-semibold text-gray-200">{value}</span>
+                    <span className="font-semibold text-ink-1">{value}</span>
                   </span>
                 ))}
               </button>
@@ -104,7 +104,7 @@ export const ChatSidebar = ({ conversations, activeId, onSelect, onNew, onDelete
                 onClick={() => setConfirmId(conversation.id)}
                 className={cn(
                   ROW_END_BUTTON,
-                  'py-2.5 text-gray-500 hover:text-red-300 focus:opacity-100 group-hover:opacity-100',
+                  'py-2.5 text-ink-4 hover:text-negative focus:opacity-100 group-hover:opacity-100',
                   isActive ? 'opacity-100' : 'opacity-0',
                 )}
               >
@@ -121,7 +121,7 @@ export const ChatSidebar = ({ conversations, activeId, onSelect, onNew, onDelete
             <button
               type="button"
               data-testid="chat-conversation-delete-confirm"
-              className="cursor-pointer font-semibold text-red-300 hover:text-red-200"
+              className="cursor-pointer font-semibold text-negative hover:text-negative-hover"
               onClick={() => {
                 const id = confirmId;
                 setConfirmId(null);
@@ -134,7 +134,7 @@ export const ChatSidebar = ({ conversations, activeId, onSelect, onNew, onDelete
             </button>
             <button
               type="button"
-              className="cursor-pointer text-gray-400 hover:text-gray-200"
+              className="cursor-pointer text-ink-3 hover:text-ink-1"
               onClick={() => setConfirmId(null)}
             >
               {t('chat.sidebar.keep')}

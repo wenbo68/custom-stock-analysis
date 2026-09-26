@@ -17,7 +17,7 @@ interface CardProps {
 // The only surface on the alt page: flat gray-800, small radius, no border,
 // no shadow — separation comes from the gray-900 canvas and whitespace.
 export const Card = ({ children, className, testId }: CardProps) => (
-  <section data-testid={testId} className={cn('rounded bg-gray-800 p-5', className)}>
+  <section data-testid={testId} className={cn('rounded bg-surface-2 p-5', className)}>
     {children}
   </section>
 );
@@ -39,12 +39,12 @@ export const FVar = ({ children }: { children: ReactNode }) => <i>{children}</i>
 // One typography contract for EVERY popup body on the alt page (owner
 // decision 2026-07-21): same font size, spacing, colors and divider in
 // every modal — body text gray-300, emphasized lines gray-200 semibold.
-export const MODAL_BODY = 'flex flex-col gap-2 text-sm leading-relaxed text-gray-300';
-export const MODAL_STRONG = 'font-semibold text-gray-200';
-export const ModalDivider = () => <hr className="border-gray-700/60" />;
+export const MODAL_BODY = 'flex flex-col gap-2 text-sm leading-relaxed text-ink-2';
+export const MODAL_STRONG = 'font-semibold text-ink-1';
+export const ModalDivider = () => <hr className="border-border/60" />;
 
 export const SectionLabel = ({ children }: { children: ReactNode }) => (
-  <div className="mb-1 text-xs font-semibold text-gray-500">{children}</div>
+  <div className="mb-1 text-xs font-semibold text-ink-4">{children}</div>
 );
 
 // Every popup title on the alt page names two things: WHAT the popup is
@@ -59,8 +59,8 @@ export const SectionLabel = ({ children }: { children: ReactNode }) => (
 // and score, no new accent color competing with the amber note mark.
 export const ModalTitle = ({ subject, kind }: { subject: ReactNode; kind: ReactNode }) => (
   <span className="flex flex-col gap-0.5">
-    <span className="text-base font-semibold leading-tight text-gray-100">{subject}</span>
-    <span className="text-[11px] font-semibold uppercase leading-tight tracking-[0.14em] text-gray-500">
+    <span className="text-base font-semibold leading-tight text-ink-1">{subject}</span>
+    <span className="text-[11px] font-semibold uppercase leading-tight tracking-[0.14em] text-ink-4">
       {kind}
     </span>
   </span>
@@ -84,9 +84,9 @@ export const Fold = ({
 }) => {
   const [open, setOpen] = useState(false);
   return (
-    <details open={open} className={`${className} min-w-0 rounded bg-gray-900/60 px-4 py-3`.trim()}>
+    <details open={open} className={`${className} min-w-0 rounded bg-surface-1/60 px-4 py-3`.trim()}>
       <summary
-        className="cursor-pointer text-xs font-semibold text-gray-300"
+        className="cursor-pointer text-xs font-semibold text-ink-2"
         onClick={(event) => {
           // Owned by React so every browser (and the test DOM) reports
           // the toggle the same way.
@@ -117,7 +117,7 @@ export const FactFold = ({
   children,
   onToggle,
   testId,
-  surfaceClassName = 'bg-gray-900/60',
+  surfaceClassName = 'bg-surface-1/60',
 }: {
   label: string;
   value: string;
@@ -135,7 +135,7 @@ export const FactFold = ({
       <summary
         data-testid={testId}
         aria-expanded={open}
-        className="cursor-pointer list-none text-gray-500 [&::-webkit-details-marker]:hidden"
+        className="cursor-pointer list-none text-ink-4 [&::-webkit-details-marker]:hidden"
         onClick={(event) => {
           event.preventDefault();
           const next = !open;
@@ -145,7 +145,7 @@ export const FactFold = ({
       >
         {label}
         {': '}
-        <span className="font-semibold text-gray-200">{value}</span>
+        <span className="font-semibold text-ink-1">{value}</span>
         <span aria-hidden="true" className="ml-1">
           {open ? '▾' : '▸'}
         </span>
@@ -183,7 +183,7 @@ export const Modal = ({ isOpen, title, onClose, children, panelClassName }: Moda
         role="dialog"
         aria-modal="true"
         className={cn(
-          'max-h-[80vh] w-full max-w-lg overflow-y-auto rounded bg-gray-800 p-5 text-sm text-gray-400',
+          'max-h-[80vh] w-full max-w-lg overflow-y-auto rounded bg-surface-2 p-5 text-sm text-ink-3',
           panelClassName,
         )}
         onClick={(event) => event.stopPropagation()}
@@ -197,8 +197,8 @@ export const Modal = ({ isOpen, title, onClose, children, panelClassName }: Moda
             body — no leftover header spacing. */}
         {title != null ? (
           <>
-            <h3 className="mb-2 font-semibold text-gray-300">{title}</h3>
-            <hr className="mb-2 border-gray-700/60" />
+            <h3 className="mb-2 font-semibold text-ink-2">{title}</h3>
+            <hr className="mb-2 border-border/60" />
           </>
         ) : null}
         {children}
@@ -236,7 +236,7 @@ export const WarningsButton = ({ notes }: NotesButtonProps) => {
         data-testid="warnings-button"
         aria-label={t('tiered.warnings')}
         onClick={() => setIsOpen(true)}
-        className="inline-flex cursor-pointer items-center rounded text-amber-300 hover:text-amber-200"
+        className="inline-flex cursor-pointer items-center rounded text-caution hover:text-caution-hover"
       >
         <CircleAlert className="h-4 w-4" />
       </button>

@@ -211,7 +211,7 @@ describe('RunHistory', () => {
     // created_at is 2026-07-10, long before today
     renderHistory({ runs: [makeRun('t1')] });
     const date = screen.getByTestId('run-date-stale');
-    expect(date).toHaveClass('text-amber-300');
+    expect(date).toHaveClass('text-caution');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     fireEvent.click(date);
     expect(screen.getByRole('dialog')).toHaveTextContent(/重跑|re-run/);
@@ -231,8 +231,8 @@ describe('RunHistory', () => {
     });
     expect(screen.queryByTestId('run-date-stale')).not.toBeInTheDocument();
     const dates = screen.getAllByText(/^\d{4}\/\d{2}\/\d{2}, \d{2}:\d{2}$/);
-    expect(dates[0]).toHaveClass('text-emerald-300');
-    expect(dates[1]).toHaveClass('text-gray-400');
+    expect(dates[0]).toHaveClass('text-positive');
+    expect(dates[1]).toHaveClass('text-ink-3');
   });
 
   it('asks for capital and risk ranges and shows their pills', () => {
@@ -440,8 +440,8 @@ describe('RunHistory', () => {
       filters: { ...NO_FILTERS, capitalMin: '50000', statuses: ['done'] },
     });
     // one end of a range is enough to count as set
-    expect(titleOf(/^Capital$|^本金$/)).toHaveClass('text-orange-300');
-    expect(titleOf(/^Status$|^状态$/)).toHaveClass('text-blue-300');
-    expect(titleOf(/^Ticker$|^代码$/)).toHaveClass('text-gray-300');
+    expect(titleOf(/^Capital$|^本金$/)).toHaveClass('text-orange-700', 'dark:text-orange-300');
+    expect(titleOf(/^Status$|^状态$/)).toHaveClass('text-blue-700', 'dark:text-blue-300');
+    expect(titleOf(/^Ticker$|^代码$/)).toHaveClass('text-ink-2');
   });
 });

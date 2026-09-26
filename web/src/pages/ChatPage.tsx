@@ -52,7 +52,7 @@ const CHAT_FRAME = cn('mx-auto w-full px-4', CHAT_MAX_WIDTH);
 // dark halo reaching a little way past its edges, so the text scrolling
 // beneath is dimmed there and only there (owner request 2026-09-27: no
 // strip across the whole width).
-const FLOAT_SHADE = 'rounded-2xl bg-black/55 shadow-[0_0_40px_28px_rgba(0,0,0,0.55)]';
+const FLOAT_SHADE = 'rounded-2xl bg-background/85 shadow-[0_0_40px_28px_hsl(var(--background)/0.85)]';
 
 // Peek at the conversation on a timer until stopped, handing each longer
 // version to `apply`. Returns the stop function; a peek in flight when
@@ -211,7 +211,7 @@ const ChatPage = () => {
       </aside>
       {/* min-w-0: a long unbroken string in a transcript must wrap, not widen the page. */}
       <section
-        className="relative min-h-0 min-w-0 text-gray-400"
+        className="relative min-h-0 min-w-0 text-ink-3"
         style={
           {
             ...(bandHeight > 0 ? { '--chat-band-height': `${bandHeight}px` } : {}),
@@ -234,7 +234,7 @@ const ChatPage = () => {
           // What the agent is, centered in the empty thread (owner
           // request 2026-09-26) — not a heading in the corner.
           <div className="flex h-full items-center justify-center px-6 py-6" data-testid="chat-empty">
-            <p className="max-w-prose text-center text-sm leading-relaxed text-gray-400">
+            <p className="max-w-prose text-center text-sm leading-relaxed text-ink-3">
               {t('chat.empty.hint')}
             </p>
           </div>
@@ -250,7 +250,7 @@ const ChatPage = () => {
           <div className={CHAT_FRAME}>
             <div className={cn('pointer-events-auto flex flex-col gap-3', FLOAT_SHADE)} data-testid="chat-dock-content">
               {error ? (
-                <p className="text-xs text-amber-300" data-testid="chat-error">
+                <p className="text-xs text-caution" data-testid="chat-error">
                   {error}
                 </p>
               ) : null}

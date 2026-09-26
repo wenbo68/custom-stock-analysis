@@ -114,7 +114,7 @@ export const ChatComposer = ({ disabled, disabledHint, onSend }: ChatComposerPro
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={onKeyDown}
           className={cn(
-            'min-h-[1.5rem] w-full resize-none bg-transparent text-sm leading-relaxed text-gray-200 outline-none placeholder:text-gray-600',
+            'min-h-[1.5rem] w-full resize-none bg-transparent text-sm leading-relaxed text-ink-1 outline-none placeholder:text-ink-5',
             // Beside the arrow the box takes the rest of the row; on its own
             // row it must not be a growing flex item, or the browser sizes
             // it from `rows` and ignores the measured height.
@@ -134,7 +134,7 @@ export const ChatComposer = ({ disabled, disabledHint, onSend }: ChatComposerPro
           <ArrowUp className="h-4 w-4" />
         </button>
       </div>
-      {disabled && disabledHint ? <p className="text-xs text-gray-500">{disabledHint}</p> : null}
+      {disabled && disabledHint ? <p className="text-xs text-ink-4">{disabledHint}</p> : null}
     </div>
   );
 };

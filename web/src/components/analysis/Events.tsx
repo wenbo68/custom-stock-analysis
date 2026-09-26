@@ -39,7 +39,7 @@ export const EventsList = ({ dataReport, payload }: EventsListProps) => {
   }
   if (group.items.length === 0) {
     return (
-      <p className="text-xs italic text-gray-500">
+      <p className="text-xs italic text-ink-4">
         {group.windowDays != null
           ? t('tiered.eventsNone', { count: group.windowDays })
           : t('tiered.eventsNoneGeneric')}
@@ -57,7 +57,7 @@ export const EventsList = ({ dataReport, payload }: EventsListProps) => {
           // (<dataReport>.<group>.items.3.text); the anchor id lets
           // those citations scroll-flash this bullet.
           id={metricAnchorId(`${dataReport}.${NEWS_GROUP_KEY}.items.${index}.text`)}
-          className="scroll-mt-24 text-xs leading-relaxed text-gray-300"
+          className="scroll-mt-24 text-xs leading-relaxed text-ink-2"
         >
           {item.date != null ? (
             // Date and outlet are told apart by treatment, not a "|"
@@ -66,12 +66,12 @@ export const EventsList = ({ dataReport, payload }: EventsListProps) => {
             // sits beside it dimmer and italic. The literal space
             // keeps copied text readable; the margin is the visual
             // gap.
-            <span className="font-medium text-gray-400">
+            <span className="font-medium text-ink-3">
               {slashDate(item.date)}
               {item.publisher ? (
                 <>
                   {' '}
-                  <span className="ml-1 font-normal italic text-gray-500">
+                  <span className="ml-1 font-normal italic text-ink-4">
                     {item.publisher}
                   </span>
                 </>

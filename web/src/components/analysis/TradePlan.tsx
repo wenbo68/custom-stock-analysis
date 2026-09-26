@@ -288,7 +288,7 @@ const ComputedCell = ({ levelKey, detail, label }: LevelCellProps) => {
   const close = () => setIsOpen(false);
 
   if (!detail || detail.base === null) {
-    return <span className="text-gray-600">—</span>;
+    return <span className="text-ink-5">—</span>;
   }
 
   return (
@@ -336,11 +336,11 @@ const AdjustedCell = ({ levelKey, detail, label }: LevelCellProps) => {
   const close = () => setIsOpen(false);
 
   if (!detail || detail.base === null) {
-    return <span className="text-gray-600">—</span>;
+    return <span className="text-ink-5">—</span>;
   }
   if (detail.adjusted === null) {
     return (
-      <span data-testid={`level-keep-${levelKey}`} className="text-gray-500">
+      <span data-testid={`level-keep-${levelKey}`} className="text-ink-4">
         {t('tiered.levels.keep')}
       </span>
     );
@@ -372,7 +372,7 @@ const AdjustedCell = ({ levelKey, detail, label }: LevelCellProps) => {
               <ul className="flex flex-col gap-1">
                 {detail.evidence.map((refPath, index) => (
                   <li key={index} className="flex gap-2 text-xs">
-                    <span className="shrink-0 text-gray-500">[{index + 1}]</span>
+                    <span className="shrink-0 text-ink-4">[{index + 1}]</span>
                     <EvidenceRefs refs={[refPath]} onNavigate={close} />
                   </li>
                 ))}
@@ -401,7 +401,7 @@ const KeepFailedCell = ({
   const [isOpen, setIsOpen] = useState(false);
 
   if (!detail || detail.base === null) {
-    return <span className="text-gray-600">—</span>;
+    return <span className="text-ink-5">—</span>;
   }
   const checkNames = (checks: string[]) =>
     checks
@@ -457,7 +457,7 @@ const FlashNum = ({ targetId, text }: { targetId: string | null; text: string })
       {text}
     </button>
   ) : (
-    <span className="tabular-nums text-gray-300">{text}</span>
+    <span className="tabular-nums text-ink-2">{text}</span>
   );
 
 // The share-count arithmetic, in the same three-line receipt shape as the
@@ -524,7 +524,7 @@ const SharesComputedCell = ({ detail, runId }: Omit<SharesCellProps, 'levelAdjus
   const [isOpen, setIsOpen] = useState(false);
 
   if (!detail || detail.base === null) {
-    return <span className="text-gray-600">—</span>;
+    return <span className="text-ink-5">—</span>;
   }
   return (
     <>
@@ -568,11 +568,11 @@ const SharesAdjustedCell = ({ detail, runId, levelAdjusted }: SharesCellProps) =
   const [isOpen, setIsOpen] = useState(false);
 
   if (!detail || detail.base === null) {
-    return <span className="text-gray-600">—</span>;
+    return <span className="text-ink-5">—</span>;
   }
   if (detail.adjusted === null) {
     return (
-      <span data-testid="level-keep-shares" className="text-gray-500">
+      <span data-testid="level-keep-shares" className="text-ink-4">
         {t('tiered.levels.keep')}
       </span>
     );
@@ -638,7 +638,7 @@ interface LevelsProps {
 }
 
 const CELL = 'py-1.5 pr-4 text-sm';
-const ROW_LABEL = 'py-1.5 pr-4 text-xs text-gray-500';
+const ROW_LABEL = 'py-1.5 pr-4 text-xs text-ink-4';
 
 // The trade plan as a computed/adjusted table — the three price levels
 // plus the share count, with the AI's validated adjustments beneath the
@@ -668,7 +668,7 @@ export const TradePlan = ({
     <tr>
       <th className="pb-1.5 pr-4" />
       {COLUMNS.map((key) => (
-        <th key={key} className="pb-1.5 pr-4 text-left text-xs font-semibold text-gray-500">
+        <th key={key} className="pb-1.5 pr-4 text-left text-xs font-semibold text-ink-4">
           <HelpTerm label={t(LEVEL_LABEL_KEYS[key])} helpKey={LEVEL_HELP_KEYS[key]} />
         </th>
       ))}
@@ -751,11 +751,11 @@ export const TradePlan = ({
             <tr>
               <td className={ROW_LABEL} />
               {LEVEL_ORDER.map((key) => (
-                <td key={key} className={cn(CELL, 'tabular-nums text-gray-300')}>
+                <td key={key} className={cn(CELL, 'tabular-nums text-ink-2')}>
                   {formatPrice(levels[key])}
                 </td>
               ))}
-              <td className={cn(CELL, 'text-gray-600')}>—</td>
+              <td className={cn(CELL, 'text-ink-5')}>—</td>
             </tr>
           )}
         </tbody>

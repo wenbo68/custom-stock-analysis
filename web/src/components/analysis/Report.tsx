@@ -35,7 +35,7 @@ const Block = ({
   children: ReactNode;
 }) => (
   <section className="flex flex-col gap-2">
-    <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+    <h3 className="text-xs font-semibold uppercase tracking-wider text-ink-4">
       {helpKey ? <HelpTerm label={title} helpKey={helpKey} /> : title}
     </h3>
     {children}
@@ -56,10 +56,10 @@ const Fact = ({
   helpKey?: UiTextKey;
   children: ReactNode;
 }) => (
-  <span className="text-xs text-gray-500">
+  <span className="text-xs text-ink-4">
     {helpKey ? <HelpTerm label={label} helpKey={helpKey} /> : label}
     {': '}
-    <span className="text-sm font-semibold text-gray-200">{children}</span>
+    <span className="text-sm font-semibold text-ink-1">{children}</span>
   </span>
 );
 
@@ -283,7 +283,7 @@ const Debate = ({ result, section, runId, loadItems }: DebateProps) => {
         <p className="mb-2 text-sm leading-relaxed">{section.summary}</p>
       ) : null}
       {!outlook ? (
-        <p className="text-sm text-amber-300">{t('tiered.deepAnalysis.noOutlook')}</p>
+        <p className="text-sm text-caution">{t('tiered.deepAnalysis.noOutlook')}</p>
       ) : null}
       {detail && runId ? <VoteTree runId={runId} loader={loadItems} /> : null}
       {detail ? (
@@ -365,7 +365,7 @@ export const Report = ({
             // before it existed) show the same line as plain text.
             <Transcript runId={runId} label={usageLine(usage)} />
           ) : (
-            <p className="text-gray-600">
+            <p className="text-ink-5">
               <HelpTerm label={usageLine(usage)} helpKey="tiered.help.llmUsage" />
             </p>
           )

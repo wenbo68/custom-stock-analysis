@@ -67,15 +67,15 @@ export const Transcript = ({
         // request 2026-09-18), not the history backdrop.
         <Card testId="transcript" className="mt-2 flex flex-col gap-4">
           {state.kind === 'loading' ? (
-            <p className="text-gray-500">{t('tiered.transcript.loading')}</p>
+            <p className="text-ink-4">{t('tiered.transcript.loading')}</p>
           ) : null}
           {state.kind === 'error' ? (
-            <p className="text-amber-300">
+            <p className="text-caution">
               {t('tiered.transcript.error', { error: state.message })}
             </p>
           ) : null}
           {state.kind === 'ready' && state.items.length === 0 ? (
-            <p className="text-gray-500">{t('tiered.transcript.empty')}</p>
+            <p className="text-ink-4">{t('tiered.transcript.empty')}</p>
           ) : null}
           {state.kind === 'ready'
             ? state.items.map((item) => (
@@ -118,7 +118,7 @@ export const UsageLine = ({ label, help, open, onToggle, testId, children }: Usa
         onClick={onToggle}
         aria-expanded={open}
         data-testid={testId}
-        className="text-left text-gray-600 hover:text-gray-300"
+        className="text-left text-ink-5 hover:text-ink-2"
       >
         {label}
       </button>
@@ -228,17 +228,17 @@ export const TranscriptCall = ({
   };
 
   return (
-    <article className="flex min-w-0 flex-col gap-2 border-t border-gray-700 pt-4 first:border-t-0 first:pt-0">
+    <article className="flex min-w-0 flex-col gap-2 border-t border-border pt-4 first:border-t-0 first:pt-0">
       <div className="flex flex-col gap-1">
         {showTitle ? (
-          <p className="font-semibold text-gray-300">{title ?? t('tiered.transcript.call', { n: item.call_number })}</p>
+          <p className="font-semibold text-ink-2">{title ?? t('tiered.transcript.call', { n: item.call_number })}</p>
         ) : null}
         <div className="flex flex-col gap-0.5" data-testid="transcript-facts">
           {facts.map(([label, value]) => (
-            <span key={label} className="text-gray-500">
+            <span key={label} className="text-ink-4">
               {label}
               {': '}
-              <span className="font-semibold text-gray-200">{value}</span>
+              <span className="font-semibold text-ink-1">{value}</span>
             </span>
           ))}
           <FactFold
@@ -248,7 +248,7 @@ export const TranscriptCall = ({
             testId="transcript-input"
             surfaceClassName={foldSurface}
           >
-            <pre className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] text-gray-400">
+            <pre className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] text-ink-3">
               {text((loaded) => loaded.input, '')}
             </pre>
           </FactFold>
@@ -259,14 +259,14 @@ export const TranscriptCall = ({
             testId="transcript-output"
             surfaceClassName={foldSurface}
           >
-            <pre className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] text-gray-300">
+            <pre className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] text-ink-2">
               {text((loaded) => loaded.output, t('tiered.transcript.noReply'))}
             </pre>
           </FactFold>
         </div>
       </div>
       {item.error ? (
-        <p className="text-amber-300">{t('tiered.transcript.failed', { error: item.error })}</p>
+        <p className="text-caution">{t('tiered.transcript.failed', { error: item.error })}</p>
       ) : null}
     </article>
   );

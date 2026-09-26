@@ -348,7 +348,7 @@ export const RunForm = ({
         </button>
       </PillRow>
 
-      {error ? <p className="text-sm text-red-300">{error}</p> : null}
+      {error ? <p className="text-sm text-negative">{error}</p> : null}
 
       <Modal isOpen={shownNotice !== null} title={shownNotice?.title ?? ''} onClose={closeNotice}>
         <div className={MODAL_BODY}>{shownNotice?.body}</div>

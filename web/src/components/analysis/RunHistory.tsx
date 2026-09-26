@@ -392,7 +392,7 @@ export const RunHistory = ({
       </PillRow>
 
       {runs.length === 0 ? (
-        <p className="py-8 text-center text-sm text-gray-600">
+        <p className="py-8 text-center text-sm text-ink-5">
           {hasFilters ? t('tiered.history.none') : t('tiered.empty')}
         </p>
       ) : (
@@ -400,17 +400,17 @@ export const RunHistory = ({
           {/* Column names, so each row value reads without guessing. */}
           <div
             data-testid="history-header"
-            className={cn(ROW_GRID, 'border-b border-gray-800 pb-1.5')}
+            className={cn(ROW_GRID, 'border-b border-border/40 pb-1.5')}
           >
             {HEADER_KEYS.map((key) => (
-              <span key={key} className="text-xs font-semibold text-gray-500">
+              <span key={key} className="text-xs font-semibold text-ink-4">
                 {t(key)}
               </span>
             ))}
             {/* The trash column has no name. */}
             <span aria-hidden="true" className="w-6" />
           </div>
-          <ul className="flex flex-col divide-y divide-gray-800">
+          <ul className="flex flex-col divide-y divide-border/40">
           {runs.map((run) => {
             const isExpanded = run.run_id === expandedTaskId;
             return (
@@ -423,39 +423,39 @@ export const RunHistory = ({
                   onKeyDown={rowKeyDown(() => onToggle(run.run_id))}
                   className={cn(
                     ROW_GRID,
-                    'cursor-pointer items-center rounded py-2.5 text-start text-sm hover:bg-gray-800/60',
-                    isExpanded ? 'bg-gray-800/40' : '',
+                    'cursor-pointer items-center rounded py-2.5 text-start text-sm hover:bg-surface-2/60',
+                    isExpanded ? 'bg-surface-2/40' : '',
                   )}
                 >
-                  <span className="truncate font-semibold text-gray-300">{run.ticker}</span>
+                  <span className="truncate font-semibold text-ink-2">{run.ticker}</span>
                   <span
                     id={`run-${run.run_id}-capital`}
-                    className="text-xs tabular-nums text-gray-400"
+                    className="text-xs tabular-nums text-ink-3"
                   >
                     {run.capital == null ? '—' : plainNumber(run.capital)}
                   </span>
                   <span
                     id={`run-${run.run_id}-risk`}
-                    className="text-xs tabular-nums text-gray-400"
+                    className="text-xs tabular-nums text-ink-3"
                   >
                     {riskCell(run)}
                   </span>
                   <span
                     id={`run-${run.run_id}-reward`}
-                    className="text-xs tabular-nums text-gray-400"
+                    className="text-xs tabular-nums text-ink-3"
                   >
                     {rewardCell(run)}
                   </span>
-                  <span className="text-xs tabular-nums text-gray-400">
+                  <span className="text-xs tabular-nums text-ink-3">
                     {run.max_hold_weeks == null
                       ? '—'
                       : t('tiered.history.hold', { value: run.max_hold_weeks })}
                   </span>
-                  <span className="text-xs text-gray-400">
+                  <span className="text-xs text-ink-3">
                     {run.tier == null ? '—' : t('tiered.history.tier', { value: run.tier })}
                   </span>
                   {run.status === 'queued' ? (
-                    <span className="text-xs text-amber-300">
+                    <span className="text-xs text-caution">
                       {run.queue_position == null
                         ? t('tiered.status.queued')
                         : t('tiered.status.queuedAt', {
@@ -463,18 +463,18 @@ export const RunHistory = ({
                           })}
                     </span>
                   ) : run.status === 'running' ? (
-                    <span className="text-xs text-sky-300">{t('tiered.status.running')}</span>
+                    <span className="text-xs text-info">{t('tiered.status.running')}</span>
                   ) : run.status === 'failed' ? (
-                    <span className="text-xs text-red-300">{t('tiered.status.failed')}</span>
+                    <span className="text-xs text-negative">{t('tiered.status.failed')}</span>
                   ) : (
-                    <span className="text-xs text-emerald-300">{t('tiered.status.done')}</span>
+                    <span className="text-xs text-positive">{t('tiered.status.done')}</span>
                   )}
                   {hasOutlook(run) ? (
                     <span className={cn('text-xs', OUTLOOK_TEXT[runOutlook(run)])}>
                       {t(`tiered.outlook.${runOutlook(run)}` as UiTextKey)}
                     </span>
                   ) : (
-                    <span className="text-xs text-gray-400">—</span>
+                    <span className="text-xs text-ink-3">—</span>
                   )}
                   {dateTone(run) === 'stale' ? (
                     // A span, not a button: the whole row is already a
@@ -483,7 +483,7 @@ export const RunHistory = ({
                       role="button"
                       data-testid="run-date-stale"
                       title={t('tiered.staleWarning')}
-                      className="cursor-pointer truncate text-xs tabular-nums text-amber-300 hover:text-amber-200"
+                      className="cursor-pointer truncate text-xs tabular-nums text-caution hover:text-caution-hover"
                       onClick={(event) => {
                         event.stopPropagation();
                         setStaleNoteTaskId(run.run_id);
@@ -495,7 +495,7 @@ export const RunHistory = ({
                     <span
                       className={cn(
                         'truncate text-xs tabular-nums',
-                        dateTone(run) === 'fresh' ? 'text-emerald-300' : 'text-gray-400',
+                        dateTone(run) === 'fresh' ? 'text-positive' : 'text-ink-3',
                       )}
                     >
                       {formatTime(run)}
@@ -525,7 +525,7 @@ export const RunHistory = ({
                         event.stopPropagation();
                         setConfirmTaskId(run.run_id);
                       }}
-                      className="cursor-pointer justify-self-end rounded p-1 text-gray-600 hover:text-red-300 disabled:cursor-default disabled:opacity-50 disabled:hover:text-gray-600"
+                      className="cursor-pointer justify-self-end rounded p-1 text-ink-5 hover:text-negative disabled:cursor-default disabled:opacity-50 disabled:hover:text-ink-5"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -534,7 +534,7 @@ export const RunHistory = ({
                   )}
                 </div>
                 {deleteError && removedTaskId === run.run_id ? (
-                  <p className="pb-2 text-xs text-amber-300" data-testid="run-delete-error">
+                  <p className="pb-2 text-xs text-caution" data-testid="run-delete-error">
                     {deleteError}
                   </p>
                 ) : null}
@@ -551,7 +551,7 @@ export const RunHistory = ({
                     <div className="flex justify-end gap-4 pt-1">
                       <button
                         type="button"
-                        className="cursor-pointer text-gray-400 hover:text-gray-200"
+                        className="cursor-pointer text-ink-3 hover:text-ink-1"
                         onClick={() => setConfirmTaskId(null)}
                       >
                         {t('tiered.history.keep')}
@@ -559,7 +559,7 @@ export const RunHistory = ({
                       <button
                         type="button"
                         data-testid="run-delete-confirm"
-                        className="cursor-pointer font-semibold text-red-300 hover:text-red-200"
+                        className="cursor-pointer font-semibold text-negative hover:text-negative-hover"
                         onClick={() => {
                           setConfirmTaskId(null);
                           setRemovedTaskId(run.run_id);
@@ -577,26 +577,26 @@ export const RunHistory = ({
                   isOpen={staleNoteTaskId === run.run_id}
                   onClose={() => setStaleNoteTaskId(null)}
                 >
-                  <p className="text-sm text-amber-300" data-testid="stale-note">
+                  <p className="text-sm text-caution" data-testid="stale-note">
                     {t('tiered.staleWarning')}
                   </p>
                 </Modal>
                 {isExpanded ? (
                   <div className="pb-5 pt-3">
                     {run.status === 'failed' ? (
-                      <p className="text-sm text-red-300">
+                      <p className="text-sm text-negative">
                         {run.error ?? expandedError ?? t('tiered.error.title')}
                       </p>
                     ) : run.status === 'queued' ? (
-                      <p className="text-sm text-gray-500">{t('tiered.queued')}</p>
+                      <p className="text-sm text-ink-4">{t('tiered.queued')}</p>
                     ) : run.status === 'running' ? (
-                      <p className="text-sm text-gray-500">{t('tiered.running')}</p>
+                      <p className="text-sm text-ink-4">{t('tiered.running')}</p>
                     ) : expandedResult ? (
                       <Report result={expandedResult} runId={run.run_id} />
                     ) : expandedError ? (
-                      <p className="text-sm text-red-300">{expandedError}</p>
+                      <p className="text-sm text-negative">{expandedError}</p>
                     ) : (
-                      <p className="text-sm text-gray-500">{t('tiered.history.loading')}</p>
+                      <p className="text-sm text-ink-4">{t('tiered.history.loading')}</p>
                     )}
                   </div>
                 ) : null}

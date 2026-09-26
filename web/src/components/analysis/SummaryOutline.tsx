@@ -37,7 +37,7 @@ export const SummaryOutline = ({ structure }: SummaryOutlineProps) => {
         }
         return (
           <li key={key}>
-            <span className="font-semibold text-gray-300">{t(labelKey)}</span>
+            <span className="font-semibold text-ink-2">{t(labelKey)}</span>
             <ul className="list-[circle] pl-4">
               {bullets.map((bullet, index) => (
                 <li key={index}>
@@ -47,7 +47,7 @@ export const SummaryOutline = ({ structure }: SummaryOutlineProps) => {
                     struck={false}
                   />
                   {bullet.children && bullet.children.length > 0 ? (
-                    <ul className="list-[square] pl-4 text-gray-400">
+                    <ul className="list-[square] pl-4 text-ink-3">
                       {bullet.children.map((child, childIndex) => (
                         <li key={childIndex}>
                           <LinkedClaimV7

@@ -76,8 +76,8 @@ describe('ChatSidebar', () => {
     // ignored and the entries render larger than the tool fact lines.
     expect(screen.getByTestId('chat-sidebar-scroll')).toHaveClass('text-xs');
     expect(rows[0]).not.toHaveClass('text-xs');
-    expect(screen.getByText('3000')).toHaveClass('font-semibold', 'text-gray-200');
-    expect(screen.getByText('3000').parentElement).toHaveClass('text-gray-500');
+    expect(screen.getByText('3000')).toHaveClass('font-semibold', 'text-ink-1');
+    expect(screen.getByText('3000').parentElement).toHaveClass('text-ink-4');
   });
 
   it('marks the active conversation with the level-2 surface, on the level-1 panel, and keeps its trash on that surface', () => {
@@ -86,10 +86,10 @@ describe('ChatSidebar', () => {
     expect(rows[0]).toHaveAttribute('aria-current', 'page');
     expect(rows[1]).not.toHaveAttribute('aria-current');
     const activeEntry = rows[0].parentElement!;
-    expect(activeEntry).toHaveClass('bg-gray-800');
-    expect(rows[1].parentElement).not.toHaveClass('bg-gray-800');
+    expect(activeEntry).toHaveClass('bg-surface-2');
+    expect(rows[1].parentElement).not.toHaveClass('bg-surface-2');
     const panel = screen.getByTestId('chat-sidebar');
-    expect(panel).toHaveClass('bg-gray-900');
+    expect(panel).toHaveClass('bg-surface-1');
     const [activeTrash, otherTrash] = screen.getAllByTestId('chat-conversation-delete');
     expect(activeTrash.parentElement).toBe(activeEntry);
     expect(activeTrash).toHaveClass('opacity-100');

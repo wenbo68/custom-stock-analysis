@@ -153,7 +153,7 @@ const MetricRow = ({
     <dt className="min-w-0 truncate text-xs">
       <MetricTerm term={term} underline={false} truncate />
     </dt>
-    <dd className="shrink-0 whitespace-nowrap text-xs tabular-nums text-gray-300">
+    <dd className="shrink-0 whitespace-nowrap text-xs tabular-nums text-ink-2">
       {value == null ? (
         // Blank field: plain "n/a" — the reason lives behind the
         // exclamation mark beside it (owner request 2026-08-05).
@@ -170,7 +170,7 @@ const MetricRow = ({
           {' '}
           <span
             id={dateAnchorPath ? metricAnchorId(dateAnchorPath) : undefined}
-            className="ml-1 scroll-mt-24 text-gray-500"
+            className="ml-1 scroll-mt-24 text-ink-4"
           >
             {slashDate(date)}
           </span>
@@ -212,10 +212,10 @@ const PayloadTable = ({
   const sections = buildSections(dataReport, shownPayload, t);
 
   return (
-    <div className="flex flex-col divide-y divide-gray-700/60">
+    <div className="flex flex-col divide-y divide-border/60">
       {sections.map((section) => (
         <div key={section.key} className="py-3 first:pt-0 last:pb-0">
-          <div className="mb-1 text-[11px] font-bold uppercase tracking-wider text-gray-500">
+          <div className="mb-1 text-[11px] font-bold uppercase tracking-wider text-ink-4">
             {section.title}
           </div>
           <dl className="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
@@ -294,14 +294,14 @@ const DataReportCard = ({ dataReport }: DataReportCardProps) => {
   return (
     <Card testId={`data-report-${dataReport.name}`}>
       <div className="mb-3 flex items-center justify-between gap-2">
-        <h3 className="min-w-0 truncate font-semibold text-gray-300">
+        <h3 className="min-w-0 truncate font-semibold text-ink-2">
           {/* Unknown dataReports fall back to their raw name, humanized —
               payload identifiers never reach the UI with underscores. */}
           <span>
             {labelKey ? t(labelKey) : dataReport.name.replace(/_/g, ' ')}
           </span>
           {window != null ? (
-            <span className="ml-2 text-xs font-normal text-gray-500">
+            <span className="ml-2 text-xs font-normal text-ink-4">
               {window.kind === 'days'
                 ? t('tiered.eventsWindow', { count: window.count })
                 : window.oldest === window.newest
@@ -337,8 +337,8 @@ const DataReportCard = ({ dataReport }: DataReportCardProps) => {
       ) : null}
 
       {listedCitations.length > 0 ? (
-        <div className="mt-3 border-t border-gray-700/60 pt-3">
-          <div className="mb-1 text-xs font-semibold text-gray-500">
+        <div className="mt-3 border-t border-border/60 pt-3">
+          <div className="mb-1 text-xs font-semibold text-ink-4">
             {t('tiered.sources')}
           </div>
           <ul className="flex flex-col gap-1">
@@ -352,7 +352,7 @@ const DataReportCard = ({ dataReport }: DataReportCardProps) => {
                 className="flex scroll-mt-24 gap-2 text-xs"
               >
                 {showSourceNumbers ? (
-                  <span className="shrink-0 text-gray-500">[{number}]</span>
+                  <span className="shrink-0 text-ink-4">[{number}]</span>
                 ) : null}
                 {citation.url ? (
                   // News articles (they carry a headline) list as their URL

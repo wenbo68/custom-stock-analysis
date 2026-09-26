@@ -460,7 +460,7 @@ export const FieldWarnings = ({ term, notes, isBlank }: FieldNotesProps) => {
         onClick={() => setIsOpen(true)}
         className={cn(
           'ml-1 inline-flex cursor-pointer items-center rounded align-middle',
-          'text-amber-300 hover:text-amber-200',
+          'text-caution hover:text-caution-hover',
         )}
       >
         <CircleAlert className="h-3.5 w-3.5" />

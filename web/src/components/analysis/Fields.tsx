@@ -25,7 +25,7 @@ interface FieldShellProps {
 // A labeled form column, showplayer-style: bold label above the control.
 const FieldShell = ({ label, tone, children }: FieldShellProps) => (
   <div className="flex w-full flex-col gap-2">
-    <span className={cn('font-semibold', tone ? toneText(tone) : 'text-gray-300')}>{label}</span>
+    <span className={cn('font-semibold', tone ? toneText(tone) : 'text-ink-2')}>{label}</span>
     {children}
   </div>
 );
@@ -108,7 +108,7 @@ export const Select = ({
   return (
     <FieldShell label={label} tone={tone}>
       <div ref={containerRef} className="relative">
-        <div className="flex w-full items-center rounded bg-gray-800">
+        <div className="flex w-full items-center rounded bg-surface-2">
           <input
             type="text"
             value={written}
@@ -127,29 +127,29 @@ export const Select = ({
             placeholder={placeholder}
             aria-label={typeof label === 'string' ? label : undefined}
             className={cn(
-              'w-full bg-transparent pl-3 placeholder-gray-500 outline-none',
-              isInvalid ? 'text-red-300' : 'text-gray-300',
+              'w-full bg-transparent pl-3 placeholder-ink-4 outline-none',
+              isInvalid ? 'text-negative' : 'text-ink-2',
             )}
           />
           <button
             type="button"
             aria-label="Toggle options"
             onClick={() => setIsOpen(!isOpen)}
-            className="cursor-pointer p-2 text-gray-500 hover:text-gray-300"
+            className="cursor-pointer p-2 text-ink-4 hover:text-ink-2"
           >
             <ChevronDown className="h-5 w-5" />
           </button>
         </div>
         {isOpen && shown.length > 0 ? (
-          <div className="absolute top-full z-10 mt-2 flex max-h-96 w-full flex-col overflow-y-auto rounded bg-gray-800 p-2 text-xs font-semibold">
+          <div className="absolute top-full z-10 mt-2 flex max-h-96 w-full flex-col overflow-y-auto rounded bg-surface-2 p-2 text-xs font-semibold">
             {shown.map((option) => (
               <button
                 key={option.value}
                 type="button"
                 onClick={() => commit(option.value)}
                 className={cn(
-                  'w-full cursor-pointer rounded p-2 text-start hover:bg-gray-900 hover:text-blue-400',
-                  selected?.includes(option.value) ? 'text-blue-400' : '',
+                  'w-full cursor-pointer rounded p-2 text-start hover:bg-surface-1 hover:text-link',
+                  selected?.includes(option.value) ? 'text-link' : '',
                 )}
               >
                 {option.node ?? option.label}
@@ -205,8 +205,8 @@ export const CommitInput = ({
         setWritten('');
       }}
       className={cn(
-        'w-full min-w-0 rounded bg-gray-800 px-3 py-2 placeholder-gray-500 outline-none',
-        isInvalid ? 'text-red-300' : 'text-gray-300',
+        'w-full min-w-0 rounded bg-surface-2 px-3 py-2 placeholder-ink-4 outline-none',
+        isInvalid ? 'text-negative' : 'text-ink-2',
       )}
     />
   );
@@ -287,9 +287,9 @@ const NavButton = ({ isActive, isDisabled, ariaLabel, onClick, children }: NavBu
     onClick={onClick}
     className={cn(
       'flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded text-xs font-semibold transition-colors',
-      isActive ? 'bg-gray-800 text-blue-400' : '',
-      !isActive && !isDisabled ? 'text-gray-400 hover:bg-gray-800' : '',
-      isDisabled ? 'pointer-events-none cursor-not-allowed text-gray-600' : '',
+      isActive ? 'bg-surface-2 text-link' : '',
+      !isActive && !isDisabled ? 'text-ink-3 hover:bg-surface-2' : '',
+      isDisabled ? 'pointer-events-none cursor-not-allowed text-ink-5' : '',
     )}
   >
     {children}

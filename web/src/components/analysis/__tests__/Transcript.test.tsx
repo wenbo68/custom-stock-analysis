@@ -93,23 +93,23 @@ describe('Transcript', () => {
     // backend's identifier.
     expect(factLines(/^(for|用于): (Trade plan|交易计划)$/)).toHaveLength(1);
     expect(factLines(/^(time|耗时): 120ms$/)).toHaveLength(2);
-    expect(screen.getByText(/^(Trade plan|交易计划)$/)).toHaveClass('font-semibold', 'text-gray-200');
+    expect(screen.getByText(/^(Trade plan|交易计划)$/)).toHaveClass('font-semibold', 'text-ink-1');
     // Both prompt and reply folded by default. The clickable line is a
     // plain fact line — quiet label, bright value, a triangle after it,
     // no browser marker, no backdrop; only what it opens sits on the
     // fold surface.
     expect(folds()).toHaveLength(4);
     expect(folds().every((fold) => !fold.open)).toBe(true);
-    expect(folds().every((fold) => !fold.classList.contains('bg-gray-900/60'))).toBe(true);
-    expect(folds().every((fold) => fold.querySelector('.bg-gray-900\\/60') !== null)).toBe(true);
+    expect(folds().every((fold) => !fold.classList.contains('bg-surface-1/60'))).toBe(true);
+    expect(folds().every((fold) => fold.querySelector('.bg-surface-1\\/60') !== null)).toBe(true);
     expect(summaries().every((line) => line.classList.contains('list-none'))).toBe(true);
-    expect(summaries().every((line) => line.classList.contains('text-gray-500'))).toBe(true);
+    expect(summaries().every((line) => line.classList.contains('text-ink-4'))).toBe(true);
     expect(summaries()[0]).toHaveTextContent(/▸$/);
-    expect(screen.getAllByText('10 tokens')[0]).toHaveClass('font-semibold', 'text-gray-200');
+    expect(screen.getAllByText('10 tokens')[0]).toHaveClass('font-semibold', 'text-ink-1');
     // Shown whole when opened: no inner scroll box.
     expect(document.querySelector('pre.max-h-64')).toBeNull();
     // On the card surface, not the history backdrop.
-    expect(screen.getByTestId('transcript')).toHaveClass('bg-gray-800');
+    expect(screen.getByTestId('transcript')).toHaveClass('bg-surface-2');
   });
 
   it('fetches a call’s text once, the first time either of its folds opens', async () => {
