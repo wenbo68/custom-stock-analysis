@@ -1,36 +1,20 @@
-# Standalone tiered-analysis app — backend dependencies.
-# Trimmed from the parent project's requirements: only what the tiered
-# engine, its API and storage actually import.
-
-# --- web server ---
-fastapi>=0.109.0            # Web framework (the tiered API)
-uvicorn[standard]>=0.27.0   # ASGI server
-
-# --- core ---
-python-dotenv>=1.0.0        # .env loading
-sqlalchemy>=2.0.0           # ORM (run history, transcripts, caches)
-psycopg[binary]>=3.1,<4     # Postgres driver (only used when DATABASE_URL is set)
-pandas>=2.0.0               # Dataframes for price bars
-requests>=2.31.0            # HTTP for the news/fundamentals providers and price-bar fetchers
-tenacity>=8.2.0             # Retry decorators on the price-bar fetchers
-exchange-calendars>=4.13.0  # Trading calendars (clock gate + grading windows)
-
-# --- LLM ---
-litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0   # Unified LLM client (same pin as parent repo)
-tiktoken>=0.8.0,<0.12.0     # Token counting for litellm (parent repo pins <0.12, see its #537)
-py3langid>=0.4.0,<0.5.0     # Deterministic language detection: did the model answer in the chosen language? (src/languages.py)
-
-# --- data sources (daily price-bar fallback chain) ---
-# A-shares: efinance -> Tencent (plain HTTP, no library) -> akshare -> yfinance
-# Hong Kong: akshare -> yfinance
-# US: yfinance is the one full-history source; AlphaVantage (plain HTTP, only
-#     when its API key is set) tops up the newest bars Yahoo has not published
-#     yet. US indices are yfinance only.
-efinance>=0.5.5             # Priority 0: East Money
-akshare>=1.12.0             # Priority 1: East Money crawler (also the HK source)
-yfinance>=0.2.0             # Priority 4: Yahoo Finance, last resort for every market
-
-# --- tests ---
+# pip fallback — the source of truth is pyproject.toml (install with `uv sync`).
+# Keep this list identical to [project].dependencies there.
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-dotenv>=1.0.0
+sqlalchemy>=2.0.0
+psycopg[binary]>=3.1,<4
+pandas>=2.0.0
+requests>=2.31.0
+tenacity>=8.2.0
+exchange-calendars>=4.13.0
+litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0
+py3langid>=0.4.0,<0.5.0
+efinance>=0.5.5
+akshare>=1.12.0
+yfinance>=0.2.0
+# tests
 pytest>=8.0.0
-httpx                       # FastAPI test client transport
+httpx
 anyio>=4.0.0

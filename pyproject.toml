@@ -1,0 +1,47 @@
+# The backend's dependencies, read by uv (https://docs.astral.sh/uv/).
+#   uv sync            installs them into .venv (plus the dev group)
+#   uv run server.py   starts the server inside that environment
+# requirements.txt mirrors the runtime list for people who use pip.
+
+[project]
+name = "custom-stock-analysis"
+version = "0.1.0"
+description = "Self-hosted tiered stock analysis: six data reports, an outlook and a trade plan per ticker, plus a chat bot over the run history."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    # --- web server ---
+    "fastapi>=0.109.0",            # Web framework (the analysis + chat API)
+    "uvicorn[standard]>=0.27.0",   # ASGI server
+    # --- core ---
+    "python-dotenv>=1.0.0",        # .env loading
+    "sqlalchemy>=2.0.0",           # ORM (run history, transcripts, caches)
+    "psycopg[binary]>=3.1,<4",     # Postgres driver (only used when DATABASE_URL is set)
+    "pandas>=2.0.0",               # Dataframes for price bars
+    "requests>=2.31.0",            # HTTP for the news/fundamentals providers and price-bar fetchers
+    "tenacity>=8.2.0",             # Retry decorators on the price-bar fetchers
+    "exchange-calendars>=4.13.0",  # Trading calendars (clock gate + grading windows)
+    # --- LLM ---
+    "litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0",  # Unified LLM client
+    "py3langid>=0.4.0,<0.5.0",     # Deterministic language detection (src/languages.py)
+    # --- data sources (daily price-bar fallback chain) ---
+    # A-shares: efinance -> Tencent (plain HTTP) -> akshare -> yfinance
+    # Hong Kong: akshare -> yfinance
+    # US / JP / KR / TW: yfinance (AlphaVantage tops up the newest US bars when its key is set)
+    "efinance>=0.5.5",             # East Money
+    "akshare>=1.12.0",             # East Money crawler (also the HK source)
+    "yfinance>=0.2.0",             # Yahoo Finance
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "httpx",                       # FastAPI test client transport
+    "anyio>=4.0.0",
+    "flake8",
+]
+
+[tool.uv]
+# An application, not a library: nothing to build or install, just dependencies.
+package = false

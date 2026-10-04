@@ -1,0 +1,15 @@
+# Start the app with Docker:
+#   cp .env.example .env     # then fill in MAIN_LLM and LLM_API_KEY
+#   docker compose up -d     # builds the image the first time, then serves http://localhost:8000
+# To use the prebuilt image instead of building:
+#   docker compose pull && docker compose up -d
+services:
+  app:
+    image: ghcr.io/wenbo68/custom-stock-analysis:latest
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"   # drop the 127.0.0.1 prefix to reach it from other machines
+    env_file: .env
+    volumes:
+      - ./data:/app/data         # run history, transcripts and caches survive restarts and upgrades
+    restart: unless-stopped

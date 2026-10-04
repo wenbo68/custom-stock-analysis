@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Start the web server (backend API + the web app).
+# Start the web server (backend API + the web app) from a source checkout.
+#
+# Needs uv (https://docs.astral.sh/uv/) and Node 20+. For a no-install
+# start, use Docker instead: docker compose up -d
 #
 # Usage:            ./start-server.sh
 # Then open:        http://localhost:8000
@@ -13,7 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 echo "Building the web app..."
-(cd web && npm run build --silent)
+(cd web && npm install --no-audit --no-fund --silent && npm run build --silent)
 
 echo "Starting the server..."
-.venv/bin/python server.py
+uv run server.py
