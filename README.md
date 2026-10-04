@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="web/public/favicon.svg" alt="" width="72" height="72">
+
 # Custom Stock Analysis
 
 **Type a ticker, get a structured report: six data reports, an outlook, and a sized trade plan. Then ask the chat bot about it.**

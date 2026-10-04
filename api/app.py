@@ -37,7 +37,7 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 #: Root-level files the SPA fallback may serve directly. Everything else
 #: gets index.html — user-supplied paths never touch the filesystem.
-ROOT_FILE_ALLOWLIST = frozenset({"favicon.ico", "favicon.svg", "vite.svg", "robots.txt"})
+ROOT_FILE_ALLOWLIST = frozenset({"favicon.ico", "favicon.svg", "robots.txt"})
 
 
 def _cors_allow_origins() -> list:

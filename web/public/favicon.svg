@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" width="80" height="80" role="img" aria-label="Custom Stock Analysis">
+  <!-- CSA monogram: geometric stroke letters in the app's cyan on its dark navy. -->
+  <rect width="80" height="80" rx="18" fill="#0D101C"/>
+  <g fill="none" stroke="#00D4FF" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- C -->
+    <path d="M26.7 30.8 A12 12 0 1 0 26.7 49.2"/>
+    <!-- S -->
+    <path d="M48 34 A6 6 0 1 0 42 40 A6 6 0 1 1 36 46"/>
+    <!-- A -->
+    <path d="M56 52 L64 28 L72 52 M58.7 44 L69.3 44"/>
+  </g>
+</svg>
