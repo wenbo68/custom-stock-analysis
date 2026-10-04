@@ -1,3 +1,4 @@
+import { ko } from './metricLabels.ko';
 import type { UiLanguage } from './uiText';
 
 // Vocabulary for tiered-analysis data_report payloads (backend keys stay
@@ -1655,7 +1656,8 @@ const zh: Record<string, MetricEntry> = {
 
 };
 
+const TABLES: Record<UiLanguage, Record<string, MetricEntry>> = { en, zh, ko };
+
 export function metricEntry(key: string, language: UiLanguage): MetricEntry | null {
-  const table = language === 'en' ? en : zh;
-  return table[key] ?? null;
+  return TABLES[language][key] ?? null;
 }

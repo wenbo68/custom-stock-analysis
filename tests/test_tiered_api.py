@@ -870,7 +870,7 @@ class TestRunLanguage:
     def test_an_unknown_language_is_refused(self, client):
         response = client.post("/tiered/analyze", json={"ticker": "AAPL", "language": "fr"})
         assert response.status_code == 422
-        assert "language must be one of en, zh" in response.text
+        assert "language must be one of en, ko, zh" in response.text
 
     def test_runs_that_differ_only_by_language_are_not_duplicates(self, client):
         started = threading.Event()

@@ -1,4 +1,8 @@
-export type UiLanguage = 'zh' | 'en';
+import { ko } from './uiText.ko';
+
+// The languages the page speaks. The backend's table (src/languages.py)
+// lists the same codes; add a language in both places.
+export type UiLanguage = 'zh' | 'en' | 'ko';
 
 const zh = {
 
@@ -1145,6 +1149,7 @@ const en: Record<UiTextKey, string> = {
 export const UI_TEXT: Record<UiLanguage, Record<UiTextKey, string>> = {
   zh,
   en,
+  ko,
 };
 
 export type UiTextParams = Record<string, string | number>;

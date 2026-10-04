@@ -43,6 +43,7 @@ class AppLanguage:
 LANGUAGES: Dict[str, AppLanguage] = {
     "en": AppLanguage("en", "English"),
     "zh": AppLanguage("zh", "Simplified Chinese"),
+    "ko": AppLanguage("ko", "Korean"),
 }
 
 DEFAULT_LANGUAGE = "en"

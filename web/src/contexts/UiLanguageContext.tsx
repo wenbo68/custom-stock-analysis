@@ -3,6 +3,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { formatUiText, UI_TEXT, type UiLanguage, type UiTextKey, type UiTextParams } from '../i18n/uiText';
 import { getRuntimeInitialLanguage, getUiLanguageStorage, persistUiLanguage } from '../utils/uiLanguage';
 
+// The <html lang> value for each UI language (what screen readers and
+// browser translation read).
+const HTML_LANG: Record<UiLanguage, string> = { zh: 'zh-CN', en: 'en', ko: 'ko' };
+
 type UiLanguageContextValue = {
   language: UiLanguage;
   setLanguage: (language: UiLanguage) => void;
@@ -27,7 +31,7 @@ export const UiLanguageProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   useEffect(() => {
     if (typeof document !== 'undefined') {
-      document.documentElement.lang = language === 'en' ? 'en' : 'zh-CN';
+      document.documentElement.lang = HTML_LANG[language];
     }
   }, [language]);
 

@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { Tooltip } from '../common/Tooltip';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { metricEntry } from '../../i18n/metricLabels';
-import type { UiTextKey } from '../../i18n/uiText';
+import type { UiLanguage, UiTextKey } from '../../i18n/uiText';
 import type { TieredCitation } from '../../api/tiered';
 import { cn } from '../../utils/cn';
 import { jumpToMetric } from './termHelpers';
@@ -48,6 +48,13 @@ interface MetricTermProps {
   truncate?: boolean;
 }
 
+// The two block labels of a metric popup, per UI language.
+const POPUP_LABELS: Record<UiLanguage, { meaningLabel: string; interpLabel: string }> = {
+  en: { meaningLabel: 'Meaning:', interpLabel: 'Interpretation:' },
+  zh: { meaningLabel: '含义：', interpLabel: '解读：' },
+  ko: { meaningLabel: '의미:', interpLabel: '해석:' },
+};
+
 // Compact vocab (e.g. "SMA 20") with the full plain-language definition in
 // a popup: hover shows it, click/tap keeps it open (focus), clicking
 // elsewhere or Escape closes it. Unknown keys render as-is, no popup.
@@ -60,8 +67,7 @@ export const MetricTerm = ({ term, underline = true, truncate = false }: MetricT
   }
   // Entries with an `interp` render the owner's two-block popup format
   // (2026-07-29): "Meaning: …" then a divider then "Interpretation: …".
-  const meaningLabel = language === 'en' ? 'Meaning:' : '含义：';
-  const interpLabel = language === 'en' ? 'Interpretation:' : '解读：';
+  const { meaningLabel, interpLabel } = POPUP_LABELS[language];
   return (
     <Tooltip
       focusable

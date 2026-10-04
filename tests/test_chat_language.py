@@ -22,6 +22,13 @@ class TestMatchesLanguage:
     def test_an_english_reply_does_not_match_chinese(self):
         assert not matches_language("The latest tier-1 run on AAPL is bullish with a score of 7.2.", "zh")
 
+    def test_a_korean_reply_matches_korean_and_nothing_else(self):
+        reply = "애플의 최근 1단계 분석 전망은 강세이며, 점수는 7.2점입니다. 후속 흐름을 계속 지켜볼 만합니다."
+        assert matches_language(reply, "ko")
+        assert not matches_language(reply, "en")
+        assert not matches_language(reply, "zh")
+        assert not matches_language("苹果最近一次一级分析的展望是看涨，评分 7.2。", "ko")
+
     def test_a_chinese_reply_does_not_match_english(self):
         assert not matches_language("苹果最近一次一级分析的展望是看涨，评分 7.2。", "en")
 
@@ -75,14 +82,16 @@ class TestMatchesLanguage:
 
 class TestLanguageTable:
     def test_the_offered_languages(self):
-        assert set(LANGUAGES) == {"en", "zh"}
-        assert is_supported("zh") and not is_supported("fr") and not is_supported(None)
+        assert set(LANGUAGES) == {"en", "zh", "ko"}
+        assert is_supported("zh") and is_supported("ko")
+        assert not is_supported("fr") and not is_supported(None)
 
 
 class TestPromptWords:
     def test_language_names(self):
         assert language_name("zh") == "Simplified Chinese"
         assert language_name("en") == "English"
+        assert language_name("ko") == "Korean"
         assert language_name("??") == "English"
 
     def test_correction_names_the_language(self):

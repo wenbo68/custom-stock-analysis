@@ -20,6 +20,8 @@ describe('queuePosition', () => {
   it('writes the position in Chinese', () => {
     expect(queuePosition(1, 'zh')).toBe('第 1 位');
     expect(queuePosition(3, 'zh')).toBe('第 3 位');
+    expect(queuePosition(1, 'ko')).toBe('1번째');
+    expect(queuePosition(3, 'ko')).toBe('3번째');
   });
 });
 

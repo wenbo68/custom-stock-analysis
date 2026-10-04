@@ -8,6 +8,7 @@ import type { Choice } from '../common/choice';
 const LANGUAGE_OPTIONS: Array<{ value: UiLanguage; label: string }> = [
   { value: 'zh', label: '中文' },
   { value: 'en', label: 'English' },
+  { value: 'ko', label: '한국어' },
 ];
 
 // The UI language. Its word names the setting — "语言" / "Language" —

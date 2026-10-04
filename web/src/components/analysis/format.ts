@@ -171,11 +171,14 @@ export const formatMetricValue = (key: string, value: unknown): string => {
 // fraction and this multiplied by 100 (audit fix 2026-09-25).
 export const riskPctText = (percent: number): string => String(Number(percent.toPrecision(12)));
 
-// A queued run's place in line as words: 2 runs ahead → '3rd' / '第 3 位'
+// A queued run's place in line as words: 2 runs ahead → '3rd' / '第 3 位' / '3번째'
 // (owner request 2026-09-17: the position, not the count ahead).
 export const queuePosition = (position: number, language: UiLanguage): string => {
   if (language === 'zh') {
     return `第 ${position} 位`;
+  }
+  if (language === 'ko') {
+    return `${position}번째`;
   }
   // 11th, 12th and 13th are the exceptions to the 1st/2nd/3rd endings.
   const lastTwo = position % 100;
