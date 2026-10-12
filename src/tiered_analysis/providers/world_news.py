@@ -71,6 +71,7 @@ TEXTUAL kind: never actionable, never feeds numeric consumers.
 from __future__ import annotations
 
 import re
+import threading
 import time
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -365,13 +366,26 @@ class WorldNewsProvider(DataReportProvider):
     def supports(self, market: Market) -> bool:
         return True
 
+    #: One lock for every instance: several runs starting on a cold day
+    #: used to each miss the day cache, each fetch the feed, each run
+    #: the LLM news screen, and overwrite each other's article pool. The
+    #: first holds the lock through fetch-screen-store; the rest wait,
+    #: then read its result (review 2026-10-10).
+    _cold_day_lock = threading.Lock()
+
     # The ticker is intentionally ignored: world news is per-day, not
     # per-stock — the day cache makes a multi-ticker run screen once.
     def collect(self, ticker: str) -> DataReport:
         cached = self._read_cache()
         if cached is not None:
             return cached
+        with self._cold_day_lock:
+            cached = self._read_cache()
+            if cached is not None:
+                return cached
+            return self._collect_uncached()
 
+    def _collect_uncached(self) -> DataReport:
         warnings: List[str] = []
         fetched: List[Dict[str, Optional[str]]] = []
         fetch_ok = True

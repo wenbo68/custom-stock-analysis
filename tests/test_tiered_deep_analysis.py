@@ -449,6 +449,29 @@ class GradeSheetRowsTest(unittest.TestCase):
         )
 
 
+class BlankStringTest(unittest.TestCase):
+    """An empty or whitespace-only string is a blank field like null
+    (review 2026-10-10): it used to be a grade-sheet row whose injected
+    link then failed LinkModel's "must carry a value" rule inside the
+    lister thread, failing the whole deep analysis."""
+
+    def _dims(self):
+        tech = _technicals()
+        tech.payload["sector"] = ""
+        tech.payload["note"] = "   "
+        return [tech, _positioning()]
+
+    def test_blank_strings_get_no_row(self):
+        refs = gradable_field_refs(self._dims())
+        self.assertEqual(refs["technicals"], T_REFS)
+
+    def test_a_run_with_a_blank_string_field_still_computes_an_outlook(self):
+        result, _ = _run(data_reports=self._dims())
+        self.assertIsNotNone(result.outlook)
+        self.assertFalse(any("deep analysis LLM call failed" in w
+                             for w in result.warnings))
+
+
 class EnvelopeRefResolutionTest(unittest.TestCase):
     """v2 refs land on the envelope path and resolve to its value."""
 
@@ -703,7 +726,7 @@ class VoteOutcomeTest(unittest.TestCase):
         self.assertEqual(t2["final_status"], "excluded")
         self.assertEqual(t2["exclusion_reason"], "unresolved")
         self.assertTrue(
-            any("deciding round invalid after retry — tied vote items excluded" in w
+            any("deciding round unusable — tied vote items excluded" in w
                 for w in result.warnings)
         )
         self.assertTrue(
@@ -714,7 +737,7 @@ class VoteOutcomeTest(unittest.TestCase):
         result, fake = _run(_replies(check="not json"))
         self.assertIsNotNone(result.outlook)
         self.assertTrue(
-            any("check round invalid after retry — vote items counted on" in w
+            any("check round unusable — vote items counted on" in w
                 for w in result.warnings)
         )
         self.assertNotIn("decider", fake.stages())
@@ -926,7 +949,10 @@ class StruckBulletTest(unittest.TestCase):
         self.assertIsNone(t2["score"])  # in no pool, so no final score
         self.assertEqual(t2["final_status"], "excluded")
         self.assertEqual(t2["exclusion_reason"], "citation_failed")
-        self.assertTrue(any("must be copied exactly" in p for p in t2["problems"]))
+        # The fix reply misquoted its own field's link (999); code owns
+        # that link and re-injects the true value, so the problem left
+        # is the claim not containing it.
+        self.assertTrue(any("must appear in the" in p for p in t2["problems"]))
         self.assertTrue(
             any("struck from the list" in w for w in result.warnings)
         )
@@ -980,6 +1006,33 @@ class StruckBulletTest(unittest.TestCase):
         self.assertEqual(t2["links"][0]["value"], "100")
         self.assertEqual(t2["final_status"], "counted")
         self.assertFalse(any("struck" in w for w in result.warnings))
+
+    def test_a_fix_reply_that_drops_the_own_link_gets_it_back(self):
+        # The fix reply repoints T2's only link at the RSI field (and
+        # quotes it in the claim, so the citation check passes). The
+        # graded field's own link is code's, not the AI's: it is
+        # re-injected first, exactly as _sheet_items did (review
+        # 2026-10-10 — a stored vote item named field X with no link to X).
+        repointed = _item(
+            "T2", "technicals", "bearish",
+            "The closing price (100) sits under the 14-day RSI (71.20) peak.",
+            [_vlink("technicals.rsi_14", "71.20")],
+        )
+        result, fake = _run(
+            _replies(
+                lister1=_sheet_reply(SHEET_1_BROKEN_CLOSE),
+                fix=_fix([repointed]),
+            )
+        )
+        self.assertEqual(fake.stages().count("fix"), 1)
+        t2 = _item_by_id(result, "T2")
+        self.assertFalse(t2["struck"])
+        self.assertEqual(t2["field"], "technicals.close")
+        self.assertEqual(
+            t2["links"],
+            [{"ref": "technicals.close", "value": "100"},
+             {"ref": "technicals.rsi_14", "value": "71.20"}],
+        )
 
     def test_the_fix_prompt_carries_only_the_broken_vote_items_and_errors(self):
         _, fake = _run(
@@ -1107,7 +1160,7 @@ class FailureRulesTest(unittest.TestCase):
         self.assertIsNone(result.outlook)
         self.assertEqual(result.items, [])
         self.assertTrue(
-            any("both lister grade sheets invalid after retry — deep-analysis "
+            any("both lister grade sheets unusable — deep-analysis "
                 "outlook voided" in w for w in result.warnings)
         )
 
@@ -1121,7 +1174,7 @@ class FailureRulesTest(unittest.TestCase):
         )
         self.assertIsNotNone(result.outlook)
         self.assertTrue(
-            any("lister 1 grade sheet invalid after retry — "
+            any("lister 1 grade sheet unusable — "
                 "proceeding with the other sheet only" in w
                 for w in result.warnings)
         )
@@ -1167,10 +1220,64 @@ class FailureRulesTest(unittest.TestCase):
                 for w in result.warnings)
         )
 
-    def test_llm_failure_mid_deep_analysis_fails_loud_without_a_outlook(self):
-        result, _ = _run(_replies(check=RuntimeError("llm down")))
+    # A failed CALL (timeout, 5xx) in one stage degrades exactly like an
+    # invalid reply in that stage (review 2026-10-10): before, one
+    # lister's transport error escaped the worker thread, voided the
+    # whole deep analysis and threw away the other lister's paid work.
+
+    def test_one_lister_llm_failure_proceeds_with_the_other(self):
+        votes = {
+            item_id: _vote("valid", "Fair reading.")
+            for item_id in ("T1", "T2", "P1", "P2", "P3")
+        }
+        result, _ = _run(
+            _replies(lister1=RuntimeError("timeout"), check=_check(votes))
+        )
+        self.assertIsNotNone(result.outlook)
+        self.assertEqual(len(result.items), 5)
+        self.assertIn(
+            "lister 1 grade sheet LLM call failed: timeout", result.warnings
+        )
+        self.assertTrue(
+            any("proceeding with the other sheet only" in w
+                for w in result.warnings)
+        )
+
+    def test_both_listers_llm_failure_voids(self):
+        result, _ = _run(
+            _replies(lister1=RuntimeError("timeout"),
+                     lister2=RuntimeError("502"))
+        )
         self.assertIsNone(result.outlook)
-        self.assertTrue(any("deep analysis LLM call failed" in w for w in result.warnings))
+        self.assertEqual(result.items, [])
+        self.assertIn("lister 1 grade sheet LLM call failed: timeout", result.warnings)
+        self.assertIn("lister 2 grade sheet LLM call failed: 502", result.warnings)
+        self.assertFalse(any("deep analysis LLM call failed" in w for w in result.warnings))
+
+    def test_check_round_llm_failure_counts_vote_items_on_the_lister_alone(self):
+        result, fake = _run(_replies(check=RuntimeError("llm down")))
+        self.assertIsNotNone(result.outlook)
+        self.assertIn("check round LLM call failed: llm down", result.warnings)
+        self.assertNotIn("decider", fake.stages())
+        for item in result.items:
+            self.assertEqual(item["final_status"], "counted")
+
+    def test_deciding_round_llm_failure_excludes_ties_as_unresolved(self):
+        result, _ = _run(_replies(decider=RuntimeError("llm down")))
+        self.assertIsNotNone(result.outlook)
+        self.assertIn("deciding round LLM call failed: llm down", result.warnings)
+        t2 = _item_by_id(result, "T2")
+        self.assertEqual(t2["final_status"], "excluded")
+        self.assertEqual(t2["exclusion_reason"], "unresolved")
+
+    def test_a_missing_llm_key_still_fails_the_whole_deep_analysis(self):
+        # Configuration is not a transport hiccup: nothing would work.
+        from src.tiered_analysis.llm_support import LlmConfigError
+
+        result, _ = _run(_replies(lister1=LlmConfigError("no key")))
+        self.assertIsNone(result.outlook)
+        self.assertTrue(any("deep analysis LLM call failed: no key" in w
+                            for w in result.warnings))
 
     def test_summary_number_without_a_link_goes_through_the_fix_loop(self):
         # First summary states 71.20 with no link → the code check fails →
@@ -1287,6 +1394,18 @@ class PromptContentTest(unittest.TestCase):
         self.assertIn("You give no outlook score", first)
         second = next(p for p in fake.prompts if "You are LISTER 2" in p)
         self.assertIn("you have NOT seen their work", second)
+
+    def test_the_link_shape_shows_single_braces(self):
+        # The rule texts are format VALUES, not templates, so "{{" was
+        # never collapsed: every grader, check and deciding prompt showed
+        # the model {{"ref": …}} as the shape to copy (review 2026-10-10).
+        _, fake = _run()
+        for prompt in fake.prompts:
+            self.assertNotIn('{{"ref"', prompt)
+        first = next(p for p in fake.prompts if "You are LISTER 1" in p)
+        self.assertIn('{"ref": the leaf field, "value": the value copied EXACTLY', first)
+        check = next(p for p in fake.prompts if "cast the second vote" in p)
+        self.assertIn('{"ref": the leaf field, "value": the value copied EXACTLY', check)
 
     def test_the_evidence_block_shows_display_values(self):
         _, fake = _run()

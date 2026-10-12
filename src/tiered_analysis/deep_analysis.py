@@ -100,6 +100,7 @@ from .deep_analysis_models import (
 )
 from .llm_support import (
     JSON_REPLY,
+    LlmConfigError,
     active_tracker,
     deterministic_summarizer,
     display_value,
@@ -325,6 +326,14 @@ def _payload_value(ref: str, data_reports: Sequence[DataReport]) -> Tuple[bool, 
                 break
         if is_envelope(node):
             node = node.get("value")
+        if isinstance(node, str) and not node.strip():
+            # An empty string is a blank field, like null: it carries no
+            # evidence, and a grade-sheet row for it would get an
+            # injected link with an empty value, which LinkModel refuses
+            # — inside the lister thread, failing the whole deep
+            # analysis (review 2026-10-10; an SEC entity name or sector
+            # can arrive as "").
+            node = None
         if node is not None and not isinstance(node, (dict, list)):
             return True, node
     return False, None
@@ -411,10 +420,14 @@ Collected evidence (the ONLY facts you may use — no outside knowledge):
 {language_rule}
 """
 
+# _LINK_RULES and _VOTE_RULES are passed to str.format as VALUES (the
+# templates below take them as {link_rules} / {vote_rules}), so they are
+# never formatted themselves: braces here are literal, single. Doubled
+# braces showed the model {{"ref": …}} as the shape to copy (2026-10-10).
 _LINK_RULES = """Link rules (all checked mechanically by code):
 - Every vote item carries "links": one entry per report field the sentence
-  uses, each {{"ref": the leaf field, "value": the value copied EXACTLY
-  as the report above displays it}}.
+  uses, each {"ref": the leaf field, "value": the value copied EXACTLY
+  as the report above displays it}.
 - The claim sentence must contain each linked value verbatim — "The
   14-day RSI (56.28) is above 50", never "RSI is high". Copy the
   displayed string exactly: if the report shows 56.28, write 56.28,
@@ -447,8 +460,8 @@ _VOTE_RULES = """Vote rules (checked mechanically by code):
   saying why you rated it that important. Plain words only — report
   numbers belong in the vote reason with links, never here.
 - If your reason states a number from the reports, cite it with a link
-  {{"ref": the leaf field, "value": the value copied EXACTLY as the
-  report displays it}} and write that exact value in your reason.
+  {"ref": the leaf field, "value": the value copied EXACTLY as the
+  report displays it} and write that exact value in your reason.
 - The reason is a plain sentence for a human reader — never paste refs
   or link JSON into it; refs belong in "links" only.
 - Code verifies every link and sends failures back to you to fix; votes
@@ -824,16 +837,18 @@ class DeepAnalysisEngine:
         # Step 1 — the two lister grade sheets, in parallel (blind),
         # each converted to vote items with its own citation-fix loop.
         first, second = self._listers(context, data_reports, refs, warnings)
+        # These degrade notes say what happened to the run, not why: the
+        # cause is already its own warning just before (invalid after
+        # retry, or an LLM call that failed — 2026-10-12).
         if first is None and second is None:
             warnings.append(
-                "both lister grade sheets invalid after retry — deep-analysis "
-                "outlook voided"
+                "both lister grade sheets unusable — deep-analysis outlook voided"
             )
             return DeepAnalysisResult(items=items, warnings=warnings)
         if first is None or second is None:
             which = "1" if first is None else "2"
             warnings.append(
-                f"lister {which} grade sheet invalid after retry — "
+                f"lister {which} grade sheet unusable — "
                 "proceeding with the other sheet only"
             )
 
@@ -868,7 +883,7 @@ class DeepAnalysisEngine:
             )
             if votes is None:
                 warnings.append(
-                    "check round invalid after retry — vote items counted on "
+                    "check round unusable — vote items counted on "
                     "their lister's vote alone"
                 )
             else:
@@ -897,7 +912,7 @@ class DeepAnalysisEngine:
             )
             if votes is None:
                 warnings.append(
-                    "deciding round invalid after retry — tied vote items "
+                    "deciding round unusable — tied vote items "
                     "excluded as unresolved"
                 )
             else:
@@ -1010,16 +1025,28 @@ class DeepAnalysisEngine:
                     stage_warnings.extend(call_warnings)
                     return model
 
-                model = in_language(ask, prompt, _sheet_texts, stage, stage_warnings)
-                if model is None:
+                try:
+                    model = in_language(ask, prompt, _sheet_texts, stage, stage_warnings)
+                    if model is None:
+                        return None, stage_warnings
+                    sheet_items, ref_by_id = self._sheet_items(
+                        model, refs, data_reports
+                    )
+                    fixed_items, broken = self._fix_citations(
+                        sheet_items, data_reports, stage, stage_warnings,
+                        ref_by_id=ref_by_id,
+                    )
+                    return (fixed_items, broken, ref_by_id), stage_warnings
+                except LlmConfigError:
+                    raise  # no key: nothing would work — fail the whole run
+                except Exception as exc:
+                    # A failed CALL (timeout, 5xx) degrades like an
+                    # invalid sheet: this lister drops out and the other
+                    # one's finished, paid work stays (review 2026-10-10
+                    # — before, the error escaped the worker thread and
+                    # voided the whole deep analysis).
+                    stage_warnings.append(f"{stage} LLM call failed: {exc}")
                     return None, stage_warnings
-                sheet_items, ref_by_id = self._sheet_items(
-                    model, refs, data_reports
-                )
-                fixed_items, broken = self._fix_citations(
-                    sheet_items, data_reports, stage, stage_warnings
-                )
-                return (fixed_items, broken, ref_by_id), stage_warnings
 
             if tracker is None:
                 return job()
@@ -1061,18 +1088,13 @@ class DeepAnalysisEngine:
                     continue
                 counters[prefix] = counters.get(prefix, 0) + 1
                 item_id = f"{prefix}{counters[prefix]}"
-                _resolves, value = _payload_value(ref, data_reports)
-                own_link = LinkModel(ref=ref, value=display_value(value))
-                extra_links = [
-                    link for link in grade.links if link.ref.strip() != ref
-                ]
                 items.append(
                     EvidenceItemModel(
                         id=item_id,
                         data_report=data_report,
                         item_outlook=grade.item_outlook,
                         claim=(grade.claim or "").strip(),
-                        links=[own_link, *extra_links],
+                        links=_links_with_own(ref, grade.links, data_reports),
                         score=grade.score,
                         score_reason=grade.score_reason,
                     )
@@ -1225,12 +1247,19 @@ class DeepAnalysisEngine:
         data_reports: Sequence[DataReport],
         stage: str,
         warnings: List[str],
+        ref_by_id: Optional[Dict[str, str]] = None,
     ) -> Tuple[List[EvidenceItemModel], Dict[str, List[str]]]:
         """Run the code citation check, send broken vote items back to the
         same AI (only the broken ones), splice fixes in, repeat up to
         MAX_FIX_ROUNDS. Returns (items with fixes applied, still-broken
         id → errors). Successful fixes leave no trace — the UI shows only
-        the end state."""
+        the end state.
+
+        ``ref_by_id`` (vote item id → the field it grades) keeps the
+        graded field's own link code's through the fix rounds: a fix
+        reply may drop or repoint it, and the item still verified on its
+        remaining links, so the stored vote item named field X with no
+        link to X (review 2026-10-10)."""
         fixed = list(items)
         index_by_id = {item.id: index for index, item in enumerate(fixed)}
         broken: Dict[str, List[str]] = {}
@@ -1272,6 +1301,15 @@ class DeepAnalysisEngine:
                         "score_reason": original.score_reason,
                     }
                 )
+                field = (ref_by_id or {}).get(candidate.id)
+                if field is not None:
+                    candidate = candidate.model_copy(
+                        update={
+                            "links": _links_with_own(
+                                field, candidate.links, data_reports
+                            ),
+                        }
+                    )
                 fixed[index_by_id[candidate.id]] = candidate
                 errors = self._link_errors(candidate, data_reports)
                 if errors:
@@ -1363,10 +1401,20 @@ class DeepAnalysisEngine:
             warnings.extend(stage_warnings)
             return model
 
-        model = in_language(ask, prompt, _vote_texts, stage, warnings)
-        if model is None:
+        try:
+            model = in_language(ask, prompt, _vote_texts, stage, warnings)
+            if model is None:
+                return None
+            return self._fix_votes(model.votes, data_reports, stage, warnings)
+        except LlmConfigError:
+            raise  # no key: nothing would work — fail the whole run
+        except Exception as exc:
+            # A failed call degrades like an invalid round: the callers'
+            # "round invalid" branches apply (vote items counted on the
+            # lister alone / ties excluded) instead of voiding everything
+            # (review 2026-10-10).
+            warnings.append(f"{stage} LLM call failed: {exc}")
             return None
-        return self._fix_votes(model.votes, data_reports, stage, warnings)
 
     @staticmethod
     def _attach_votes(
@@ -1795,6 +1843,20 @@ def _validation_text(exc: Exception) -> str:
         ]
         return "; ".join(parts) or str(exc)
     return str(exc)
+
+
+def _links_with_own(
+    field: str,
+    links: Sequence[LinkModel],
+    data_reports: Sequence[DataReport],
+) -> List[LinkModel]:
+    """A vote item's links with the graded field's own citation first,
+    injected by code with the exact display value (the AI cannot
+    misquote its own field); any link the AI wrote for that same field
+    is replaced, cross-field links stay."""
+    _resolves, value = _payload_value(field, data_reports)
+    own_link = LinkModel(ref=field, value=display_value(value))
+    return [own_link, *[link for link in links if link.ref.strip() != field]]
 
 
 def _link_detail(link) -> Dict[str, Any]:

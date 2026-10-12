@@ -615,3 +615,46 @@ class TestDebateEnumeration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestColdDayConcurrency(unittest.TestCase):
+    """Two runs starting on a cold day used to both fetch the feed and
+    both run the news screen; the second now waits and reads the
+    first's day cache."""
+
+    def test_concurrent_cold_runs_fetch_and_screen_once(self):
+        import threading
+
+        fetches, screens = [], []
+        started, release = threading.Event(), threading.Event()
+
+        def loader():
+            fetches.append(1)
+            started.set()
+            release.wait(timeout=5)
+            return news_fixture()
+
+        def screener(entries):
+            screens.append(1)
+            return passthrough_screener(entries)
+
+        provider = WorldNewsProvider(
+            news_loader=loader, today=lambda: TODAY,
+            screener=screener, cache=MemoryCacheStore(),
+        )
+        results = []
+        workers = [
+            threading.Thread(target=lambda: results.append(provider.collect("AAPL")))
+            for _ in range(2)
+        ]
+        workers[0].start()
+        self.assertTrue(started.wait(timeout=5))
+        workers[1].start()
+        release.set()
+        for worker in workers:
+            worker.join(timeout=10)
+
+        self.assertEqual(len(fetches), 1)
+        self.assertEqual(len(screens), 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].payload, results[1].payload)

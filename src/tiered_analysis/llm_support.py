@@ -313,28 +313,40 @@ def in_language(
     stubborn model costs wording, never the run.
 
     ``ask`` is the stage's own validated request (its JSON shape retry
-    included) and returns None when that failed, which ends this loop
-    too: there is no language to check on a reply that never parsed."""
+    included) and returns None when that failed. A first reply that never
+    parsed ends this loop with None: there is no language to check. A
+    RETRY that never parsed does not — the reply already in hand is
+    valid, only worded in the wrong language, so it is kept as written
+    (with the warning). Returning None there voided a whole stage over
+    wording (review 2026-10-10)."""
     language = run_language()
     result = ask(prompt)
-    problem: Optional[str] = None
+    if result is None:
+        return None
+    retries = 0
     for _attempt in range(LANGUAGE_RETRY_LIMIT):
-        if result is None:
-            return None
         problem = language_problem(texts_of(result), language)
         if problem is None:
             return result
         warnings.append(f"{stage} needed a retry — {problem}")
-        result = ask(_LANGUAGE_RETRY_TEMPLATE.format(
+        retries += 1
+        retried = ask(_LANGUAGE_RETRY_TEMPLATE.format(
             prompt=prompt, problem=problem, name=language_name(language),
         ))
-    if result is not None:
-        problem = language_problem(texts_of(result), language)
-        if problem is not None:
-            warnings.append(
-                f"{stage} {problem} after {LANGUAGE_RETRY_LIMIT} retries — shown as written"
-            )
+        if retried is None:
+            warnings.append(_kept_as_written(stage, problem, retries))
+            return result
+        result = retried
+    problem = language_problem(texts_of(result), language)
+    if problem is not None:
+        warnings.append(_kept_as_written(stage, problem, retries))
     return result
+
+
+def _kept_as_written(stage: str, problem: str, retries: int) -> str:
+    """The warning for a reply kept in the wrong language."""
+    noun = "retry" if retries == 1 else "retries"
+    return f"{stage} {problem} after {retries} {noun} — shown as written"
 
 
 def _record_transcript(
@@ -448,6 +460,10 @@ def _summarize(
             else:
                 raise
     except Exception as exc:
+        # The failed call was still a call: it counts toward the run's
+        # usage (with no tokens, since none came back) so a stage with
+        # only failures does not show 0 calls (review 2026-10-10).
+        record_llm_usage(None, None)
         # The failed exchange is exactly what a transcript exists for.
         _record_transcript(
             tracker,

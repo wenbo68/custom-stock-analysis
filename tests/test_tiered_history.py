@@ -294,6 +294,15 @@ class TestFilters:
         assert self._ids(tickers=["AAPL"], statuses=["done"]) == ["bull"]
         assert self._ids(tiers=[1], outlooks=["no_outlook"]) == ["blank", "dead"]
 
+    def test_timestamps_carry_the_utc_offset(self, isolated_db):
+        """Regression (2026-10-10): a run's times went out naive although
+        they are UTC; chat tool results hand them to the model next to
+        offset-bearing clocks."""
+        create_run("stamped", "AAPL")
+        run = get_run("stamped")
+        assert run["created_at"].endswith("+00:00") and run["updated_at"].endswith("+00:00")
+        assert list_runs()["items"][0]["created_at"].endswith("+00:00")
+
     def test_date_range_compares_in_utc(self, isolated_db):
         from src.storage import DatabaseManager, TieredRunRecord
 
@@ -335,7 +344,7 @@ class TestSections:
         "levels_detail": {"levels": {}}, "sizing": {"shares": 3},
         "plan_warnings": {},
         "deep_analysis": {"outlook": "bullish", "score": 7.5,
-                  "detail": {"items": [{"id": "t1"}]}},
+                          "detail": {"items": [{"id": "t1"}]}},
     }
 
     INDEX = [
@@ -349,7 +358,7 @@ class TestSections:
         assert get_run("task-1")["result"] == {
             **self.FULL,
             "deep_analysis": {"outlook": "bullish", "score": 7.5,
-                      "detail": {"item_count": 1}},
+                              "detail": {"item_count": 1}},
             "data_report_index": self.INDEX,
         }
 

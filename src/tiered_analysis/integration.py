@@ -79,11 +79,15 @@ BARS_CALENDAR_DAYS = 400
 
 
 def dsa_bars_loader(ticker: str, manager: Any = None) -> List[Bar]:
-    """Daily bars via DSA's multi-source data layer, oldest first."""
-    if manager is None:
-        from data_provider.base import DataFetcherManager
+    """Daily bars via DSA's multi-source data layer, oldest first.
 
-        manager = DataFetcherManager()
+    Every load shares the process's one manager (2026-10-10): a run
+    loads bars three or four times, and a manager per load would give
+    each load its own rate-limit clocks and vendor locks."""
+    if manager is None:
+        from data_provider.base import default_manager
+
+        manager = default_manager()
 
     # The last completed session: the manager tops up a lagging vendor
     # toward it, and the bars are trimmed to it below.
@@ -394,7 +398,7 @@ def run_tiered_analysis(
         earnings = (
             earnings_lookup(ticker, market)
             if earnings_lookup is not None
-            else _earnings_from_dimensions(data_reports)
+            else _earnings_from_dimensions(data_reports, market=market)
         )
         extra_warnings = level_warnings
 

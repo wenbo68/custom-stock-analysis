@@ -151,8 +151,13 @@ def get_conversation(conversation_id: str) -> Dict[str, Any]:
 
 @router.delete("/conversations/{conversation_id}", response_model=ConversationDeleted)
 def delete_conversation(conversation_id: str) -> Dict[str, str]:
-    """Remove the conversation and its messages. 404 for an unknown id."""
-    if not store.delete_conversation(conversation_id):
+    """Remove the conversation and its messages. 404 for an unknown id;
+    409 `busy` while a turn is running on it (try again when it ends)."""
+    try:
+        deleted = harness.delete_conversation(conversation_id)
+    except ConversationBusyError:
+        raise HTTPException(status_code=409, detail={"code": "busy"})
+    if not deleted:
         raise HTTPException(status_code=404, detail="conversation not found")
     return {"id": conversation_id}
 

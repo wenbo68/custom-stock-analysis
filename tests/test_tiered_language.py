@@ -96,6 +96,26 @@ class TestInLanguage(unittest.TestCase):
             "stage reply not in Simplified Chinese after 2 retries — shown as written",
         )
 
+    def test_a_retry_that_does_not_parse_keeps_the_earlier_reply(self):
+        # The first reply parsed but spoke the wrong language; the retry
+        # came back unparseable. A valid reply in the wrong language beats
+        # no reply: the stage keeps it, with the "shown as written" warning,
+        # instead of reporting "produced no outlook" (review 2026-10-10).
+        prompts = []
+
+        def ask(prompt):
+            prompts.append(prompt)
+            return None if CORRECTION_MARKER in prompt else ENGLISH
+
+        warnings = []
+        result = _in_chinese(lambda: in_language(ask, "prompt", lambda t: [t], "stage", warnings))
+        self.assertEqual(result, ENGLISH)
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(warnings, [
+            "stage needed a retry — reply not in Simplified Chinese",
+            "stage reply not in Simplified Chinese after 1 retry — shown as written",
+        ])
+
     def test_an_unparsed_reply_ends_the_loop_with_nothing_to_check(self):
         ask = Replying(None)
         warnings = []

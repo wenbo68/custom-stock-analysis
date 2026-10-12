@@ -69,6 +69,25 @@ def _as_date(value: Any) -> Optional[_dt.date]:
     return None
 
 
+def market_today(
+    market: Any = None, now: Optional[_dt.datetime] = None
+) -> _dt.date:
+    """Today's date on the MARKET's clock (``Market`` or its string tag).
+
+    The as-of dates these gates compare against are market dates, so
+    "today" must be too: on a UTC host after 20:00 New York time the
+    server's date is already tomorrow, and a 7-day gate fired a day
+    early or late (review 2026-10-10). An unknown market, or none, keeps
+    the given clock (``now``, else the system clock). ``now`` exists for
+    tests with a fixed clock."""
+    from src.core.trading_calendar import get_market_now
+
+    tag = market.value if isinstance(market, Market) else market
+    if tag == Market.UNKNOWN.value:
+        tag = None
+    return get_market_now(tag, now).date()
+
+
 def _yfinance_earnings_dates(ticker: str) -> List[_dt.date]:
     """All earnings dates yfinance knows for a US ticker (may be empty)."""
     import yfinance as yf
@@ -102,7 +121,7 @@ def next_earnings_info(
             note=f"earnings calendar not yet available for market {market.value}"
         )
     if today is None:
-        today = _dt.date.today()
+        today = market_today(market)
     if fetcher is None:
         fetcher = _yfinance_earnings_dates
 
@@ -134,11 +153,14 @@ def earnings_warning(info: EarningsInfo) -> Optional[str]:
 
 
 def earnings_from_data_reports(
-    data_reports: Any, today: Optional[_dt.date] = None
+    data_reports: Any,
+    today: Optional[_dt.date] = None,
+    market: Any = None,
 ) -> EarningsInfo:
     """The next earnings date the fundamentals provider already fetched
     (no second network call). Shared by the run-detail block and the
     plan review's earnings gate (2026-07-27) so both read one source.
+    ``today`` defaults to the market's own date (``market_today``).
 
     Reads all three payload generations: v3 (2026-07-31) nests the date
     under ``quarterly_report`` with no days field — days are computed
@@ -147,7 +169,7 @@ def earnings_from_data_reports(
     from .providers.technicals import metric_value
 
     if today is None:
-        today = _dt.date.today()
+        today = market_today(market)
     for dim in data_reports:
         if getattr(dim, "name", None) != "fundamentals" or not dim.payload:
             continue

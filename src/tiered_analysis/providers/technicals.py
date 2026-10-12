@@ -675,6 +675,28 @@ def typical_pullback_atr(
 # ---------------------------------------------------------------------------
 
 
+def align_benchmark(
+    bars: List[Bar], index_bars: List[Bar]
+) -> Tuple[List[float], List[float], Optional[str]]:
+    """Closes of the stock and of the index cut to their common last
+    date, plus that date (None when either series carries no dates, in
+    which case nothing is cut).
+
+    The stock can be topped up to Friday while the index still ends
+    Thursday (the top-up only serves stocks); taking the last N closes
+    of each would then compare different weeks (review 2026-10-10)."""
+    stock_last = bars[-1].date if bars else None
+    index_last = index_bars[-1].date if index_bars else None
+    if not stock_last or not index_last:
+        return [b.close for b in bars], [b.close for b in index_bars], None
+    common = min(stock_last, index_last)
+    return (
+        [b.close for b in bars if not b.date or b.date <= common],
+        [b.close for b in index_bars if not b.date or b.date <= common],
+        common,
+    )
+
+
 def relative_strength_pct(
     closes: List[float], index_closes: List[float], window: int
 ) -> Optional[float]:
@@ -921,7 +943,7 @@ class TechnicalsProvider(DataReportProvider):
         pullback = typical_pullback_atr(daily_highs, daily_lows, atr)
 
         regime, rs_1m, rs_3m, rs_label, bench_receipts = (
-            self._benchmark_fields(closes, warnings, field_warnings)
+            self._benchmark_fields(bars, warnings, field_warnings)
         )
 
         # Receipt ingredients (UI formulas): values the formulas divide
@@ -1598,7 +1620,7 @@ class TechnicalsProvider(DataReportProvider):
 
     def _benchmark_fields(
         self,
-        closes: List[float],
+        bars: List[Bar],
         warnings: List[str],
         field_warnings: Dict[str, List[str]],
     ) -> Tuple[
@@ -1609,7 +1631,9 @@ class TechnicalsProvider(DataReportProvider):
         with None values + a warning when the benchmark is unwired or
         its fetch fails; the last element maps "rs_1m" / "rs_3m" /
         "rs_label" / "regime" to that receipt's plugged-in inputs (a key
-        is absent when its ingredients are)."""
+        is absent when its ingredients are). The stock and the index are
+        compared through their common last date (``align_benchmark``),
+        with a warning when the two series end on different days."""
         regime_name = "market trend"
         rs_1m_name = "1m return diff (stock vs market)"
         rs_name = "3m return diff (stock vs market)"
@@ -1668,7 +1692,17 @@ class TechnicalsProvider(DataReportProvider):
             index_bars = list(self._index_bars_loader())
         except Exception as exc:
             return _absent(f"benchmark index bars unavailable: {exc}")
-        index_closes = [bar.close for bar in index_bars]
+        closes, index_closes, common_date = align_benchmark(bars, index_bars)
+        if common_date is not None and bars[-1].date != index_bars[-1].date:
+            # Bar dates may carry a time part ("2026-09-18 00:00:00");
+            # the sentence names the day only.
+            warn_fields(
+                warnings, field_warnings,
+                f"benchmark index bars end {index_bars[-1].date[:10]}, the "
+                f"stock's end {bars[-1].date[:10]} — market trend and "
+                f"relative strength measured through {common_date[:10]}",
+                BENCHMARK_FIELDS,
+            )
         regime = regime_read(index_closes)
         rs_1m = relative_strength_pct(closes, index_closes, RS_WINDOW_1M)
         rs_3m = relative_strength_pct(closes, index_closes, RS_WINDOW_3M)

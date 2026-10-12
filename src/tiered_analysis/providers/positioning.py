@@ -423,7 +423,11 @@ def implied_report_move(
     )
     for chain in chains:
         expiration = str(chain.get("expiration") or "")
-        if not expiration or expiration < earnings_date:
+        # Strictly after: whether the report lands before the open or
+        # after the close is unknown, and an expiry on the report day
+        # itself can end before the jump (a Friday after-close report
+        # against a Friday expiry). The later expiry is the safe pick.
+        if not expiration or expiration <= earnings_date:
             continue
         call_mid = _quote_mid(chain, "atm_call_bid", "atm_call_ask")
         put_mid = _quote_mid(chain, "atm_put_bid", "atm_put_ask")
@@ -1237,7 +1241,10 @@ class PositioningUSProvider(DataReportProvider):
                 "The size of price jump the options market prices in "
                 "for the next quarterly report, in % — from the "
                 "at-the-money call + put prices on the first expiration "
-                "after the report date. Unsigned: option prices say how "
+                "strictly after the report date (an expiry on the report "
+                "day itself is skipped: the report's timing within that "
+                "day is unknown, so it could end before the jump). "
+                "Unsigned: option prices say how "
                 "BIG the jump should be, not which way (read it as ±). "
                 "Published only when the report is within ~3 weeks — "
                 "further out, option prices mostly reflect ordinary "

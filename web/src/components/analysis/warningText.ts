@@ -174,6 +174,17 @@ const NOTE_RULES: NoteRule[] = [
     keywordKey: KEY.levels,
     toText: (_m, t) => t('tiered.warning.adjustUnknownLevel'),
   },
+  // A later round's proposal was rejected, so the earlier ACCEPTED one
+  // for that level stands (2026-10-10) — not the formula's number.
+  {
+    pattern: /^adjustment for '?(\w+)'? rejected: .* — the earlier accepted value (.+) kept$/,
+    keywordKey: KEY.levels,
+    toText: (m, t) =>
+      t('tiered.warning.adjustmentRejectedEarlierKept', {
+        level: levelLabel(m[1], t),
+        value: m[2],
+      }),
+  },
   {
     pattern: /^adjustment for '?(\w+)'?\b/,
     keywordKey: KEY.levels,
@@ -203,8 +214,11 @@ const NOTE_RULES: NoteRule[] = [
     toText: (_m, t) => t('tiered.warning.noEntryNoStop'),
   },
   // --- deep-analysis warnings (tier 2) ---
+  // The degrade notes said "invalid after retry" until 2026-10-12 and
+  // "unusable" since (a failed LLM call degrades the same way now); the
+  // cause is its own note, so stored runs of both shapes word alike.
   {
-    pattern: /^lister ([12]) grade sheet invalid after retry — proceeding with/,
+    pattern: /^lister ([12]) grade sheet (?:invalid after retry|unusable) — proceeding with/,
     keywordKey: KEY.vote,
     toText: (m, t) =>
       t('tiered.warning.listerDegradedRole', {
@@ -212,7 +226,7 @@ const NOTE_RULES: NoteRule[] = [
       }),
   },
   {
-    pattern: /^both lister grade sheets invalid after retry — deep-analysis outlook voided$/,
+    pattern: /^both lister grade sheets (?:invalid after retry|unusable) — deep-analysis outlook voided$/,
     keywordKey: KEY.outlook,
     toText: (_m, t) => t('tiered.warning.sheetsVoided'),
   },
@@ -238,12 +252,12 @@ const NOTE_RULES: NoteRule[] = [
     toText: (m, t) => t('tiered.warning.preliminaryReplyRejected', { problem: m[1] }),
   },
   {
-    pattern: /^check round invalid after retry — vote items counted on/,
+    pattern: /^check round (?:invalid after retry|unusable) — vote items counted on/,
     keywordKey: KEY.vote,
     toText: (_m, t) => t('tiered.warning.checkDegraded'),
   },
   {
-    pattern: /^deciding round invalid after retry — tied vote items excluded/,
+    pattern: /^deciding round (?:invalid after retry|unusable) — tied vote items excluded/,
     keywordKey: KEY.vote,
     toText: (_m, t) => t('tiered.warning.tiebreakDegraded'),
   },
@@ -299,9 +313,10 @@ const NOTE_RULES: NoteRule[] = [
         language: languageLabel(m[2], t),
       }),
   },
-  // … and, when the retries ran out, the last reply is shown as written.
+  // … and, when the retries ran out (or a retry did not parse at all,
+  // 2026-10-10), the last parsed reply is shown as written.
   {
-    pattern: /^(.+) reply not in (.+) after (\d+) retries — shown as written$/,
+    pattern: /^(.+) reply not in (.+) after (\d+) retr(?:y|ies) — shown as written$/,
     keywordKey: KEY.aiReply,
     toText: (m, t) =>
       t('tiered.warning.stageWrongLanguageKept', {
@@ -309,6 +324,14 @@ const NOTE_RULES: NoteRule[] = [
         language: languageLabel(m[2], t),
         retries: m[3],
       }),
+  },
+  // A failed CALL (timeout, 5xx) in one lister or vote round degrades
+  // like an invalid reply there since 2026-10-10; the stage names itself.
+  {
+    pattern: /^(lister [12] grade sheet|check round|deciding round) LLM call failed: (.*)$/,
+    keywordKey: KEY.aiReply,
+    toText: (m, t) =>
+      t('tiered.warning.stageCallFailed', { role: stageRole(m[1], t), error: m[2] }),
   },
   {
     pattern: /^(.+?)(?: was not JSON even after a retry$| invalid after retry: )/,
@@ -401,6 +424,14 @@ const NOTE_RULES: NoteRule[] = [
     toText: (_m, t) => t('tiered.warning.benchmarkBarsFailed'),
   },
   {
+    // src/tiered_analysis/providers/technicals.py (review 2026-10-10, D5)
+    pattern:
+      /^benchmark index bars end (\S+), the stock's end (\S+) — market trend and relative strength measured through (\S+)$/,
+    keywordKey: KEY.missingData,
+    toText: (m, t) =>
+      t('tiered.warning.benchmarkDateMismatch', { index: m[1], stock: m[2], through: m[3] }),
+  },
+  {
     pattern: /^sector ETF (\S+) bars unavailable/,
     keywordKey: KEY.fetchFailed,
     toText: (m, t) => t('tiered.warning.sectorBarsFailed', { ticker: m[1] }),
@@ -425,6 +456,11 @@ const NOTE_RULES: NoteRule[] = [
     pattern: /^plan review LLM call failed/,
     keywordKey: KEY.aiReply,
     toText: (_m, t) => t('tiered.warning.planReviewCallFailed'),
+  },
+  {
+    pattern: /^plan review got no usable reply even after a fix round$/,
+    keywordKey: KEY.aiReply,
+    toText: (_m, t) => t('tiered.warning.planReviewNoReply'),
   },
   {
     pattern: /^plan review skipped:/,
@@ -633,6 +669,11 @@ const NOTE_RULES: NoteRule[] = [
     pattern: /^news judge gave no judgment for (\d+) article\(s\) — those kept$/,
     keywordKey: KEY.aiReply,
     toText: (m, t) => t('tiered.warning.newsJudgeMissing', { count: m[1] }),
+  },
+  {
+    pattern: /^news judge gave an unreadable importance for (\d+) article\(s\) — those kept, judged again next run$/,
+    keywordKey: KEY.aiReply,
+    toText: (m, t) => t('tiered.warning.newsJudgeUnreadable', { count: m[1] }),
   },
   {
     pattern: /^news grouping (?:LLM call failed: .*|returned no usable JSON) — no grouping$/,

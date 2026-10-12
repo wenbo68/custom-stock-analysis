@@ -185,6 +185,61 @@ class TestEdgarSeries(unittest.TestCase):
         }
         self.assertEqual(extract_annual_series(facts, "Revenues"), {"2024-09-30": 2.0})
 
+    def test_a_fourth_quarter_row_sharing_the_fy_end_is_not_the_annual_value(self):
+        # Some filers tag the Q4 frame in the 10-K with fp=FY and the same
+        # end date as the fiscal year; whichever came later in the JSON
+        # used to win, making FY gross profit / Q4 revenue a ~4x margin.
+        facts = {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": _concept([
+                        _fy_row("2024-09-30", 100.0, 2024, start="2023-10-01"),
+                        {"start": "2024-07-01", "end": "2024-09-30", "val": 30.0,
+                         "fy": 2024, "fp": "FY", "form": "10-K"},
+                    ])
+                }
+            }
+        }
+        self.assertEqual(extract_annual_series(facts, "Revenues"), {"2024-09-30": 100.0})
+
+    def test_quarter_row_first_then_fy_row_still_picks_the_year(self):
+        facts = {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": _concept([
+                        {"start": "2024-07-01", "end": "2024-09-30", "val": 30.0,
+                         "fy": 2024, "fp": "FY", "form": "10-K"},
+                        _fy_row("2024-09-30", 100.0, 2024, start="2023-10-01"),
+                    ])
+                }
+            }
+        }
+        self.assertEqual(extract_annual_series(facts, "Revenues"), {"2024-09-30": 100.0})
+
+    def test_instant_balance_sheet_rows_have_no_start_and_stay(self):
+        facts = {
+            "facts": {
+                "us-gaap": {
+                    "StockholdersEquity": _concept([_fy_row("2024-09-30", 60.5, 2024)])
+                }
+            }
+        }
+        self.assertEqual(
+            extract_annual_series(facts, "StockholdersEquity"), {"2024-09-30": 60.5}
+        )
+
+    def test_a_53_week_fiscal_year_still_counts_as_a_year(self):
+        facts = {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": _concept([
+                        _fy_row("2024-09-28", 100.0, 2024, start="2023-09-24"),  # 370 days
+                    ])
+                }
+            }
+        }
+        self.assertEqual(extract_annual_series(facts, "Revenues"), {"2024-09-28": 100.0})
+
     def test_ttm_value_combines_fy_and_ytd(self):
         value, end, basis = ttm_value(FAKE_FACTS, OPERATING_CASH_FLOW_CONCEPTS)
         self.assertAlmostEqual(value, 110e9)
@@ -681,3 +736,87 @@ class TestLiveEdgarSanity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCikDirectory(unittest.TestCase):
+    """The SEC ticker-to-CIK map used to be downloaded once per process and
+    never again: a ticker listed after startup stayed unknown until a
+    restart, and two cold runs downloaded the file at the same time."""
+
+    def _directory(self, maps, clock):
+        from src.tiered_analysis.providers.fundamentals_us import CikDirectory
+
+        fetches = []
+
+        def fetch():
+            fetches.append(1)
+            return dict(maps[min(len(fetches) - 1, len(maps) - 1)])
+
+        return CikDirectory(fetch=fetch, clock=lambda: clock["t"]), fetches
+
+    def test_a_miss_right_after_a_download_does_not_download_again(self):
+        clock = {"t": 0.0}
+        directory, fetches = self._directory([{"AAPL": 320193}], clock)
+        self.assertEqual(directory.resolve("aapl"), 320193)
+        with self.assertRaises(LookupError):
+            directory.resolve("NEWCO")
+        self.assertEqual(len(fetches), 1)
+
+    def test_a_miss_after_an_hour_downloads_once_more_and_finds_the_new_ticker(self):
+        from src.tiered_analysis.providers.fundamentals_us import CIK_MAP_REFRESH_SECONDS
+
+        clock = {"t": 0.0}
+        directory, fetches = self._directory(
+            [{"AAPL": 320193}, {"AAPL": 320193, "NEWCO": 99}], clock,
+        )
+        self.assertEqual(directory.resolve("AAPL"), 320193)
+        clock["t"] = CIK_MAP_REFRESH_SECONDS + 1
+        self.assertEqual(directory.resolve("NEWCO"), 99)
+        self.assertEqual(len(fetches), 2)
+        # Still missing after a fresh download: the warning path stays.
+        with self.assertRaises(LookupError):
+            directory.resolve("GHOST")
+        self.assertEqual(len(fetches), 2)
+
+    def test_concurrent_cold_lookups_download_the_map_once(self):
+        import threading
+        from src.tiered_analysis.providers.fundamentals_us import CikDirectory
+
+        started, release = threading.Event(), threading.Event()
+        fetches = []
+
+        def fetch():
+            fetches.append(1)
+            started.set()
+            release.wait(timeout=5)
+            return {"AAPL": 320193}
+
+        directory = CikDirectory(fetch=fetch, clock=lambda: 0.0)
+        found = []
+        workers = [
+            threading.Thread(target=lambda: found.append(directory.resolve("AAPL")))
+            for _ in range(2)
+        ]
+        workers[0].start()
+        self.assertTrue(started.wait(timeout=5))
+        workers[1].start()
+        release.set()
+        for worker in workers:
+            worker.join(timeout=5)
+        self.assertEqual(found, [320193, 320193])
+        self.assertEqual(len(fetches), 1)
+
+    def test_the_default_fetch_parses_the_sec_file(self):
+        from unittest.mock import patch
+        from src.tiered_analysis.providers import fundamentals_us
+
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+                        "1": {"ticker": "BROKEN"}}
+
+        with patch("requests.get", lambda *a, **k: Response()):
+            self.assertEqual(fundamentals_us._fetch_cik_map(), {"AAPL": 320193})

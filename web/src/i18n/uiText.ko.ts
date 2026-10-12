@@ -89,6 +89,8 @@ export const ko: Record<UiTextKey, string> = {
     '{label}의 발표 일정을 불러오지 못해 다음 발표일이 비어 있습니다.',
   'tiered.warning.benchmarkBarsFailed':
     '시장 지수의 가격 이력을 불러오지 못해 이 종목을 시장과 비교할 수 없었습니다.',
+  'tiered.warning.benchmarkDateMismatch':
+    '시장 지수의 가격 이력은 {index}까지, 이 종목은 {stock}까지 있어 시장 추세와 시장 대비 비교는 둘이 공유하는 마지막 날({through})까지로 계산했습니다.',
   'tiered.warning.newsHeadlinesFailed':
     '기업 뉴스를 가져오지 못해 이 리포트에는 헤드라인이 없습니다. 뉴스 소스 응답: {detail}',
   'tiered.warning.sectorBarsFailed':
@@ -99,6 +101,8 @@ export const ko: Record<UiTextKey, string> = {
     '심층 분석의 LLM 호출이 실패해 이번 실행에는 전망이 없습니다.',
   'tiered.warning.planReviewCallFailed':
     '계획 검토의 LLM 호출이 실패해 계산된 계획을 그대로 사용합니다.',
+  'tiered.warning.planReviewNoReply':
+    '계획 검토의 AI 응답을 다시 물어본 뒤에도 읽을 수 없어 계산된 계획을 그대로 사용합니다.',
   'tiered.warning.planReviewSkipped':
     '계획 검토에 필요한 AI 키가 설정되어 있지 않아 계산된 계획을 그대로 사용합니다.',
   'tiered.warning.insufficientHistory':
@@ -193,6 +197,8 @@ export const ko: Record<UiTextKey, string> = {
     '각 뉴스 기사의 관련성과 중요도를 평가하는 LLM 응답이 누락되거나 읽을 수 없어 모든 기사를 평가 없이 유지했습니다.',
   'tiered.warning.newsJudgeMissing':
     'AI의 뉴스 평가 응답에서 기사 {count}건이 빠져 해당 기사는 평가 없이 유지했습니다.',
+  'tiered.warning.newsJudgeUnreadable':
+    'AI가 기사 {count}건에 매긴 중요도를 읽을 수 없어 해당 기사는 일단 유지하고 다음 실행에서 다시 평가합니다.',
   'tiered.warning.newsGroupFailed':
     '같은 사건을 다룬 기사를 병합하는 LLM 응답이 누락되거나 읽을 수 없어 병합하지 않았습니다. 같은 사건이 두 번 이상 나타날 수 있습니다.',
   'tiered.warning.newsGroupPartial':
@@ -228,6 +234,8 @@ export const ko: Record<UiTextKey, string> = {
     '데이터 소스가 충분한 데이터를 반환하지 않아 이 값을 계산할 수 없었습니다.',
   'tiered.warning.adjustmentRejected':
     'AI가 {level}을(를) 조정하려 했지만 제안이 규칙에 어긋나 공식으로 계산한 수치를 유지했습니다.',
+  'tiered.warning.adjustmentRejectedEarlierKept':
+    'AI의 이후 {level} 제안이 규칙에 어긋나 앞서 승인된 값 {value}을(를) 유지했습니다.',
   'tiered.warning.stopFallback':
     '공식으로 계산한 손절가를 사용할 수 없어 변동성(ATR) 기반 손절가를 대신 사용했습니다.',
   'tiered.warning.noAtrStop': '변동성 데이터(ATR)가 없어 손절가를 계산할 수 없었습니다.',
@@ -311,9 +319,9 @@ export const ko: Record<UiTextKey, string> = {
     '마지막 LLM 호출이 투표가 끝난 목록으로 요약을 작성합니다. 요약의 숫자도 같은 방식으로 인용 검증을 거치며, 요약이 실패해도 계산된 점수는 그대로 유지됩니다.',
   'tiered.tree.codeCheck': '코드 검증 결과',
   'tiered.warning.listerDegradedRole':
-    '{role} — 평가표가 계속 무효로 돌아와 이번 실행에서는 다른 작성자의 평가표만 사용했습니다.',
+    '{role} — 사용할 수 있는 평가표가 돌아오지 않아 이번 실행에서는 다른 작성자의 평가표만 사용했습니다.',
   'tiered.warning.sheetsVoided':
-    '두 작성자 모두 계속 무효한 평가표를 반환해 심층 분석이 무효 처리되었습니다.',
+    '두 작성자 모두 사용할 수 있는 평가표를 내지 못해 심층 분석이 무효 처리되었습니다.',
   'tiered.warning.noOutlook':
     '심층 분석에서 전망이 나오지 않았습니다. 종목을 다시 실행하세요.',
   'tiered.warning.preliminaryNoOutlook':
@@ -323,9 +331,9 @@ export const ko: Record<UiTextKey, string> = {
   'tiered.warning.preliminaryReplyRejected':
     '예비 분석의 응답을 사용할 수 없어({problem}) 다시 질문했습니다.',
   'tiered.warning.checkDegraded':
-    '검증 투표가 계속 무효로 돌아와 투표 항목을 작성자의 표만으로 계산했습니다.',
+    '검증 투표에서 사용할 수 있는 결과가 나오지 않아 투표 항목을 작성자의 표만으로 계산했습니다.',
   'tiered.warning.tiebreakDegraded':
-    '결정 투표가 계속 무효로 돌아와 동점인 투표 항목은 미결로 처리하고 점수에서 제외했습니다.',
+    '결정 투표에서 사용할 수 있는 결과가 나오지 않아 동점인 투표 항목은 미결로 처리하고 점수에서 제외했습니다.',
   'tiered.warning.voteDiscarded':
     '한 표의 인용이 수정 시도 후에도 코드 검증을 통과하지 못해 그 표를 버렸습니다.',
   'tiered.warning.unresolved':
@@ -339,6 +347,8 @@ export const ko: Record<UiTextKey, string> = {
     '{role} — 첫 응답이 무효였으나 재시도에 성공했습니다.',
   'tiered.warning.stageInvalidRole':
     '{role} — 재시도 후에도 응답이 무효였습니다.',
+  'tiered.warning.stageCallFailed':
+    '{role} — LLM 호출 자체가 실패해({error}) 심층 분석은 이 단계 없이 진행했습니다.',
   'tiered.role.checkRound': '검증 투표',
   'tiered.role.decidingRound': '결정 투표',
   'tiered.role.reportOutline': '리포트 작성',

@@ -428,11 +428,31 @@ class _SummariesReplyForm(BaseModel):
     summaries: List[List[Union[int, str]]]
 
 
+def _whole_number(value: Any) -> Optional[int]:
+    """``value`` as the whole number it spells — 3, 3.0 or "3" — else
+    None. Bools are not numbers here."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
 def _clean_judgment(raw: Any, count: int) -> Optional[Dict[str, Any]]:
     """One model judgment validated, from the compact array
     ``[n, about, materiality, reason?]`` or a labeled dict. n must be in
     range, about_company a bool or 0/1, materiality clamped to the 0-5
-    scale. Unusable -> None."""
+    scale. Unusable -> None.
+
+    A materiality that is not a whole number (3.0 and "3" count as 3)
+    becomes None and the judgment is marked ``from_model`` False: the
+    article is kept, but the judgment is not a model fact to cache —
+    cached, "unknown importance" was re-read on every later run and
+    never judged again (review 2026-10-10)."""
     if isinstance(raw, Mapping):
         number = raw.get("n")
         about = raw.get("about_company")
@@ -452,16 +472,15 @@ def _clean_judgment(raw: Any, count: int) -> Optional[Dict[str, Any]]:
             about = bool(about)
         else:
             return None
-    if isinstance(materiality, bool) or not isinstance(materiality, int):
-        materiality = None
-    else:
+    materiality = _whole_number(materiality)
+    if materiality is not None:
         materiality = max(MATERIALITY_MIN, min(MATERIALITY_MAX, materiality))
     return {
         "index": number - 1,
         "about_company": about,
         "materiality": materiality,
         "reason": str(reason or "").strip() or None,
-        "from_model": True,
+        "from_model": materiality is not None,
     }
 
 
@@ -532,6 +551,12 @@ def llm_judge_news(
     if missing:
         warnings.append(
             f"news judge gave no judgment for {missing} article(s) — those kept"
+        )
+    unreadable = sum(1 for judgment in by_index.values() if not judgment["from_model"])
+    if unreadable:
+        warnings.append(
+            f"news judge gave an unreadable importance for {unreadable} "
+            "article(s) — those kept, judged again next run"
         )
     judgments = [by_index.get(i) or _kept_fallback(i) for i in range(count)]
     return {"judgments": judgments, "warnings": warnings}

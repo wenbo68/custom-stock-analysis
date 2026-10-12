@@ -5,15 +5,73 @@ from __future__ import annotations
 import datetime as dt
 import unittest
 
+from unittest import mock
+
 from src.tiered_analysis.earnings import (
     EARNINGS_WARNING_DAYS,
     EarningsInfo,
+    earnings_from_data_reports,
     earnings_warning,
+    market_today,
     next_earnings_info,
 )
 from src.tiered_analysis.providers.base import Market
 
 TODAY = dt.date(2026, 7, 20)
+
+#: 01:00 UTC on the 21st — still the evening of the 20th in New York,
+#: already the morning of the 21st in Shanghai.
+LATE_UTC = dt.datetime(2026, 7, 21, 1, 0, tzinfo=dt.timezone.utc)
+
+
+def _wall_clock(fixed):
+    """Patch the exchange-calendar module's clock to ``fixed`` (aware)."""
+    patcher = mock.patch("src.core.trading_calendar.datetime")
+    fake = patcher.start()
+    fake.now.side_effect = (
+        lambda tz=None: fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+    )
+    return patcher
+
+
+class TestMarketToday(unittest.TestCase):
+    """"Today" for the earnings and macro gates is the MARKET's date, not
+    the server's (review 2026-10-10): on a UTC host after 20:00 New York
+    time the server's date is one day ahead, so a 7-day gate fired a day
+    early or late."""
+
+    def test_us_today_is_the_new_york_date(self):
+        self.assertEqual(market_today(Market.US, now=LATE_UTC), dt.date(2026, 7, 20))
+
+    def test_cn_today_is_the_shanghai_date(self):
+        self.assertEqual(market_today(Market.CN, now=LATE_UTC), dt.date(2026, 7, 21))
+
+    def test_unknown_market_keeps_the_given_clock(self):
+        self.assertEqual(market_today(Market.UNKNOWN, now=LATE_UTC), dt.date(2026, 7, 21))
+        self.assertEqual(market_today(None, now=LATE_UTC), dt.date(2026, 7, 21))
+
+    def test_earnings_gate_counts_from_the_market_date(self):
+        dim = mock.Mock(name="fundamentals")
+        dim.name = "fundamentals"
+        dim.payload = {"quarterly_report": {"next_earnings_date": "2026-07-27"}}
+        patcher = _wall_clock(LATE_UTC)
+        try:
+            info = earnings_from_data_reports([dim], market=Market.US)
+        finally:
+            patcher.stop()
+        self.assertEqual(info.days_until, 7)  # from the 20th, not the 21st
+        self.assertTrue(info.is_near)
+
+    def test_next_earnings_lookup_counts_from_the_market_date(self):
+        patcher = _wall_clock(LATE_UTC)
+        try:
+            info = next_earnings_info(
+                "AAPL", Market.US, fetcher=lambda s: [dt.date(2026, 7, 20)],
+            )
+        finally:
+            patcher.stop()
+        # The 20th is still "today" in New York, so it is upcoming, not past.
+        self.assertEqual(info.days_until, 0)
 
 
 class TestNextEarningsInfo(unittest.TestCase):

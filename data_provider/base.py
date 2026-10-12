@@ -44,6 +44,52 @@ logger = logging.getLogger(__name__)
 # === 标准化列名定义 ===
 STANDARD_COLUMNS = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'pct_chg']
 
+#: One A-share lot (手) is 100 shares. Eastmoney reports 成交量 in lots;
+#: every other vendor reports shares, and the standard ``volume`` column
+#: is shares (技术面 avg_vol_60d divides planned shares by it).
+A_SHARE_LOT_SIZE = 100
+
+
+def lots_to_shares(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    """A copy of ``df`` with ``column`` converted from lots to shares."""
+    if column not in df.columns:
+        return df
+    converted = df.copy()
+    converted[column] = pd.to_numeric(converted[column], errors="coerce") * A_SHARE_LOT_SIZE
+    return converted
+
+
+#: Failures worth a second try: the wire dropped, not the vendor saying
+#: "no such data". requests' ConnectionError/Timeout are not subclasses
+#: of the builtins, so both families are listed.
+def _network_error_types() -> tuple:
+    try:
+        import requests
+    except ImportError:  # pragma: no cover - requests is a dependency
+        return (ConnectionError, TimeoutError)
+    return (
+        ConnectionError,
+        TimeoutError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+    )
+
+
+def is_network_failure(exc: BaseException) -> bool:
+    """True when ``exc`` is, or wraps (``__cause__``/``__context__``), a
+    connection or timeout error. The fetchers wrap every exception into
+    DataFetchError, so a retry rule keyed on the builtin types alone never
+    fired (review 2026-10-10)."""
+    types = _network_error_types()
+    current: Optional[BaseException] = exc
+    visited = set()
+    while current is not None and id(current) not in visited:
+        if isinstance(current, types):
+            return True
+        visited.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
 
 def unwrap_exception(exc: Exception) -> Exception:
     """
@@ -765,7 +811,11 @@ class DataFetcherManager:
                     self._record_daily_source_success(fetcher, market)
                     return df, fetcher.name
                 if df is not None and df.empty:
+                    # The vendor answered, just with nothing: not an
+                    # outage, but the final failure must still say which
+                    # sources came back empty instead of listing nothing.
                     self._record_daily_source_success(fetcher, market)
+                    errors.append(f"[{fetcher.name}] 返回空数据（该区间无日线）")
 
             except Exception as e:
                 error_type, error_reason = summarize_exception(e)
@@ -919,3 +969,36 @@ class DataFetcherManager:
     def available_fetchers(self) -> List[str]:
         """返回可用数据源名称列表"""
         return [f.name for f in self._get_fetchers_snapshot()]
+
+
+# ---------------------------------------------------------------------------
+# The one manager this process shares (2026-10-10)
+# ---------------------------------------------------------------------------
+
+_default_manager: Optional[DataFetcherManager] = None
+_default_manager_lock = RLock()
+
+
+def default_manager() -> DataFetcherManager:
+    """The one DataFetcherManager every price load in this process goes
+    through, built on first use.
+
+    Why one: the vendor rate limits (a fetcher's ``_last_request_time``)
+    live on the fetcher instances, and the one-call-at-a-time locks live
+    on the manager. A fresh manager per load meant a fresh set of both,
+    so four concurrent A-share runs became up to sixteen independent
+    clients hitting the same vendor. Sharing is safe: the manager locks
+    its fetcher list and serializes each fetcher's calls itself."""
+    global _default_manager
+    with _default_manager_lock:
+        if _default_manager is None:
+            _default_manager = DataFetcherManager()
+        return _default_manager
+
+
+def reset_default_manager() -> None:
+    """Drop the shared manager so the next call builds a new one (tests;
+    nothing in the app needs it)."""
+    global _default_manager
+    with _default_manager_lock:
+        _default_manager = None

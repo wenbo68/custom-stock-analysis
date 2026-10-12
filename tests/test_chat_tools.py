@@ -236,7 +236,7 @@ class TestReads:
 
 class TestWrites:
     def test_start_run_shows_its_inputs_then_queues_through_the_route_path(self, isolated_db, monkeypatch):
-        from api.v1.endpoints import tiered
+        from src.tiered_analysis import run_service
 
         monkeypatch.setenv("MAIN_LLM", "gemini/test-model")
         tool, params = _call("start_run", ticker="AAPL", tier=2, capital=5000, risk_pct=0.5)
@@ -251,7 +251,7 @@ class TestWrites:
             started["code"] = code
             raise RuntimeError("stop here")
 
-        with patch.object(tiered, "_run_analysis", fake_run):
+        with patch.object(run_service, "_run_analysis", fake_run):
             accepted = tool.run(params)
             assert accepted["ticker"] == "AAPL" and accepted["tier"] == 2
             assert accepted["status"] in ("running", "queued")

@@ -791,3 +791,73 @@ class TestFormulaReceipts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBenchmarkDateAlignment(unittest.TestCase):
+    """Relative strength and the regime must compare the stock and the
+    index over the same dates: the stock can be topped up to Friday
+    while the index still ends Thursday."""
+
+    @staticmethod
+    def _dated(bars, start=None):
+        from datetime import date, timedelta
+
+        first = start or date(2025, 1, 1)
+        return [
+            Bar(high=b.high, low=b.low, close=b.close, open=b.open,
+                volume=b.volume, date=(first + timedelta(days=i)).isoformat())
+            for i, b in enumerate(bars)
+        ]
+
+    def test_stock_newer_than_index_is_measured_through_the_common_date(self):
+        from src.tiered_analysis.providers.technicals import (
+            RS_WINDOW_1M, relative_strength_pct,
+        )
+
+        stock = self._dated(_wave_bars(321))
+        # The stock's extra newest bar doubles the close: an unaligned
+        # read would show a wild 1-month outperformance.
+        last = stock[-1]
+        stock[-1] = Bar(high=last.close * 2.02, low=last.close * 1.98,
+                        close=last.close * 2, open=last.open,
+                        volume=last.volume, date=last.date)
+        index = self._dated([
+            Bar(high=1, low=1, close=1000 * (1.0007 ** i)) for i in range(320)
+        ])
+        result = _full_provider(stock, index).collect("AAPL")
+
+        expected = relative_strength_pct(
+            [b.close for b in stock[:-1]], [b.close for b in index], RS_WINDOW_1M,
+        )
+        self.assertEqual(result.payload["market"]["rs_1m"]["value"], expected)
+        self.assertTrue(
+            any("benchmark" in w and index[-1].date in w and stock[-1].date in w
+                for w in result.warnings),
+            result.warnings,
+        )
+
+    def test_index_newer_than_stock_is_truncated_to_the_stock(self):
+        from src.tiered_analysis.providers.technicals import (
+            RS_WINDOW_3M, relative_strength_pct,
+        )
+
+        stock = self._dated(_wave_bars(320))
+        index = self._dated([
+            Bar(high=1, low=1, close=1000 * (1.0007 ** i)) for i in range(320)
+        ] + [Bar(high=1, low=1, close=5000.0)])
+        result = _full_provider(stock, index).collect("AAPL")
+
+        expected = relative_strength_pct(
+            [b.close for b in stock], [b.close for b in index[:-1]], RS_WINDOW_3M,
+        )
+        self.assertEqual(result.payload["market"]["rs_3m"]["value"], expected)
+        self.assertTrue(any("benchmark" in w and "2025-11-17" in w for w in result.warnings))
+
+    def test_same_last_date_needs_no_warning(self):
+        stock = self._dated(_wave_bars(320))
+        index = self._dated([
+            Bar(high=1, low=1, close=1000 * (1.0007 ** i)) for i in range(320)
+        ])
+        result = _full_provider(stock, index).collect("AAPL")
+        self.assertFalse(any("benchmark index bars end" in w for w in result.warnings))
+        self.assertIsInstance(result.payload["market"]["rs_3m"]["value"], float)

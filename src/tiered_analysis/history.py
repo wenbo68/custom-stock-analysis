@@ -35,7 +35,7 @@ from .report_sections import (
     page_vote_items,
     select_sections,
 )
-from .run_digest import DUPLICATE_KEYS, INPUT_KEYS, digest_from_inputs, digest_from_result
+from .run_digest import DUPLICATE_KEYS, digest_from_inputs, digest_from_result
 
 logger = logging.getLogger(__name__)
 
@@ -420,13 +420,15 @@ def _row_summary(row: Any) -> Dict[str, Any]:
     the run's inputs in the form's own words and order (ticker, capital,
     risk %, reward ratio, max hold weeks, tier), then the outlook and
     shares. The columns carry these same names, so nothing translates."""
+    from src.storage import utc_iso
+
     return {
         "run_id": row.run_id,
         "ticker": row.ticker,
         "status": row.status,
         "error": row.error,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "created_at": utc_iso(row.created_at),
+        "updated_at": utc_iso(row.updated_at),
         "capital": row.capital,
         "risk_pct": row.risk_pct,
         "reward_ratio": row.reward_ratio,
@@ -579,8 +581,10 @@ _TRANSCRIPT_FACTS = (
 
 
 def _transcript_facts(row: Any) -> Dict[str, Any]:
+    from src.storage import utc_iso
+
     facts = {name: getattr(row, name) for name in _TRANSCRIPT_FACTS}
-    facts["created_at"] = facts["created_at"].isoformat() if facts["created_at"] else None
+    facts["created_at"] = utc_iso(facts["created_at"])
     return facts
 
 

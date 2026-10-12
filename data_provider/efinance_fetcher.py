@@ -34,7 +34,7 @@ from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
+    retry_if_exception,
     before_sleep_log,
 )
 
@@ -54,6 +54,8 @@ from .base import (
     DataFetchError,
     RateLimitError,
     STANDARD_COLUMNS,
+    is_network_failure,
+    lots_to_shares,
     normalize_stock_code,
     _is_hk_market,
     _is_etf_code as _is_a_share_etf_code,
@@ -97,14 +99,14 @@ _ETF_SZ_PREFIXES = ('15', '16', '18')
 def _is_etf_code(stock_code: str) -> bool:
     """
     判断代码是否为 ETF 基金
-    
+
     ETF 代码规则：
     - 上交所 ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
     - 深交所 ETF: 15xxxx, 16xxxx, 18xxxx
-    
+
     Args:
         stock_code: 股票/基金代码
-        
+
     Returns:
         True 表示是 ETF 代码，False 表示是普通股票代码
     """
@@ -126,7 +128,7 @@ def _build_eastmoney_etf_secid(stock_code: str) -> str:
 def _is_us_code(stock_code: str) -> bool:
     """
     判断代码是否为美股
-    
+
     美股代码规则：
     - 1-5个大写字母，如 'AAPL', 'TSLA'
     - 可能包含 '.'，如 'BRK.B'
@@ -206,27 +208,27 @@ def _classify_eastmoney_error(exc: Exception) -> Tuple[str, str]:
 class EfinanceFetcher(BaseFetcher):
     """
     Efinance 数据源实现
-    
+
     优先级：0（最高，优先于 AkshareFetcher）
     数据来源：东方财富网（通过 efinance 库封装）
     仓库：https://github.com/Micro-sheep/efinance
-    
+
     主要 API：
     - ef.stock.get_quote_history(): 获取历史 K 线数据
-    
+
     关键策略：
     - 每次请求前随机休眠 1.5-3.0 秒
     - 随机 User-Agent 轮换
     - 失败后指数退避重试（最多3次）
     """
-    
+
     name = "EfinanceFetcher"
     priority = int(os.getenv("EFINANCE_PRIORITY", "0"))  # 最高优先级，排在 AkshareFetcher 之前
-    
+
     def __init__(self, sleep_min: float = 1.5, sleep_max: float = 3.0):
         """
         初始化 EfinanceFetcher
-        
+
         Args:
             sleep_min: 最小休眠时间（秒）
             sleep_max: 最大休眠时间（秒）
@@ -257,7 +259,7 @@ class EfinanceFetcher(BaseFetcher):
     def _set_random_user_agent(self) -> None:
         """
         设置随机 User-Agent
-        
+
         通过修改 requests Session 的 headers 实现
         这是关键的反爬策略之一
         """
@@ -266,11 +268,11 @@ class EfinanceFetcher(BaseFetcher):
             logger.debug(f"设置 User-Agent: {random_ua[:50]}...")
         except Exception as e:
             logger.debug(f"设置 User-Agent 失败: {e}")
-    
+
     def _enforce_rate_limit(self) -> None:
         """
         强制执行速率限制
-        
+
         策略：
         1. 检查距离上次请求的时间间隔
         2. 如果间隔不足，补充休眠时间
@@ -283,32 +285,29 @@ class EfinanceFetcher(BaseFetcher):
                 additional_sleep = min_interval - elapsed
                 logger.debug(f"补充休眠 {additional_sleep:.2f} 秒")
                 time.sleep(additional_sleep)
-        
+
         # 执行随机 jitter 休眠
         self.random_sleep(self.sleep_min, self.sleep_max)
         self._last_request_time = time.time()
-    
+
     @retry(
         stop=stop_after_attempt(1),  # 减少到1次，避免触发限流
         wait=wait_exponential(multiplier=1, min=4, max=60),  # 保持等待时间设置
-        retry=retry_if_exception_type((
-            ConnectionError,
-            TimeoutError,
-            requests.exceptions.RequestException,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.ChunkedEncodingError
-        )),
+        # 只重试网络层失败（连接/超时，哪怕已被包装成 DataFetchError）。
+        # 注意 stop_after_attempt(1) 意味着当前并不重试；保留规则是为了与
+        # 其他数据源一致，调大次数时规则已经正确。
+        retry=retry_if_exception(is_network_failure),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
         从 efinance 获取原始数据
-        
+
         根据代码类型自动选择 API：
         - 美股：不支持，抛出异常让 DataFetcherManager 切换到其他数据源
         - 普通股票：使用 ef.stock.get_quote_history()
         - ETF 基金：使用 ef.stock.get_quote_history()（ETF 是交易所证券，使用股票 K 线接口）
-        
+
         流程：
         1. 判断代码类型（美股/股票/ETF）
         2. 设置随机 User-Agent
@@ -324,19 +323,19 @@ class EfinanceFetcher(BaseFetcher):
         # 明确跳过并交给 AkShare/Tushare/YFinance/Longbridge 等港股路径兜底。
         if _is_hk_market(stock_code):
             raise DataFetchError(f"EfinanceFetcher 不支持港股日线 {stock_code}，请使用 AkshareFetcher 或其他港股数据源")
-        
+
         # 根据代码类型选择不同的获取方法
         if _is_etf_code(stock_code):
             return self._fetch_etf_data(stock_code, start_date, end_date)
         else:
             return self._fetch_stock_data(stock_code, start_date, end_date)
-    
+
     def _fetch_stock_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
         获取普通 A 股历史数据
-        
+
         数据来源：ef.stock.get_quote_history()
-        
+
         API 参数说明：
         - stock_codes: 股票代码
         - beg: 开始日期，格式 'YYYYMMDD'
@@ -345,20 +344,20 @@ class EfinanceFetcher(BaseFetcher):
         - fqt: 复权方式，1=前复权
         """
         import efinance as ef
-        
+
         # 防封禁策略 1: 随机 User-Agent
         self._set_random_user_agent()
-        
+
         # 防封禁策略 2: 强制休眠
         self._enforce_rate_limit()
-        
+
         # 格式化日期（efinance 使用 YYYYMMDD 格式）
         beg_date = start_date.replace('-', '')
         end_date_fmt = end_date.replace('-', '')
-        
+
         logger.info(f"[API调用] ef.stock.get_quote_history(stock_codes={stock_code}, "
-                   f"beg={beg_date}, end={end_date_fmt}, klt=101, fqt=1)")
-        
+                    f"beg={beg_date}, end={end_date_fmt}, klt=101, fqt=1)")
+
         api_start = time.time()
         try:
             # 调用 efinance 获取 A 股日线数据
@@ -373,9 +372,9 @@ class EfinanceFetcher(BaseFetcher):
                 fqt=1,    # 前复权
                 timeout=60,
             )
-            
+
             api_elapsed = time.time() - api_start
-            
+
             # 记录返回数据摘要
             if df is not None and not df.empty:
                 logger.info(
@@ -393,9 +392,9 @@ class EfinanceFetcher(BaseFetcher):
                     f"endpoint={EASTMONEY_HISTORY_ENDPOINT}, stock_code={stock_code}, "
                     f"range={beg_date}~{end_date_fmt}, elapsed={api_elapsed:.2f}s"
                 )
-            
+
             return df
-            
+
         except Exception as e:
             api_elapsed = time.time() - api_start
             category, failure_message = self._build_history_failure_message(
@@ -412,7 +411,7 @@ class EfinanceFetcher(BaseFetcher):
 
             logger.error(failure_message)
             raise DataFetchError(f"efinance 获取数据失败: {failure_message}") from e
-    
+
     def _fetch_etf_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
         获取 ETF 基金历史数据
@@ -506,19 +505,19 @@ class EfinanceFetcher(BaseFetcher):
 
             logger.error(failure_message)
             raise DataFetchError(f"efinance 获取 ETF 数据失败: {failure_message}") from e
-    
+
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         """
         标准化 efinance 数据
-        
+
         efinance 返回的列名（中文）：
         股票名称, 股票代码, 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
-        
+
         需要映射到标准列名：
         date, open, high, low, close, volume, amount, pct_chg
         """
         df = df.copy()
-        
+
         # Column mapping (efinance Chinese column names -> standard English column names)
         column_mapping = {
             '日期': 'date',
@@ -532,31 +531,33 @@ class EfinanceFetcher(BaseFetcher):
             '股票代码': 'code',
             '股票名称': 'name',
         }
-        
+
         # 重命名列
         df = df.rename(columns=column_mapping)
-        
+
+        # efinance 的每个渠道都是东方财富，成交量 单位是手（100 股）；
+        # 标准 volume 列统一为股（腾讯/新浪/Yahoo 已是股）。
+        df = lots_to_shares(df, 'volume')
+
         # Fallback: if OHLC columns are missing (e.g. very old data path), fill from close
         if 'close' in df.columns and 'open' not in df.columns:
             df['open'] = df['close']
             df['high'] = df['close']
             df['low'] = df['close']
-            
+
         # Fill volume and amount if missing
         if 'volume' not in df.columns:
             df['volume'] = 0
         if 'amount' not in df.columns:
             df['amount'] = 0
 
-        
         # 如果没有 code 列，手动添加
         if 'code' not in df.columns:
             df['code'] = stock_code
-        
+
         # 只保留需要的列
         keep_cols = ['code'] + STANDARD_COLUMNS
         existing_cols = [col for col in keep_cols if col in df.columns]
         df = df[existing_cols]
-        
+
         return df
-    

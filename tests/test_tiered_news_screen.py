@@ -6,10 +6,8 @@ every stage."""
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 from datetime import date
-from pathlib import Path
 
 from unittest import mock
 
@@ -194,6 +192,34 @@ class TestJudge(unittest.TestCase):
         self.assertIsNone(result["judgments"][1]["materiality"])
         self.assertTrue(any("gave no judgment for 2" in w for w in result["warnings"]))
 
+    def test_whole_float_and_digit_string_materiality_read_as_ints(self):
+        # Models write 3.0 or "4" for 3 and 4 now and then; both are the
+        # number they mean (review 2026-10-10).
+        response = json.dumps({"articles": [[1, 1, 3.0], [2, 1, "4"], [3, 1, 2]]})
+        result = llm_judge_news("GOOGL", entries(), summarize=canned(response))
+        self.assertEqual([j["materiality"] for j in result["judgments"]], [3, 4, 2])
+        self.assertTrue(all(j["from_model"] for j in result["judgments"]))
+        self.assertEqual(result["warnings"], [])
+
+    def test_an_unreadable_materiality_is_kept_but_not_a_model_fact(self):
+        # "hi" or 3.5 is not an importance. The article is kept (fail-soft)
+        # but the judgment is marked not-from-model so the cache never
+        # freezes it as "unknown importance" for every later run.
+        response = json.dumps({"articles": [[1, 1, "hi"], [2, 1, 3.5], [3, 1, 2]]})
+        result = llm_judge_news("GOOGL", entries(), summarize=canned(response))
+        first, second, third = result["judgments"]
+        self.assertTrue(first["about_company"])
+        self.assertIsNone(first["materiality"])
+        self.assertFalse(first["from_model"])
+        self.assertIsNone(second["materiality"])
+        self.assertFalse(second["from_model"])
+        self.assertTrue(third["from_model"])
+        self.assertIn(
+            "news judge gave an unreadable importance for 2 article(s) — "
+            "those kept, judged again next run",
+            result["warnings"],
+        )
+
     def test_empty_input_makes_no_llm_call(self):
         summarize = canned("{}")
         result = llm_judge_news("GOOGL", [], summarize=summarize)
@@ -302,6 +328,14 @@ class TestJudgeCached(unittest.TestCase):
         self.assertFalse(result["judgments"][1]["about_company"])    # judged
         # And the fresh judgments are now cached for tomorrow.
         self.assertEqual(self.cache.get("https://example.com/micron")["about"], False)
+
+    def test_an_unreadable_materiality_is_judged_again_next_run(self):
+        response = json.dumps({"articles": [[1, 1, "hi"], [2, 1, 3], [3, 0, 0]]})
+        judge_news_cached(
+            "GOOGL", entries(), summarize=canned(response), cache=self.cache
+        )
+        self.assertIsNone(self.cache.get("https://example.com/bonds"))
+        self.assertEqual(self.cache.get("https://example.com/micron")["materiality"], 3)
 
     def test_fail_soft_fallbacks_are_never_cached(self):
         result = judge_news_cached(

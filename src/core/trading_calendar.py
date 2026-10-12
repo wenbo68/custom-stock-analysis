@@ -57,9 +57,15 @@ def get_market_for_stock(code: str) -> Optional[str]:
     """
     if not code or not isinstance(code, str):
         return None
-    code = (code or "").strip().upper()
 
     from data_provider import is_us_stock_code, is_us_index_code, is_hk_stock_code
+    from data_provider.base import normalize_stock_code
+
+    # The data layer strips SH/SZ/BJ prefixes and suffixes before routing
+    # (600519.SH, SH600519, sz000001 all fetch as 600519/000001). The gate
+    # must see the same market, or those spellings fail open and an
+    # intraday bar passes as a daily one (review 2026-10-10).
+    code = normalize_stock_code(code.strip()).upper()
 
     if is_us_stock_code(code) or is_us_index_code(code):
         return "us"

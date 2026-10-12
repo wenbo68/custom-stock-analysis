@@ -397,3 +397,45 @@ class TestLiveFredSanity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestColdDayConcurrency(unittest.TestCase):
+    """Two runs starting on a cold day used to both miss the day cache
+    and both call FRED; the second now waits and reads the first's
+    result."""
+
+    def test_concurrent_cold_runs_fetch_each_series_once(self):
+        import threading
+
+        calls, started, release = [], threading.Event(), threading.Event()
+        inner = _fake_fetcher(calls)
+
+        def fetch(series_id):
+            started.set()
+            release.wait(timeout=5)
+            return inner(series_id)
+
+        provider = MacroEconomyProvider(
+            series_fetcher=fetch, cache=MemoryCacheStore(),
+            today=lambda: TODAY, release_dates_fetcher=_fake_release_dates,
+        )
+        results = []
+        workers = [
+            threading.Thread(target=lambda: results.append(provider.collect("AAPL")))
+            for _ in range(2)
+        ]
+        workers[0].start()
+        self.assertTrue(started.wait(timeout=5))
+        workers[1].start()
+        release.set()
+        for worker in workers:
+            worker.join(timeout=10)
+
+        single = []
+        MacroEconomyProvider(
+            series_fetcher=_fake_fetcher(single), cache=MemoryCacheStore(),
+            today=lambda: TODAY, release_dates_fetcher=_fake_release_dates,
+        ).collect("AAPL")
+        self.assertEqual(sorted(calls), sorted(single))
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].payload, results[1].payload)

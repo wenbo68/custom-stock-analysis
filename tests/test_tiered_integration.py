@@ -241,8 +241,8 @@ def _debate_outlook(outlook=Outlook.BULLISH, score=7.4):
     from src.tiered_analysis.deep_analysis import DeepAnalysisOutlook
 
     return DeepAnalysisOutlook(outlook=outlook, final_score=score,
-                         summary="the vote settled it", initial_score=score,
-                         pools={})
+                               summary="the vote settled it", initial_score=score,
+                               pools={})
 
 
 class TestDepthRoutingAndSizing(unittest.TestCase):
@@ -580,10 +580,16 @@ class TestPlanReviewAdjustments(unittest.TestCase):
         self.assertEqual(outcome.sizing["shares"], 166.666)
         self.assertTrue(any("plan-review reply problem" in w
                             for w in outcome.report.warnings))
-        # An empty answer while liquidity fires is a round-1 failure: the
-        # computed plan stands and the failure list says why.
-        failures = outcome.report.levels_detail["review_failures"]
-        self.assertEqual(failures, [{"round": 1, "checks": ["liquidity"]}])
+        # An unreadable reply is an outage, not the AI saying "no change
+        # helps" (review 2026-10-10): the computed plan stands with the
+        # outage warning and no failure list — nothing was ever tried.
+        self.assertIn(
+            "round 1: plan review got no usable reply even after a fix round",
+            outcome.report.warnings,
+        )
+        self.assertNotIn("review_failures", outcome.report.levels_detail)
+        self.assertFalse(any("did not converge" in w
+                             for w in outcome.report.warnings))
 
 
 class TestRegistryBarsLoaderWiring(unittest.TestCase):
@@ -770,6 +776,28 @@ class TestMacroEventGateWarning(unittest.TestCase):
             })],
             today=date(2026, 7, 7),
         )
+        self.assertIsNone(event)
+
+    def test_macro_gate_counts_from_the_market_date(self):
+        # 01:00 UTC on the 21st is still the 20th in New York: a release
+        # on the 27th is 7 days out (inside the gate), not 6 — and one on
+        # the 28th is outside, where the server's UTC date would have
+        # pulled it in (review 2026-10-10).
+        from datetime import datetime, timezone
+        from unittest import mock
+
+        from src.tiered_analysis.plan_review import macro_event_from_data_reports
+        from src.tiered_analysis.providers.base import Market
+
+        fixed = datetime(2026, 7, 21, 1, 0, tzinfo=timezone.utc)
+        with mock.patch("src.core.trading_calendar.datetime") as fake:
+            fake.now.side_effect = (
+                lambda tz=None: fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+            )
+            event = macro_event_from_data_reports(
+                [self._macro_dim({"next_cpi_release_date": "2026-07-28"})],
+                market=Market.US,
+            )
         self.assertIsNone(event)
 
     def test_no_macro_data_report_stays_quiet(self):

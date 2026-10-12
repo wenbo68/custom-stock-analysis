@@ -85,13 +85,20 @@ def extract_annual_series(facts: Mapping[str, Any], concept: str) -> Dict[str, f
     """Fiscal-year values keyed by period-end date, 10-K/FY rows only.
 
     Later rows for the same period end (restatements in newer filings)
-    override earlier ones.
+    override earlier ones. A duration row must span about a year: some
+    filers tag the Q4 frame in the 10-K with ``fp=FY`` and the fiscal
+    year's end date, and whichever came later in the JSON used to win
+    (FY gross profit over Q4 revenue read as a ~4x margin, review
+    2026-10-10). Instant rows (balance sheet, no ``start``) stay.
     """
     series: Dict[str, float] = {}
     for row in _concept_rows(facts, concept):
         if str(row.get("fp", "")).upper() != "FY":
             continue
         if str(row.get("form", "")).upper() != "10-K":
+            continue
+        span = _row_span_days(row)
+        if span is not None and not YEAR_MIN_DAYS <= span <= YEAR_MAX_DAYS:
             continue
         end = row.get("end")
         value = _to_float(row.get("val"))

@@ -15,17 +15,18 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 """
 
 import logging
+from datetime import datetime, timedelta
 
 import pandas as pd
 from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
+    retry_if_exception,
     before_sleep_log,
 )
 
-from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, is_bse_code
+from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, is_bse_code, is_network_failure
 from .us_index_mapping import get_us_index_yf_symbol, is_us_stock_code
 from src.services.market_symbol_utils import is_suffix_market_symbol
 
@@ -115,10 +116,18 @@ class YfinanceFetcher(BaseFetcher):
             logger.debug(f"识别为日韩台 Yahoo suffix 代码: {code}")
             return code
 
-        # 港股：hk前缀 -> .HK后缀
+        # 港股：hk前缀或裸 5 位数字（与 base._is_hk_market 同一规则）-> .HK后缀。
+        # 裸 5 位数字必须先于沪深前缀规则判断：'00700' 以 '00' 开头，否则会被当成深市。
+        hk_digits = None
         if code.startswith('HK'):
-            hk_code = code[2:].lstrip('0') or '0'  # 去除前导0，但保留至少一个0
-            hk_code = hk_code.zfill(4)  # 补齐到4位
+            hk_digits = code[2:]
+        elif code.isdigit() and len(code) == 5:
+            hk_digits = code
+        elif code.endswith('.HK') and code[:-3].isdigit():
+            hk_digits = code[:-3]  # '00700.HK' 也要变成 Yahoo 的 '0700.HK'
+        if hk_digits is not None:
+            hk_code = hk_digits.lstrip('0') or '0'  # 去除前导0，但保留至少一个0
+            hk_code = hk_code.zfill(4)  # Yahoo 使用 4 位，如 0700.HK
             logger.debug(f"转换港股代码: {stock_code} -> {hk_code}.HK")
             return f"{hk_code}.HK"
 
@@ -153,7 +162,9 @@ class YfinanceFetcher(BaseFetcher):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        # 只重试网络层失败（连接/超时，哪怕已被包装成 DataFetchError）；
+        # "未查询到数据" 不重试。
+        retry=retry_if_exception(is_network_failure),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -172,14 +183,21 @@ class YfinanceFetcher(BaseFetcher):
         # 转换代码格式
         yf_code = self._convert_stock_code(stock_code)
 
-        logger.debug(f"调用 yfinance.download({yf_code}, {start_date}, {end_date})")
+        # yfinance 的 end 是开区间：end=今天 只返回到昨天。调用方的 end_date
+        # 是希望包含的最后一天，所以这里多要一天（review 2026-10-10：美东
+        # 收盘后在美国/欧洲时区的服务器上，最新一根日线永远取不到）。
+        end_exclusive = (
+            datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+        ).strftime('%Y-%m-%d')
+
+        logger.debug(f"调用 yfinance.download({yf_code}, {start_date}, {end_exclusive})")
 
         try:
             # 使用 yfinance 下载数据
             df = yf.download(
                 tickers=yf_code,
                 start=start_date,
-                end=end_date,
+                end=end_exclusive,
                 progress=False,  # 禁止进度条
                 auto_adjust=True,  # 自动调整价格（复权）
                 multi_level_index=True

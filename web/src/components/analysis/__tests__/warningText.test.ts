@@ -18,6 +18,73 @@ describe('friendlyWarning — a failed company-news fetch', () => {
   });
 });
 
+describe('friendlyWarning — review 2026-10-10 warning shapes', () => {
+  it('a wrong-language reply kept after one retry that did not parse', () => {
+    const note = friendlyWarning(
+      'lister 1 grade sheet reply not in Simplified Chinese after 1 retry — shown as written',
+      t,
+    );
+    expect(note?.keyword).toBe('Unusable LLM reply');
+    expect(note?.text).toContain('Lister 1');
+    expect(note?.text).toContain('1');
+  });
+
+  it('a failed call in one lister names the lister and the error', () => {
+    const note = friendlyWarning('lister 2 grade sheet LLM call failed: timeout', t);
+    expect(note?.keyword).toBe('Unusable LLM reply');
+    expect(note?.text).toBe(
+      'Lister 2 — the LLM call itself failed (timeout); the deep analysis went on without this step.',
+    );
+  });
+
+  it('a benchmark ending on a different day names both dates and the shared one', () => {
+    const note = friendlyWarning(
+      'benchmark index bars end 2026-09-18, the stock\'s end 2026-09-19 — market trend and relative strength measured through 2026-09-18',
+      t,
+    );
+    expect(note?.keyword).toBe('Missing data');
+    expect(note?.text).toContain('ends on 2026-09-18');
+    expect(note?.text).toContain('stock’s on 2026-09-19');
+    expect(note?.text).toContain('(2026-09-18)');
+  });
+
+  it('a failed deciding round is not the whole-deep-analysis failure', () => {
+    const note = friendlyWarning('deciding round LLM call failed: 502', t);
+    expect(note?.text).toContain('Deciding vote');
+    expect(note?.text).not.toContain('no outlook');
+  });
+
+  it('a rejected later proposal says the earlier accepted value was kept', () => {
+    const note = friendlyWarning(
+      'round 2: adjustment for target rejected: moves the level more than 1 × ATR (3) away from its base 108 — the earlier accepted value 110 kept',
+      t,
+    );
+    expect(note?.keyword).toBe(t('tiered.warning.key.levels'));
+    expect(note?.text).toBe(
+      'The AI’s later suggestion for the Target broke the rules, so its earlier accepted value 110 was kept.',
+    );
+  });
+
+  it('a plan-review reply nobody could read is an outage, not "no change helps"', () => {
+    const note = friendlyWarning(
+      'round 1: plan review got no usable reply even after a fix round',
+      t,
+    );
+    expect(note?.keyword).toBe('Unusable LLM reply');
+    expect(note?.text).toContain('could not be read');
+  });
+
+  it('an unreadable importance rating says the articles are rated again next run', () => {
+    const note = friendlyWarning(
+      'news judge gave an unreadable importance for 2 article(s) — those kept, judged again next run',
+      t,
+    );
+    expect(note?.keyword).toBe('Unusable LLM reply');
+    expect(note?.text).toContain('2');
+    expect(note?.text).toContain('next run');
+  });
+});
+
 describe('friendlyWarning — deep-analysis stage notes lead with the role', () => {
   it('a retried grade sheet names its lister', () => {
     const note = friendlyWarning(
@@ -69,8 +136,20 @@ describe('friendlyWarning — v12 voided-run notes are translated', () => {
       t,
     );
     expect(note?.text).toBe(
-      'Both listers kept returning invalid grade sheets — the deep analysis was voided.',
+      'Neither lister produced a usable grade sheet — the deep analysis was voided.',
     );
+  });
+
+  it('the 2026-10-12 "unusable" wording of the same notes words alike', () => {
+    expect(
+      friendlyWarning('both lister grade sheets unusable — deep-analysis outlook voided', t)?.text,
+    ).toBe('Neither lister produced a usable grade sheet — the deep analysis was voided.');
+    expect(
+      friendlyWarning('check round unusable — vote items counted on their lister\'s vote alone', t)?.text,
+    ).toContain('no usable result');
+    expect(
+      friendlyWarning('deciding round unusable — tied vote items excluded as unresolved', t)?.text,
+    ).toContain('unresolved');
   });
 
   it('the no-outlook note translates with the re-run advice', () => {

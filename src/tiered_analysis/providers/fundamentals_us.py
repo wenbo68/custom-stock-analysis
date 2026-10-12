@@ -38,6 +38,8 @@ SEC requires a descriptive User-Agent with contact info: set
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import date, datetime, timezone
 from statistics import mean
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -424,30 +426,80 @@ def _edgar_user_agent() -> str:
     )
 
 
-_cik_cache: Dict[str, int] = {}
+#: A ticker missing from the downloaded map triggers one fresh download
+#: at most this often: a company listed after startup becomes
+#: resolvable within the hour instead of after a restart.
+CIK_MAP_REFRESH_SECONDS = 3600
+
+
+def _fetch_cik_map() -> Dict[str, int]:
+    """SEC's public ticker-to-CIK file, as ``{TICKER: cik}``."""
+    import requests
+
+    response = requests.get(
+        EDGAR_TICKERS_URL,
+        headers={"User-Agent": _edgar_user_agent()},
+        timeout=_EDGAR_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return {
+        str(row.get("ticker", "")).upper(): int(row["cik_str"])
+        for row in response.json().values()
+        if isinstance(row, Mapping) and row.get("cik_str") is not None
+    }
+
+
+class CikDirectory:
+    """Ticker -> CIK, one shared copy of SEC's mapping file per process.
+
+    The map used to be filled once and never again (a ticker listed
+    after startup raised LookupError for the process lifetime), and two
+    cold runs downloaded the file at the same time (review 2026-10-10).
+    Now: downloads happen under a lock; a miss re-downloads at most once
+    per ``CIK_MAP_REFRESH_SECONDS``; still missing raises as before.
+    """
+
+    def __init__(
+        self,
+        fetch: Callable[[], Mapping[str, int]] = _fetch_cik_map,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._fetch = fetch
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._map: Dict[str, int] = {}
+        self._fetched_at: Optional[float] = None
+
+    def resolve(self, ticker: str) -> int:
+        key = ticker.upper()
+        with self._lock:
+            if self._fetched_at is None:
+                self._refresh()
+            cik = self._map.get(key)
+            if cik is None and self._is_stale():
+                self._refresh()
+                cik = self._map.get(key)
+        if cik is None:
+            raise LookupError(f"no SEC CIK found for ticker {ticker!r}")
+        return cik
+
+    def _is_stale(self) -> bool:
+        return (
+            self._fetched_at is None
+            or self._clock() - self._fetched_at >= CIK_MAP_REFRESH_SECONDS
+        )
+
+    def _refresh(self) -> None:
+        self._map = dict(self._fetch())
+        self._fetched_at = self._clock()
+
+
+_cik_directory = CikDirectory()
 
 
 def _resolve_cik(ticker: str) -> int:
-    """Ticker -> CIK via SEC's public mapping file (cached in-process)."""
-    global _cik_cache
-    if not _cik_cache:
-        import requests
-
-        response = requests.get(
-            EDGAR_TICKERS_URL,
-            headers={"User-Agent": _edgar_user_agent()},
-            timeout=_EDGAR_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        _cik_cache = {
-            str(row.get("ticker", "")).upper(): int(row["cik_str"])
-            for row in response.json().values()
-            if isinstance(row, Mapping) and row.get("cik_str") is not None
-        }
-    cik = _cik_cache.get(ticker.upper())
-    if cik is None:
-        raise LookupError(f"no SEC CIK found for ticker {ticker!r}")
-    return cik
+    """Ticker -> CIK via SEC's public mapping file (shared in-process)."""
+    return _cik_directory.resolve(ticker)
 
 
 def _default_facts_loader(ticker: str) -> Mapping[str, Any]:

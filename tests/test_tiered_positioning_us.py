@@ -224,10 +224,19 @@ class ImpliedReportMoveTest(unittest.TestCase):
         self.assertAlmostEqual(move["atm_call_price"], 3.2)
         self.assertAlmostEqual(move["atm_put_price"], 3.0)
 
-    def test_report_date_on_the_expiration_day_uses_that_expiration(self):
+    def test_report_date_on_the_expiration_day_skips_to_the_next_expiration(self):
+        # Whether the report lands before the open or after the close is
+        # unknown; an expiry on the report day can end before the jump,
+        # so the straddle must come from the next expiration.
         move, warning = implied_report_move(_BOARD, "2026-08-21", date(2026, 8, 10))
         self.assertIsNone(warning)
-        self.assertEqual(move["expiration"], "2026-08-21")
+        self.assertEqual(move["expiration"], "2026-09-18")
+
+    def test_only_expiration_on_the_report_day_is_a_reasoned_blank(self):
+        board = {**_BOARD, "chains": [_BOARD["chains"][0]]}
+        move, warning = implied_report_move(board, "2026-08-21", date(2026, 8, 10))
+        self.assertIsNone(move)
+        self.assertIn("no fetched option expiration", warning)
 
     def test_unknown_report_date_is_a_reasoned_blank(self):
         move, warning = implied_report_move(_BOARD, None, _TODAY)

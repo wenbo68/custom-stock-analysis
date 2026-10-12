@@ -257,7 +257,31 @@ class TestPlainTurns:
         rows = store.messages(conversation_id)
         assert rows[-1]["notice"] == "tool_call_limit"
         assert len(model.requests) == TOOL_CALL_LIMIT + 1
-        assert roles(conversation_id).count("tool") == TOOL_CALL_LIMIT
+        # The reply that hit the limit is answered too, with an error
+        # result instead of a run, so no tool call is ever left open.
+        assert roles(conversation_id).count("tool") == TOOL_CALL_LIMIT + 1
+        assert rows[-2]["role"] == "tool" and rows[-2]["tool_call_id"] == f"c{TOOL_CALL_LIMIT}"
+        assert tool_result(rows[-2])["error"] == "tool_call_limit"
+        assert "time_ms" not in rows[-2]  # nothing ran
+
+    def test_the_conversation_still_works_after_the_limit(self, isolated_db):
+        """Regression (2026-10-10): the limit used to leave the last
+        reply's tool calls unanswered, and OpenAI-style providers reject
+        every later request that carries an unanswered call."""
+        model = ScriptedModel(
+            [calls((f"c{i}a", "list_tickers", {}), (f"c{i}b", "list_tickers", {}))
+             for i in range(TOOL_CALL_LIMIT + 1)] + [text("Still here.")]
+        )
+        bot = ChatHarness(model)
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "loop")
+        bot.send(conversation_id, "and now?")
+
+        assert store.messages(conversation_id)[-1]["content"] == "Still here."
+        sent = model.requests[-1]["messages"]
+        asked = {c["id"] for m in sent if m.get("tool_calls") for c in m["tool_calls"]}
+        answered = {m["tool_call_id"] for m in sent if m["role"] == "tool"}
+        assert asked and asked == answered
 
     def test_a_tool_that_raises_answers_with_an_error(self, isolated_db, monkeypatch):
         from src.chat import tools
@@ -276,6 +300,44 @@ class TestPlainTurns:
 
 
 class TestConfirmation:
+    def test_the_answer_and_the_remaining_held_calls_are_one_write(self, isolated_db, monkeypatch):
+        """Regression (2026-10-10): the tool result and the shortened
+        pending list used to be two commits; a crash between them left
+        the already-answered call still held, to be run again."""
+        history.create_run("a", "AAPL", inputs={"tier": 1}, status="queued")
+        history.create_run("b", "MSFT", inputs={"tier": 1}, status="queued")
+        model = ScriptedModel([
+            calls(("c1", "delete_run", {"run_id": "a"}), ("c2", "delete_run", {"run_id": "b"})),
+            text("Done."),
+        ])
+        bot = ChatHarness(model)
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "clean up")
+        assert [c["call_id"] for c in store.get_pending(conversation_id)["calls"]] == ["c1", "c2"]
+
+        commits: List[int] = []
+        real_session = store._session
+
+        def counting_session():
+            session = real_session()
+            real_commit = session.commit
+
+            def commit():
+                commits.append(1)
+                real_commit()
+
+            session.commit = commit
+            return session
+
+        monkeypatch.setattr(store, "_session", counting_session)
+        bot.confirm(conversation_id, approved=False)
+
+        assert len(commits) == 1
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", "tool"]
+        assert tool_result(rows[2])["declined"] is True
+        assert [c["call_id"] for c in store.get_pending(conversation_id)["calls"]] == ["c2"]
+
     def test_gated_tool_waits_then_runs_on_yes(self, isolated_db):
         history.create_run("q1", "AAPL", inputs={"tier": 1}, status="queued")
         model = ScriptedModel([call("delete_run", {"run_id": "q1"}), text("Deleted.")])
@@ -361,6 +423,48 @@ class TestGuards:
         bot = ChatHarness(ScriptedModel([]))
         with pytest.raises(UnknownConversationError):
             bot.send("nope", "hi")
+        assert bot.delete_conversation("nope") is False
+
+    def test_delete_waits_for_no_turn_and_frees_the_lock(self, isolated_db):
+        """Regression (2026-10-10): deleting a conversation under a
+        running turn made the turn crash with a bare KeyError (a 500 to
+        the user, and the paid model call wasted). Now the delete is
+        refused as busy while a turn runs, and once it is through, the
+        delete also drops the conversation's lock entry."""
+        model = ScriptedModel([text("slow")])
+        model.release.clear()
+        bot = ChatHarness(model)
+        conversation_id = store.create_conversation()["id"]
+        errors: List[Exception] = []
+
+        def first_turn():
+            try:
+                bot.send(conversation_id, "one")
+            except Exception as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        worker = threading.Thread(target=first_turn)
+        worker.start()
+        try:
+            deadline = threading.Event()
+            for _ in range(200):
+                if model.requests or not worker.is_alive():
+                    break
+                deadline.wait(0.01)
+            with pytest.raises(ConversationBusyError):
+                bot.delete_conversation(conversation_id)
+        finally:
+            model.release.set()
+            worker.join(timeout=5)
+        assert errors == []
+        assert roles(conversation_id) == ["user", "assistant"]
+        assert conversation_id in bot._locks
+
+        assert bot.delete_conversation(conversation_id) is True
+        assert conversation_id not in bot._locks
+        assert store.conversation_exists(conversation_id) is False
+        with pytest.raises(UnknownConversationError):
+            bot.send(conversation_id, "two")
 
     def test_a_second_turn_while_one_runs_is_refused(self, isolated_db):
         model = ScriptedModel([text("slow"), text("fast")])
@@ -410,6 +514,25 @@ class TestHelpers:
         assert kept[0]["role"] == "user"
         assert kept[-1] is messages[-1]
         assert trim_history([{"role": "tool", "content": "orphan"}], limit=5) == []
+
+    def test_trim_history_keeps_the_whole_last_turn_even_over_the_limit(self):
+        """Regression (2026-10-10): one turn of 50 rows under a 40-row
+        window used to leave no user row inside the window, so the model
+        got only the system prompt."""
+        turn = [{"role": "user", "content": "q"}]
+        for i in range(8):
+            turn.append({"role": "assistant", "content": None, "tool_calls": [{"id": f"c{i}{j}"} for j in range(5)]})
+            turn.extend({"role": "tool", "tool_call_id": f"c{i}{j}", "content": "{}"} for j in range(5))
+        turn.append({"role": "assistant", "content": "a"})
+        assert len(turn) == 50
+        kept = trim_history(turn, limit=40)
+        assert kept == turn
+
+        # Older turns come back in whole while they fit.
+        older = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "old a"}]
+        assert trim_history(older + turn, limit=40) == turn
+        assert trim_history(older + turn, limit=52) == older + turn
+        assert trim_history(older + older + turn, limit=53) == older + turn
 
     def test_cap_result_cuts_with_a_note(self):
         small = cap_result({"a": 1})

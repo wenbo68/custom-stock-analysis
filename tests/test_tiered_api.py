@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.v1.endpoints import tiered
+from src.tiered_analysis import run_service
 from src.tiered_analysis.integration import TieredRunOutcome
 from src.tiered_analysis.providers.base import (
     Citation,
@@ -98,8 +99,7 @@ def _outcome(ticker="AAPL"):
         market=Market.US,
         outlook=Outlook.NEUTRAL,
         score=56,
-        levels=TradePlanLevels(entry=303.8,
-                            stop_loss=290.0, target=325.0),
+        levels=TradePlanLevels(entry=303.8, stop_loss=290.0, target=325.0),
         summary="Wait for a pullback.",
         data_reports=[
             DataReport(
@@ -139,7 +139,7 @@ def _deep_outcome(ticker="AAPL"):
     sizing = {"enabled": True, "shares": 83,
               "reason_code": None, "refusal_reason": None, "notes": []}
     llm_usage = {"stages": {"deep_analysis": {"calls": 3, "input_tokens": 900,
-                                             "output_tokens": 300}},
+                                              "output_tokens": 300}},
                  "total": {"calls": 3, "input_tokens": 900,
                            "output_tokens": 300},
                  "scope": "tiered-package LLM calls only"}
@@ -165,7 +165,7 @@ def _poll_until_done(client, run_id, timeout_s=5.0):
 
 class TestTieredAnalyzeEndpoint:
     def test_accepts_and_completes_run(self, client):
-        with patch.object(tiered, "_run_analysis",
+        with patch.object(run_service, "_run_analysis",
                           lambda code, **kwargs: _outcome(code)):
             accepted = client.post("/tiered/analyze",
                                    json={"ticker": "AAPL"})
@@ -197,7 +197,7 @@ class TestTieredAnalyzeEndpoint:
         def boom(code, **kwargs):
             raise RuntimeError("upstream exploded")
 
-        with patch.object(tiered, "_run_analysis", boom):
+        with patch.object(run_service, "_run_analysis", boom):
             accepted = client.post("/tiered/analyze",
                                    json={"ticker": "AAPL"})
             body = _poll_until_done(client, accepted.json()["run_id"])
@@ -206,7 +206,7 @@ class TestTieredAnalyzeEndpoint:
         assert "upstream exploded" in body["error"]
 
     def test_runs_list_is_history_newest_first(self, client):
-        with patch.object(tiered, "_run_analysis",
+        with patch.object(run_service, "_run_analysis",
                           lambda code, **kwargs: _outcome(code)):
             first = client.post("/tiered/analyze",
                                 json={"ticker": "AAPL"}).json()["run_id"]
@@ -235,7 +235,7 @@ class TestTieredAnalyzeEndpoint:
         assert client.get("/tiered/sizing-defaults").status_code == 404
 
     def test_finished_report_carries_the_data_report_index(self, client):
-        with patch.object(tiered, "_run_analysis",
+        with patch.object(run_service, "_run_analysis",
                           lambda code, **kwargs: _outcome(code)):
             accepted = client.post("/tiered/analyze", json={"ticker": "AAPL"})
             body = _poll_until_done(client, accepted.json()["run_id"])
@@ -259,7 +259,7 @@ def _finish(client, ticker, **body):
         return replace(_outcome(code), tier=kwargs.get("tier", 1),
                        max_hold_weeks=kwargs.get("max_hold_weeks", 2))
 
-    with patch.object(tiered, "_run_analysis", fake_run):
+    with patch.object(run_service, "_run_analysis", fake_run):
         run_id = client.post("/tiered/analyze", json={
             "ticker": ticker, **body,
         }).json()["run_id"]
@@ -388,7 +388,7 @@ class TestDeleteEndpoint:
     def test_queued_run_is_cancelled_and_a_running_one_refused(self, client, monkeypatch):
         monkeypatch.setenv("MAX_CONCURRENT_RUNS", "1")
         runner, release = TestRunQueueEndpoint._gated_runner()
-        with patch.object(tiered, "_run_analysis", runner):
+        with patch.object(run_service, "_run_analysis", runner):
             first = client.post("/tiered/analyze", json={"ticker": "AAPL"}).json()
             second = client.post("/tiered/analyze", json={"ticker": "MSFT"}).json()
             assert second["status"] == "queued"
@@ -457,7 +457,7 @@ class TestDebateItemsEndpoint:
                               reports={1: outcome.report, 2: tier2})
             return replace(outcome, state=state, final_report=tier2)
 
-        with patch.object(tiered, "_run_analysis", fake_run):
+        with patch.object(run_service, "_run_analysis", fake_run):
             run_id = client.post("/tiered/analyze", json={
                 "ticker": "AAPL", "tier": 2,
             }).json()["run_id"]
@@ -594,7 +594,7 @@ class TestTieredDepthAndSizingApi:
             captured["sizing"] = sizing
             return _deep_outcome(code)
 
-        with patch.object(tiered, "_run_analysis", fake_run):
+        with patch.object(run_service, "_run_analysis", fake_run):
             accepted = client.post("/tiered/analyze", json={
                 "ticker": "AAPL",
                 "tier": 2,
@@ -616,7 +616,7 @@ class TestTieredDepthAndSizingApi:
             capital=50000.0, risk_pct=2.0, reward_ratio=2.0)
 
     def test_deep_run_response_contract(self, client):
-        with patch.object(tiered, "_run_analysis",
+        with patch.object(run_service, "_run_analysis",
                           lambda code, **kwargs: _deep_outcome(code)):
             accepted = client.post("/tiered/analyze",
                                    json={"ticker": "AAPL", "tier": 2})
@@ -646,7 +646,7 @@ class TestTieredDepthAndSizingApi:
     def test_v1_shaped_outcome_serializes_with_defaults(self, client):
         # An outcome without the new fields (tier-1 run) must still
         # produce the additive keys, as explicit "not run" values.
-        with patch.object(tiered, "_run_analysis",
+        with patch.object(run_service, "_run_analysis",
                           lambda code, **kwargs: _outcome(code)):
             accepted = client.post("/tiered/analyze",
                                    json={"ticker": "AAPL"})
@@ -743,7 +743,7 @@ class TestClockGateEndpoint:
         from src.tiered_analysis import run_gate
 
         monkeypatch.setattr(run_gate, "market_open_check", self._gate(blocked=True))
-        with patch.object(tiered, "_run_analysis",
+        with patch.object(run_service, "_run_analysis",
                           lambda code, **kwargs: _outcome(code)):
             response = client.post(
                 "/tiered/analyze",
@@ -759,7 +759,7 @@ class TestClockGateEndpoint:
             seen.update(kwargs)
             return _outcome(code)
 
-        with patch.object(tiered, "_run_analysis", runner):
+        with patch.object(run_service, "_run_analysis", runner):
             accepted = client.post(
                 "/tiered/analyze",
                 json={"ticker": "AAPL", "max_hold_weeks": 3},
@@ -793,7 +793,7 @@ class TestRunQueueEndpoint:
     def test_second_run_past_the_cap_waits_then_runs(self, client, monkeypatch):
         monkeypatch.setenv("MAX_CONCURRENT_RUNS", "1")
         runner, release = self._gated_runner()
-        with patch.object(tiered, "_run_analysis", runner):
+        with patch.object(run_service, "_run_analysis", runner):
             first = client.post("/tiered/analyze", json={"ticker": "AAPL"}).json()
             second = client.post("/tiered/analyze", json={"ticker": "MSFT"}).json()
             assert first["status"] == "running"
@@ -815,7 +815,7 @@ class TestRunQueueEndpoint:
         runner, release = self._gated_runner()
         body = {"ticker": "AAPL", "tier": 2, "max_hold_weeks": 3,
                 "capital": 50000, "risk_pct": 2, "reward_ratio": 2}
-        with patch.object(tiered, "_run_analysis", runner):
+        with patch.object(run_service, "_run_analysis", runner):
             accepted = client.post("/tiered/analyze", json=body)
             assert accepted.status_code == 202
             run_id = accepted.json()["run_id"]
@@ -838,7 +838,7 @@ class TestRunQueueEndpoint:
             _poll_until_done(client, other.json()["run_id"])
 
         # finished runs never block a re-run
-        with patch.object(tiered, "_run_analysis",
+        with patch.object(run_service, "_run_analysis",
                           lambda code, **kwargs: _outcome(code)):
             assert client.post("/tiered/analyze", json=body).status_code == 202
 
@@ -855,7 +855,7 @@ class TestRunLanguage:
             seen.update(kwargs)
             return _outcome(code)
 
-        with patch.object(tiered, "_run_analysis", fake_run):
+        with patch.object(run_service, "_run_analysis", fake_run):
             accepted = client.post("/tiered/analyze", json={"ticker": "AAPL", **body})
             assert accepted.status_code == 202, accepted.text
             _poll_until_done(client, accepted.json()["run_id"])
@@ -879,7 +879,7 @@ class TestRunLanguage:
             started.wait(2)
             return _outcome(code)
 
-        with patch.object(tiered, "_run_analysis", slow_run):
+        with patch.object(run_service, "_run_analysis", slow_run):
             first = client.post("/tiered/analyze", json={"ticker": "AAPL", "language": "en"})
             second = client.post("/tiered/analyze", json={"ticker": "AAPL", "language": "zh"})
             started.set()

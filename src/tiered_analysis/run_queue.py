@@ -122,12 +122,24 @@ class RunQueue:
                 )
                 history.mark_running(run.run_id)
                 self._active.add(run.run_id)
-                threading.Thread(
+                thread = threading.Thread(
                     target=self._work,
                     args=(run,),
                     name=f"tiered-analysis-{run.ticker}",
                     daemon=True,
-                ).start()
+                )
+                try:
+                    thread.start()
+                except Exception as exc:
+                    # The row is already "running" and the slot taken:
+                    # undo both, or the run shows running forever and the
+                    # slot stays lost until a restart (2026-10-10). The
+                    # line then moves on to the next waiting run.
+                    self._active.discard(run.run_id)
+                    reason = f"the run's worker thread could not be started: {exc}"
+                    logger.exception("run %s failed to start: %s", run.run_id, reason)
+                    history.mark_failed(run.run_id, reason)
+                    continue
                 started.append(run.run_id)
         return started
 

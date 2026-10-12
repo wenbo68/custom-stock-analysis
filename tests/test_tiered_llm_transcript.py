@@ -156,6 +156,19 @@ class TestSummarizerTranscript(unittest.TestCase):
         self.assertIn("boom", entry["error"])
         self.assertEqual(entry["stage"], "unknown")
 
+    def test_crashed_call_still_counts_as_one_call_in_the_usage(self):
+        # A failed call is paid for and sits in the transcript; the usage
+        # counts must not pretend it never happened (review 2026-10-10:
+        # a stage with only failures showed 0 calls).
+        fake = _FakeLitellm(error=RuntimeError("boom"))
+        with self.tracker.activate():
+            with self.tracker.stage("deep_analysis"):
+                with self.assertRaises(RuntimeError):
+                    self._summarize_with(fake)
+
+        stage = self.tracker.to_detail()["stages"]["deep_analysis"]
+        self.assertEqual(stage, {"calls": 1, "input_tokens": 0, "output_tokens": 0})
+
     def test_no_tracker_means_no_transcript_and_no_error(self):
         fake = _FakeLitellm()
         self._summarize_with(fake)  # outside any activation

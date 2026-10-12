@@ -25,7 +25,6 @@ from sqlalchemy import (
     DateTime,
     Integer,
     Text,
-    text,
     event,
     inspect,
 )
@@ -75,6 +74,18 @@ def to_utc_naive_datetime(value: datetime) -> datetime:
     if value.tzinfo is not None and value.utcoffset() is not None:
         return value.astimezone(timezone.utc).replace(tzinfo=None)
     return value
+
+
+def utc_iso(value: Optional[datetime]) -> Optional[str]:
+    """A stored (UTC-naive) time as ISO 8601 with its ``+00:00`` offset
+    spelled out, so a reader — the page, or the model reading a tool
+    result next to offset-bearing clocks — never has to guess the zone
+    (2026-10-10). None stays None."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
 
 # === 数据模型定义 ===
@@ -198,6 +209,13 @@ class ChatMessageRecord(Base):
     role = Column(String(16), nullable=False)
     content_json = Column(Text, nullable=False)
     created_at = Column(DateTime, default=utc_naive_now)
+    #: The model call's token counts, copied out of ``content_json`` on
+    #: write (0 on rows that hold no call), so the conversation list can
+    #: sum them in SQL instead of parsing every stored prompt on every
+    #: sidebar refresh (2026-10-10). NULL only on rows written before
+    #: the columns existed; startup backfills those once.
+    input_tokens = Column(Integer)
+    output_tokens = Column(Integer)
 
 
 class _DatabaseManagerMeta(type):
@@ -211,28 +229,28 @@ class _DatabaseManagerMeta(type):
 class DatabaseManager(metaclass=_DatabaseManagerMeta):
     """
     数据库管理器 - 单例模式
-    
+
     职责：
     1. 管理数据库连接池
     2. 提供 Session 上下文管理
     3. 封装数据存取操作
     """
-    
+
     _instance: Optional['DatabaseManager'] = None
     _init_lock = threading.RLock()
     _initialized: bool = False
-    
+
     def __new__(cls, *args, **kwargs):
         """单例模式实现"""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
         return cls._instance
-    
+
     def __init__(self, db_url: Optional[str] = None):
         """
         初始化数据库管理器
-        
+
         Args:
             db_url: 数据库连接 URL（可选，默认从配置读取）
         """
@@ -280,6 +298,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             # then every table is (re)created.
             self._reset_legacy_tables()
             Base.metadata.create_all(self._engine)
+            self._add_missing_columns()
             self._ensure_schema_migration_record()
 
             self._initialized = True
@@ -324,6 +343,43 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             raise
         finally:
             session.close()
+
+    def _add_missing_columns(self) -> None:
+        """Add, in place, the columns a model gained after the database
+        was created (2026-10-10: the chat token counts). ``create_all``
+        makes missing tables but never touches an existing one, so each
+        mapped table is compared with the live one and every column it
+        lacks is added with ``ALTER TABLE ... ADD COLUMN``, which sqlite
+        and Postgres both take for a nullable column without a default.
+        A column that could not be added that way (NOT NULL, a key) is
+        only logged. The names come from our own models, never from
+        input. A failure is logged and leaves the table as it was — the
+        app then fails loudly on its first query of that column rather
+        than quietly misreading rows."""
+        try:
+            inspector = inspect(self._engine)
+            existing = set(inspector.get_table_names())
+            with self._engine.begin() as connection:
+                for table in Base.metadata.sorted_tables:
+                    if table.name not in existing:
+                        continue
+                    live = {col["name"] for col in inspector.get_columns(table.name)}
+                    for column in table.columns:
+                        if column.name in live:
+                            continue
+                        if column.primary_key or not column.nullable:
+                            logger.warning(
+                                "column %s.%s is missing and cannot be added in place",
+                                table.name, column.name,
+                            )
+                            continue
+                        column_type = column.type.compile(dialect=self._engine.dialect)
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE {table.name} ADD COLUMN {column.name} {column_type}"
+                        )
+                        logger.warning("added column %s.%s to an older database", table.name, column.name)
+        except Exception as exc:
+            logger.warning("adding missing columns skipped: %s", exc)
 
     def _reset_legacy_tables(self) -> None:
         """Drop the run and transcript tables of a database created before
@@ -376,7 +432,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             if cls._instance is None:
                 cls()
             return cls._instance
-    
+
     @classmethod
     def reset_instance(cls) -> None:
         """重置单例（用于测试）"""
@@ -433,7 +489,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
     def get_session(self) -> Session:
         """
         获取数据库 Session
-        
+
         使用示例:
             with db.get_session() as session:
                 # 执行查询

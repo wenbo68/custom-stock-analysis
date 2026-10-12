@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import List
 
 import pytest
@@ -41,8 +42,14 @@ def isolated_db(tmp_path):
 class ScriptedModel:
     def __init__(self, replies: List[ModelReply]) -> None:
         self.replies = list(replies)
+        #: Cleared by a test that wants the model call to block.
+        self.release = threading.Event()
+        self.release.set()
+        self.asked = threading.Event()
 
     def complete(self, messages, tools):
+        self.asked.set()
+        self.release.wait(timeout=5)
         return self.replies.pop(0)
 
 
@@ -92,6 +99,37 @@ class TestConversations:
 
         assert client.delete(f"/chat/conversations/{body['id']}").json() == {"id": body["id"]}
         assert client.delete(f"/chat/conversations/{body['id']}").status_code == 404
+
+    def test_delete_during_a_turn_is_busy_then_works(self, client, scripted):
+        """Regression (2026-10-10): a delete under a running turn used to
+        make the turn fail with a 500. It is now refused as busy (409);
+        once the turn is over the delete goes through and the harness
+        forgets the conversation's lock."""
+        model = scripted([text("slow")])
+        model.release.clear()
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        outcome = {}
+
+        def send():
+            outcome["response"] = client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "hi"})
+
+        worker = threading.Thread(target=send)
+        worker.start()
+        try:
+            assert model.asked.wait(timeout=5)
+            refused = client.delete(f"/chat/conversations/{conversation_id}")
+            assert refused.status_code == 409
+            assert refused.json()["detail"]["code"] == "busy"
+        finally:
+            model.release.set()
+            worker.join(timeout=5)
+        assert outcome["response"].status_code == 200
+        assert [m["role"] for m in outcome["response"].json()["messages"]] == ["user", "assistant"]
+
+        assert client.delete(f"/chat/conversations/{conversation_id}").status_code == 200
+        assert conversation_id not in chat.harness._locks
+        assert client.get(f"/chat/conversations/{conversation_id}").status_code == 404
+        assert client.delete(f"/chat/conversations/{conversation_id}").status_code == 404
 
 
 class TestMessages:

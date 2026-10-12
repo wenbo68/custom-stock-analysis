@@ -150,6 +150,27 @@ class TestRunQueue:
         _wait_until(lambda: seen == ["x", "y"])
         _wait_until(lambda: queue.active_count == 0)
 
+    def test_a_thread_that_cannot_start_fails_the_run_and_frees_the_slot(self, isolated_db, monkeypatch):
+        """Regression (2026-10-10): the row was marked running and the
+        slot taken before the thread started, so a failed start left a
+        run ``running`` forever and one slot lost until restart."""
+        monkeypatch.setenv(MAX_CONCURRENT_RUNS_ENV, "1")
+        runner = _GatedRunner()
+        queue = RunQueue(runner)
+        history.create_run("doomed", "AAPL", status=history.STATUS_QUEUED)
+        history.create_run("next", "MSFT", status=history.STATUS_QUEUED)
+
+        def cannot_start(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", cannot_start)
+        assert queue.dispatch() == []
+        assert queue.active_count == 0
+        assert history.get_run("doomed")["status"] == "failed"
+        assert "can't start new thread" in history.get_run("doomed")["error"]
+        # The line moved on to the next run, which failed the same way.
+        assert history.get_run("next")["status"] == "failed"
+
     def test_remove_cancels_a_queued_run_and_refuses_a_running_one(
         self, isolated_db, monkeypatch,
     ):

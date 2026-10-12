@@ -27,6 +27,7 @@ Requires a free FRED API key: set ``FRED_API_KEY`` (see .env.example).
 from __future__ import annotations
 
 from datetime import date, timedelta
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..cache_store import CacheStore, default_cache_store
@@ -325,12 +326,24 @@ class MacroEconomyProvider(DataReportProvider):
     def supports(self, market: Market) -> bool:
         return True
 
+    #: One lock for every instance: several runs starting on a cold day
+    #: used to each miss the day cache and each call FRED. The first
+    #: holds the lock through fetch-and-store; the rest wait, then read
+    #: its result (review 2026-10-10).
+    _cold_day_lock = threading.Lock()
+
     # The ticker is intentionally ignored: macro data is per-region.
     def collect(self, ticker: str) -> DataReport:
         cached = self._read_cache()
         if cached is not None:
             return cached
+        with self._cold_day_lock:
+            cached = self._read_cache()
+            if cached is not None:
+                return cached
+            return self._collect_uncached()
 
+    def _collect_uncached(self) -> DataReport:
         series, warnings, field_warnings = self._fetch_series()
         # A total fetch failure still ships the full payload shape (all
         # fields blank; the missing-fields sweep below pins a note on

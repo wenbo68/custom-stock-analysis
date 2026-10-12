@@ -30,11 +30,19 @@ from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
+    retry_if_exception,
     before_sleep_log,
 )
 
-from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS, is_bse_code
+from .base import (
+    BaseFetcher,
+    DataFetchError,
+    RateLimitError,
+    STANDARD_COLUMNS,
+    is_bse_code,
+    is_network_failure,
+    lots_to_shares,
+)
 from .us_index_mapping import is_us_stock_code
 
 
@@ -307,7 +315,9 @@ class AkshareFetcher(BaseFetcher):
     @retry(
         stop=stop_after_attempt(3),  # 最多重试3次
         wait=wait_exponential(multiplier=1, min=2, max=30),  # 指数退避：2, 4, 8... 最大30秒
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        # 只重试网络层失败（连接/超时，哪怕已被包装成 DataFetchError）；
+        # 空数据、不支持的市场不重试。
+        retry=retry_if_exception(is_network_failure),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -372,8 +382,8 @@ class AkshareFetcher(BaseFetcher):
                 logger.warning(f"[数据源] {source_name} 获取失败: {e}")
                 # 继续尝试下一个
 
-        # 所有都失败
-        raise DataFetchError(f"Akshare 所有渠道获取失败: {last_error}")
+        # 所有都失败。保留原因链，重试规则才能看到底层是不是网络错误。
+        raise DataFetchError(f"Akshare 所有渠道获取失败: {last_error}") from last_error
 
     def _fetch_stock_data_em(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
@@ -406,7 +416,9 @@ class AkshareFetcher(BaseFetcher):
 
             if df is not None and not df.empty:
                 logger.info(f"[API返回] ak.stock_zh_a_hist 成功: {len(df)} 行, 耗时 {api_elapsed:.2f}s")
-                return df
+                # 东方财富的 成交量 单位是手（100 股）；新浪/腾讯渠道已是股，
+                # 标准 volume 列统一为股。
+                return lots_to_shares(df, '成交量')
             else:
                 logger.warning(f"[API返回] ak.stock_zh_a_hist 返回空数据")
                 return pd.DataFrame()
@@ -558,6 +570,8 @@ class AkshareFetcher(BaseFetcher):
                 logger.info(f"[API返回] 列名: {list(df.columns)}")
                 logger.info(f"[API返回] 日期范围: {df['日期'].iloc[0]} ~ {df['日期'].iloc[-1]}")
                 logger.debug(f"[API返回] 最新3条数据:\n{df.tail(3).to_string()}")
+                # 东方财富的 成交量 单位是手（100 股）；标准 volume 列统一为股。
+                return lots_to_shares(df, '成交量')
             else:
                 logger.warning(f"[API返回] ak.fund_etf_hist_em 返回空数据, 耗时 {api_elapsed:.2f}s")
             

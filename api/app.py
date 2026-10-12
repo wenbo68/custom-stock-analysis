@@ -10,7 +10,13 @@ Compared with the parent project this serves exactly four things:
 Startup housekeeping: runs execute as in-process threads, so any run
 still "running" when the process starts belongs to a process that died
 — it is marked failed. Runs still "queued" are resumed through the
-global run queue. Old transcript and cache rows are pruned.
+global run queue. Old transcript and cache rows are pruned. Chat
+message rows written before the token-count columns existed are
+filled once (2026-10-10).
+
+Startup also imports the model client (litellm) and the price-data
+stack once, on the main thread, before the first request — see
+``preload_libraries``.
 
 CORS is narrowed to CORS_ALLOW_ORIGINS (none by default — the frontend
 is served from the same origin, and the Vite dev server proxies /api).
@@ -20,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from importlib import import_module
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -27,8 +34,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+# Importing src.config loads .env. It has to be the first project import
+# here: ``create_app()`` below reads CORS_ALLOW_ORIGINS at import time,
+# and ``uvicorn api.app:app`` or a test's ``TestClient(api.app.app)``
+# never goes through server.py, which used to be the only place that
+# loaded the file (2026-10-10).
+import src.config  # noqa: F401
+
 from api.middlewares.error_handler import add_error_handlers
 from api.v1.endpoints import chat, tiered
+from src.chat import store as chat_store
+from src.tiered_analysis import run_service
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +63,55 @@ def _cors_allow_origins() -> list:
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
+#: Imported at startup, in this order, before the first request. litellm
+#: first (about 4 s of the 7 s total), then the price-data stack from
+#: the top down: the trading calendar pulls pandas, the exchange
+#: calendars and the whole data_provider package; the vendor libraries
+#: are what the fetchers import inside their own calls.
+PRELOADED_LIBRARIES = (
+    "litellm",
+    "src.core.trading_calendar",
+    "data_provider",
+    "yfinance",
+    "akshare",
+    "efinance",
+)
+
+
+def preload_libraries() -> None:
+    """Import the heavy libraries before the server takes requests
+    (2026-10-10).
+
+    litellm hooks itself into uvicorn's access-log logger the moment it
+    is imported, and that hook imports more of litellm on every log
+    line. The chat and analysis code import litellm lazily, inside
+    worker threads; when the very first import ran in a chat turn's
+    thread while the event loop logged the page's polling request, the
+    two threads waited on each other's import locks, Python aborted the
+    import ("deadlock detected by _ModuleLock"), and the half-installed
+    hook then broke every log line with ``KeyError: 'litellm'`` until
+    the process was restarted.
+
+    The price-data stack had the same shape: the trading calendar (and
+    with it pandas, the exchange calendars and every fetcher) was first
+    imported from GET /status, POST /analyze and each chat turn, and the
+    vendor libraries from inside run threads — several of which start at
+    once when the queue resumes at startup. Importing everything here,
+    alone on the main thread, leaves nothing to race; the lazy imports
+    elsewhere then find the modules already loaded.
+
+    A failed import fails startup. Every library here is a required
+    dependency, and serving anyway would only move the import — and the
+    deadlock — back into the first worker thread that needs it."""
+    for name in PRELOADED_LIBRARIES:
+        try:
+            import_module(name)
+        except Exception as exc:
+            raise RuntimeError(
+                f"required library {name} failed to import at startup: {exc}"
+            ) from exc
+
+
 def startup_housekeeping() -> None:
     """Mark orphaned runs failed, resume queued ones, and prune expired
     rows. Never fails startup: a housekeeping error is logged and the
@@ -61,7 +126,7 @@ def startup_housekeeping() -> None:
     except Exception as exc:
         logger.warning("startup run cleanup skipped: %s", exc)
     try:
-        tiered.run_queue.resume()
+        run_service.run_queue.resume()
     except Exception as exc:
         logger.warning("startup run queue resume skipped: %s", exc)
     try:
@@ -69,10 +134,17 @@ def startup_housekeeping() -> None:
         prune_cache()
     except Exception as exc:
         logger.warning("startup pruning skipped: %s", exc)
+    try:
+        filled = chat_store.backfill_tokens()
+        if filled:
+            logger.info("filled the token counts of %d older chat message row(s)", filled)
+    except Exception as exc:
+        logger.warning("startup chat token backfill skipped: %s", exc)
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    preload_libraries()
     startup_housekeeping()
     yield
 

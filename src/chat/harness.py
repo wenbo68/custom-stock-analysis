@@ -8,7 +8,10 @@ Guardrails (owner discussion 2026-09-19):
 
 - **Tool-call limit.** At most ``TOOL_CALL_LIMIT`` model calls that ask
   for tools per user message, so a confused model cannot poll forever.
-  The limit leaves a visible note in the conversation.
+  The limit leaves a visible note in the conversation, and the calls of
+  the reply that hit it are answered with an error result rather than
+  run — an unanswered call would make the provider reject every later
+  request in the conversation (2026-10-10).
 - **Every tool answers.** Unknown tools, bad arguments, refusals and
   misses all come back to the model as readable results, never as
   exceptions, so it can explain them.
@@ -23,9 +26,11 @@ Guardrails (owner discussion 2026-09-19):
   of them, not only what the model sent (owner request 2026-09-24) —
   and ``output``, what came back. Every stored key the page reads is
   named as the page labels it (owner request 2026-09-24).
-- **Context budgeting.** Only the last ``HISTORY_MESSAGE_LIMIT``
-  messages go to the model, cut at a user-message boundary so a tool
-  result never arrives without the call it answers.
+- **Context budgeting.** The model sees the most recent turn whole
+  (the user's question with everything it set off, however long), then
+  older turns, whole, while the total stays within
+  ``HISTORY_MESSAGE_LIMIT`` messages. Cutting only at a user-message
+  boundary means a tool result never arrives without its call.
 - **The chosen language.** Each turn carries the language the user chose
   for the app; the prompt names it, and a final reply written in another
   script is stored with the notice ``wrong_language`` and sent back with
@@ -33,7 +38,9 @@ Guardrails (owner discussion 2026-09-19):
   ``LANGUAGE_RETRY_LIMIT`` times (src/chat/language.py).
 
 One turn runs at a time per conversation; a second request while one
-is in flight is refused (``ConversationBusyError``).
+is in flight is refused (``ConversationBusyError``), and so is deleting
+the conversation (``delete_conversation``) — otherwise the turn would
+fail halfway with its paid model call wasted (2026-10-10).
 """
 from __future__ import annotations
 
@@ -110,12 +117,25 @@ def model_view(message: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def trim_history(messages: List[Dict[str, Any]], limit: int = HISTORY_MESSAGE_LIMIT) -> List[Dict[str, Any]]:
-    """The last ``limit`` messages, then advanced to the first user
-    message so no tool result arrives without its call."""
-    kept = messages[-limit:] if len(messages) > limit else list(messages)
-    while kept and kept[0].get("role") != "user":
-        kept.pop(0)
-    return kept
+    """The most recent turn whole — from the last user message to the
+    end, even when the turn alone runs past ``limit`` — then older
+    turns, whole, newest first, while the total fits in ``limit``. A
+    turn starts at its user message, so no tool result arrives without
+    its call. Nothing when there is no user message at all.
+
+    Why not simply the last ``limit`` rows advanced to a user row: one
+    turn of eight tool-calling replies with several calls each is more
+    than 40 rows, and that window then held no user row — the model got
+    the system prompt and nothing else (2026-10-10)."""
+    turn_starts = [index for index, message in enumerate(messages) if message.get("role") == "user"]
+    if not turn_starts:
+        return []
+    start = turn_starts[-1]
+    for earlier in reversed(turn_starts[:-1]):
+        if len(messages) - earlier > limit:
+            break
+        start = earlier
+    return list(messages[start:])
 
 
 def cap_result(result: Dict[str, Any], cap: int = RESULT_CHAR_CAP) -> Dict[str, Any]:
@@ -148,9 +168,29 @@ class ChatHarness:
             store.append_message(conversation_id, {"role": "user", "content": text})
             self._loop(conversation_id, tool_calls=0, language=language)
 
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """Remove the conversation and its messages. Refused
+        (``ConversationBusyError``) while a turn runs on it; False for an
+        unknown id. The conversation's lock entry goes with it, so the
+        lock table does not grow with every conversation ever seen."""
+        lock = self._lock_for(conversation_id)
+        if not lock.acquire(blocking=False):
+            raise ConversationBusyError(conversation_id)
+        try:
+            deleted = store.delete_conversation(conversation_id)
+            with self._locks_guard:
+                if self._locks.get(conversation_id) is lock:
+                    del self._locks[conversation_id]
+        finally:
+            lock.release()
+        return deleted
+
     def confirm(self, conversation_id: str, approved: bool, language: str = DEFAULT_LANGUAGE) -> None:
         """Answer the first held action: run it (or record the refusal),
-        then resume the loop once nothing else is held."""
+        then resume the loop once nothing else is held. The answer and
+        the shortened list of held calls are one write, so a crash
+        between them cannot leave an already-run action held, to be
+        run again on the next yes (2026-10-10)."""
         with self._turn(conversation_id), using_turn_language(language):
             pending = store.get_pending(conversation_id)
             if not pending or not pending.get("calls"):
@@ -169,15 +209,17 @@ class ChatHarness:
                     result = problem
                 else:
                     result, time_ms = self._execute(tool, params)
-            self._store_tool_result(conversation_id, call.call_id, call.name, result,
-                                    approved=approved, time_ms=time_ms, input=call.input)
+            still_held: Optional[Dict[str, Any]] = None
             if remaining:
-                store.set_pending(conversation_id, {
+                still_held = {
                     "calls": [c.to_dict() for c in remaining],
                     "tool_calls": pending.get("tool_calls", 0),
-                })
+                }
+            self._store_tool_result(conversation_id, call.call_id, call.name, result,
+                                    approved=approved, time_ms=time_ms, input=call.input,
+                                    pending=still_held)
+            if remaining:
                 return
-            store.set_pending(conversation_id, None)
             self._loop(conversation_id, tool_calls=int(pending.get("tool_calls", 0)), language=language)
 
     # -- the loop -------------------------------------------------------
@@ -201,6 +243,16 @@ class ChatHarness:
                 correction = correction_message(language)
                 continue
             if tool_calls >= TOOL_CALL_LIMIT:
+                # The calls of this reply are answered, not run: a
+                # provider rejects every later request that carries an
+                # assistant message whose tool calls got no answer.
+                for call in reply.tool_calls:
+                    self._store_tool_result(
+                        conversation_id, str(call.get("id") or ""),
+                        str((call.get("function") or {}).get("name") or ""),
+                        {"error": "tool_call_limit",
+                         "message": "the tool-call limit for this turn was reached; this call was not run"},
+                    )
                 store.append_message(conversation_id, {
                     "role": "assistant",
                     "content": f"I stopped at my tool-call limit ({TOOL_CALL_LIMIT} tool-calling steps) in this turn. Ask again to continue.",
@@ -305,11 +357,14 @@ class ChatHarness:
     def _store_tool_result(conversation_id: str, call_id: str, name: str,
                            result: Dict[str, Any], approved: Optional[bool] = None,
                            time_ms: Optional[int] = None,
-                           input: Optional[Dict[str, Any]] = None) -> None:
+                           input: Optional[Dict[str, Any]] = None,
+                           pending: Any = store.KEEP_PENDING) -> None:
         """Store a tool's answer. ``time_ms`` is how long the tool ran,
         None when nothing ran (an unknown tool, bad arguments, a refusal).
         ``input`` is the inputs with defaults filled in, None when the
-        model's arguments never parsed."""
+        model's arguments never parsed. ``pending`` is the held-calls
+        list to write in the same commit (None clears it); left alone
+        by default."""
         capped = cap_result(result)
         message: Dict[str, Any] = {
             "role": "tool", "tool_call_id": call_id, "name": name,
@@ -322,20 +377,22 @@ class ChatHarness:
             message["time_ms"] = time_ms
         if input is not None:
             message["input"] = input
-        store.append_message(conversation_id, message)
+        store.append_message(conversation_id, message, pending=pending)
 
     # -- locking --------------------------------------------------------
 
-    def _turn(self, conversation_id: str) -> "_Turn":
-        if not store.conversation_exists(conversation_id):
-            raise UnknownConversationError(conversation_id)
+    def _lock_for(self, conversation_id: str) -> threading.Lock:
         with self._locks_guard:
-            lock = self._locks.setdefault(conversation_id, threading.Lock())
-        return _Turn(lock, conversation_id)
+            return self._locks.setdefault(conversation_id, threading.Lock())
+
+    def _turn(self, conversation_id: str) -> "_Turn":
+        return _Turn(self._lock_for(conversation_id), conversation_id)
 
 
 class _Turn:
-    """Context manager: the conversation's lock, refused when held."""
+    """Context manager: the conversation's lock, refused when held. The
+    conversation is looked up under the lock, so a delete cannot slip
+    in between the check and the turn (2026-10-10)."""
 
     def __init__(self, lock: threading.Lock, conversation_id: str) -> None:
         self._lock = lock
@@ -344,6 +401,9 @@ class _Turn:
     def __enter__(self) -> "_Turn":
         if not self._lock.acquire(blocking=False):
             raise ConversationBusyError(self._conversation_id)
+        if not store.conversation_exists(self._conversation_id):
+            self._lock.release()
+            raise UnknownConversationError(self._conversation_id)
         return self
 
     def __exit__(self, *_: Any) -> None:

@@ -56,7 +56,12 @@ from .deep_analysis import (
     _values_equal,
     value_pattern,
 )
-from .earnings import EARNINGS_WARNING_DAYS, EarningsInfo, earnings_from_data_reports
+from .earnings import (
+    EARNINGS_WARNING_DAYS,
+    EarningsInfo,
+    earnings_from_data_reports,
+    market_today,
+)
 from .levels import (
     LEVEL_KEYS,
     AdjustmentProposal,
@@ -270,6 +275,7 @@ MACRO_EVENT_KEYS = (
 def macro_event_from_data_reports(
     data_reports: Sequence[DataReport],
     today: Optional[Any] = None,
+    market: Optional[Market] = None,
 ) -> Optional[Dict[str, Any]]:
     """The soonest scheduled macro event inside the warning window.
 
@@ -277,6 +283,8 @@ def macro_event_from_data_reports(
     market-wide gap risk the way earnings is single-stock gap risk; it
     reuses EARNINGS_WARNING_DAYS (owner decision, TODO.md hold-window
     note). Returns {"event", "next_date", "days_until"} or None.
+    ``today`` defaults to the market's own date (``market_today``), the
+    same clock the release dates are on.
     """
     import datetime as _dt
 
@@ -288,7 +296,7 @@ def macro_event_from_data_reports(
     if payload is None:
         return None
     if today is None:
-        today = _dt.date.today()
+        today = market_today(market)
     best: Optional[Dict[str, Any]] = None
     for key, event in MACRO_EVENT_KEYS:
         date_str = read_label(payload, "events", key)
@@ -668,8 +676,13 @@ def _request_adjustments(
     round_note: str = "",
     extra_allowed: Sequence[str] = (),
     max_hold_weeks: int = DEFAULT_MAX_HOLD_WEEKS,
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+) -> Tuple[Optional[List[Dict[str, Any]]], List[str]]:
     """One call + one fix round; returns (adjustments, warnings).
+
+    ``adjustments`` is None when no usable reply came back at all
+    (unparseable twice, or every proposal unusable) — an outage, which
+    the caller must not read as the AI saying "no change helps" (an
+    empty list, review 2026-10-10).
 
     ``trim_baseline`` is the current round's mechanical share count (the
     reduction-only floor for a shares proposal); ``round_note`` describes
@@ -736,8 +749,9 @@ def _request_adjustments(
 
     warnings: List[str] = []
 
-    def attempt(attempt_prompt: str) -> List[Dict[str, Any]]:
-        """One call plus its citation fix round; the usable adjustments."""
+    def attempt(attempt_prompt: str) -> Optional[List[Dict[str, Any]]]:
+        """One call plus its citation fix round; the usable adjustments,
+        None when nothing usable came back."""
         adjustments, errors = _parse_adjustments(
             parse_llm_json(summarize_with_schema(summarizer, attempt_prompt, _PlanReplyForm)),
             allowed_checks,
@@ -768,6 +782,10 @@ def _request_adjustments(
         warnings.extend(
             f"plan-review reply problem: {error}" for error in errors
         )
+        if not kept and (errors or adjustments):
+            # The model answered, but nothing of it could be used: that
+            # is not "no change helps".
+            return None
         return kept
 
     # The reasons are read on the plan card, so they must be in the
@@ -777,7 +795,7 @@ def _request_adjustments(
         lambda found: [reason["text"] for adjustment in found for reason in adjustment["reasons"]],
         "plan review", warnings,
     )
-    return adjustments or [], warnings
+    return adjustments, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -882,6 +900,41 @@ def _merge_proposals(
     return combined
 
 
+def _keep_earlier_accepted(
+    previous: Dict[str, Dict[str, Any]],
+    merged: Dict[str, Dict[str, Any]],
+    adjustments: Sequence[Dict[str, Any]],
+    plan: "_RoundPlan",
+    warnings: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """``merged`` with every level whose proposal THIS round was rejected
+    put back to its earlier accepted value (new dict), each with a
+    warning. Before (review 2026-10-10) the rejected proposal had already
+    replaced the accepted one, so the plan fell back to the computed
+    base and a valid adjustment was lost with only a "rejected" warning.
+    A level with no earlier value falls back to the base as before."""
+    restored = dict(merged)
+    for adjustment in adjustments:
+        level = adjustment["level"]
+        earlier = previous.get(level)
+        if earlier is None:
+            continue
+        if level == "shares":
+            rejection = plan.shares_rejection
+        elif level in LEVEL_KEYS:
+            rejection = plan.decisions[level].rejection
+        else:
+            continue
+        if rejection is None:
+            continue
+        restored[level] = earlier
+        warnings.append(
+            f"adjustment for {level} rejected: {rejection} — the earlier "
+            f"accepted value {display_value(earlier['value'])} kept"
+        )
+    return restored
+
+
 def review_plan(
     ticker: str,
     data_reports: Sequence[DataReport],
@@ -906,7 +959,7 @@ def review_plan(
     """
     tech = _tech_payload(data_reports)
     atr = read_metric(tech, "volatility", "atr_14")
-    earnings = earnings_from_data_reports(data_reports)
+    earnings = earnings_from_data_reports(data_reports, market=market)
     warnings: List[str] = []
 
     # The computed plan: base levels, base share count.
@@ -1040,6 +1093,17 @@ def review_plan(
             warnings.extend(
                 f"round {round_no}: {warning}" for warning in request_warnings
             )
+            if adjustments is None:
+                # No usable reply at all — an outage like a failed call,
+                # not the AI saying "no change helps": keep the computed
+                # plan without a failure result when no completed round
+                # had flagged anything yet.
+                warnings.append(
+                    f"round {round_no}: plan review got no usable reply even "
+                    "after a fix round"
+                )
+                converged = not review_failures
+                break
             if not adjustments:
                 # The AI's answer is "no change helps". Terminal: a failure
                 # if a plan-dependent check is firing, done otherwise.
@@ -1055,8 +1119,16 @@ def review_plan(
                 else:
                     converged = True
                 break
-            merged = _merge_proposals(merged, adjustments)
-            plan = evaluate(merged)
+            candidate = _merge_proposals(merged, adjustments)
+            plan = evaluate(candidate)
+            round_warnings: List[str] = []
+            restored = _keep_earlier_accepted(
+                merged, candidate, adjustments, plan, round_warnings
+            )
+            if round_warnings:
+                warnings.extend(f"round {round_no}: {w}" for w in round_warnings)
+                plan = evaluate(restored)
+            merged = restored
             flagged = [
                 check
                 for check in _flagged_checks(tech, plan.levels, plan.shares)
@@ -1137,7 +1209,7 @@ def review_plan(
     plan_warnings = build_plan_warnings(
         tech, levels, final_shares, final_risk, settings.reward_ratio,
         earnings=earnings,
-        macro_event=macro_event_from_data_reports(data_reports),
+        macro_event=macro_event_from_data_reports(data_reports, market=market),
     )
 
     return PlanReview(

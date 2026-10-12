@@ -27,8 +27,10 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Type
 
 from pydantic import BaseModel, Field, ValidationError
 
-from src.tiered_analysis import history
+from src.tiered_analysis import history, run_service
 from src.tiered_analysis.report_sections import normalize_sections
+from src.tiered_analysis.run_request import TieredAnalyzeRequest
+from src.tiered_analysis.run_service import RunRefused, effective_inputs, submit_run
 from src.tiered_analysis.server_status import server_status
 from src.tiered_analysis.settings import DEFAULT_MAX_HOLD_WEEKS, DEFAULT_TIER
 
@@ -309,8 +311,6 @@ def run_transcript_call(p: TranscriptCallParams) -> Dict[str, Any]:
 
 
 def _analyze_request(p: StartRunParams):
-    from api.v1.endpoints.tiered_schemas import TieredAnalyzeRequest
-
     from src.chat.language import turn_language
 
     # The tool's parameters are the HTTP request's fields, name for name;
@@ -324,8 +324,6 @@ def resolve_start_run(p: StartRunParams) -> Dict[str, Any]:
     for whatever the model left out, in the form's order — so the user
     sees exactly what they are paying for. Both the confirmation facts
     and the input fold."""
-    from api.v1.endpoints.tiered import effective_inputs
-
     return effective_inputs(_analyze_request(p))
 
 
@@ -333,8 +331,6 @@ confirm_start_run = resolve_start_run
 
 
 def run_start_run(p: StartRunParams) -> Dict[str, Any]:
-    from api.v1.endpoints.tiered import RunRefused, submit_run
-
     try:
         return submit_run(_analyze_request(p))
     except RunRefused as exc:
@@ -354,10 +350,8 @@ def confirm_delete_run(p: RunParams) -> Dict[str, Any]:
 
 
 def run_delete_run(p: RunParams) -> Dict[str, Any]:
-    from api.v1.endpoints.tiered import run_queue
-
     try:
-        deleted = run_queue.remove(p.run_id)
+        deleted = run_service.run_queue.remove(p.run_id)
     except history.RunInProgressError:
         return {"error": "run_in_progress", "run_id": p.run_id,
                 "message": "the run is executing and cannot be stopped"}

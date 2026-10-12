@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.v1.endpoints import tiered
+from src.tiered_analysis import run_service
 from src.config import Config, _normalize_database_url
 from src.tiered_analysis import history
 from src.tiered_analysis.cache_store import DbCacheStore, prune_cache
@@ -133,7 +134,7 @@ class TestStartupHousekeeping:
             from tests.test_tiered_api import _outcome
             return _outcome(code)
 
-        with patch.object(tiered, "_run_analysis", fake_run):
+        with patch.object(run_service, "_run_analysis", fake_run):
             with TestClient(create_app()) as client:
                 assert client.get("/api/health").status_code == 200
                 deadline = time.time() + 5

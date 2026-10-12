@@ -76,11 +76,15 @@ const zh = {
   'tiered.warning.epsRevisionsFailed': '分析师预期调整人数加载失败，30 天上调/下调人数两行为空。',
   'tiered.warning.releaseCalendarFailed': '{label} 的发布日历加载失败，其下次发布日期为空。',
   'tiered.warning.benchmarkBarsFailed': '大盘指数行情加载失败，无法将本股与大盘比较。',
+  'tiered.warning.benchmarkDateMismatch':
+    '大盘指数行情截至 {index}，本股行情截至 {stock}；大盘趋势与相对强弱按两者共有的最后一天（{through}）计算。',
   'tiered.warning.newsHeadlinesFailed': '公司新闻抓取失败，本报告没有新闻标题。新闻源返回：{detail}',
   'tiered.warning.sectorBarsFailed': '行业基金（{ticker}）行情加载失败，行业对比各行为空。',
   'tiered.warning.providerCrashed': '{dataReport} 数据采集出现异常，本次运行缺少整个板块。',
   'tiered.warning.deepAnalysisCallFailed': '深度分析的 LLM 调用失败，本次运行没有展望。',
   'tiered.warning.planReviewCallFailed': '交易计划复核的 LLM 调用失败，沿用计算出的原始计划。',
+  'tiered.warning.planReviewNoReply':
+    '交易计划复核的 AI 回复即使重问一次也无法解读，沿用计算出的原始计划。',
   'tiered.warning.planReviewSkipped': '交易计划复核需要的 AI 密钥未配置，沿用计算出的原始计划。',
   'tiered.warning.insufficientHistory': '该股票只有 {bars} 天行情，少于指标所需的 {min} 天，技术面分析已跳过。',
   'tiered.warning.shortDailyHistory': '只取到 {bars} 天行情（整年约 {year} 个交易日），因此一年高点、低点和区间反映的是现有历史，而非完整一年。',
@@ -136,6 +140,8 @@ const zh = {
     'LLM 给每条新闻评相关性和重要性的回复缺失或无法解读，所有文章未经评分全部保留。',
   'tiered.warning.newsJudgeMissing':
     'AI 的新闻评分回复漏掉了 {count} 条文章——这些文章未经评分而保留。',
+  'tiered.warning.newsJudgeUnreadable':
+    'AI 给 {count} 条文章的重要性评分无法解读——这些文章先保留，下次运行会重新评分。',
   'tiered.warning.newsGroupFailed':
     'LLM 用来把同一事件的多篇报道合并成一条的回复缺失或无法解读，因此没有做合并——同一件事可能重复出现。',
   'tiered.warning.newsGroupPartial':
@@ -166,6 +172,8 @@ const zh = {
   'tiered.warning.indicatorNoHistory': '价格历史不足，无法计算该数值。',
   'tiered.warning.macroFieldMissing': '数据源返回的数据不足，无法计算该数值。',
   'tiered.warning.adjustmentRejected': 'AI 想微调{level}，但建议不符合规则，已保留公式算出的数字。',
+  'tiered.warning.adjustmentRejectedEarlierKept':
+    'AI 后一轮对{level}的建议不符合规则，已保留它早先通过的数值 {value}。',
   'tiered.warning.stopFallback': '公式算出的止损价不可用，改用了基于波动幅度（ATR）的止损。',
   'tiered.warning.noAtrStop': '缺少波动幅度数据（ATR），无法计算止损价。',
   'tiered.warning.noAtrStopTarget': '缺少波动幅度数据（ATR），止损价和目标价都无法计算。',
@@ -240,14 +248,14 @@ const zh = {
   'tiered.tree.explain9':
     '最后一次 LLM 调用根据投票后的投票项清单撰写摘要；摘要里的数字同样经过引用核对，即使摘要失败，代码算出的得分也不受影响。',
   'tiered.tree.codeCheck': '代码检查结果',
-  'tiered.warning.listerDegradedRole': '{role}——评分表连续不合规，本次只使用另一位列出者的评分表。',
-  'tiered.warning.sheetsVoided': '两位列出者的评分表连续不合规——深度分析作废。',
+  'tiered.warning.listerDegradedRole': '{role}——没有给出可用的评分表，本次只使用另一位列出者的评分表。',
+  'tiered.warning.sheetsVoided': '两位列出者都没有给出可用的评分表——深度分析作废。',
   'tiered.warning.noOutlook': '深度分析未能得出展望——请重新运行该股票。',
   'tiered.warning.preliminaryNoOutlook': '初步分析未产生展望——请重新运行该股票。',
   'tiered.warning.preliminaryCallFailed': '初步分析的 LLM 调用失败，本次运行没有展望。',
   'tiered.warning.preliminaryReplyRejected': '初步分析的回复无法使用（{problem}），已重新询问。',
-  'tiered.warning.checkDegraded': '复核投票连续不合规——各条投票项仅按列出者一票计入。',
-  'tiered.warning.tiebreakDegraded': '决胜投票连续不合规——平票的投票项按未决处理，不计入得分。',
+  'tiered.warning.checkDegraded': '复核投票没有可用结果——各条投票项仅按列出者一票计入。',
+  'tiered.warning.tiebreakDegraded': '决胜投票没有可用结果——平票的投票项按未决处理，不计入得分。',
   'tiered.warning.voteDiscarded': '一张投票的引用经多次修正仍未通过代码校验——该票作废。',
   'tiered.warning.unresolved': '某条投票项 1 比 1 平票且没有决胜票——按未决处理，不计入得分。',
   'tiered.warning.allConfirmed': '每条投票项都被两位列出者独立列出——无需复核投票。',
@@ -256,6 +264,8 @@ const zh = {
   'tiered.warning.fixRoundLost': '一次引用修正回复不可读——浪费了一轮修正机会。',
   'tiered.warning.stageRetriedRole': '{role}——第一次回复不合规，重试一次后通过。',
   'tiered.warning.stageInvalidRole': '{role}——重试后回复仍不合规。',
+  'tiered.warning.stageCallFailed':
+    '{role}——LLM 调用本身失败（{error}），深度分析在没有这一环节的情况下继续。',
   'tiered.role.checkRound': '复核投票',
   'tiered.role.decidingRound': '决胜投票',
   'tiered.role.reportOutline': '报告撰写',
@@ -616,6 +626,8 @@ const en: Record<UiTextKey, string> = {
     'The publication calendar for {label} failed to load, so its next release date is blank.',
   'tiered.warning.benchmarkBarsFailed':
     'The market index’s price history failed to load, so this stock could not be compared against the market.',
+  'tiered.warning.benchmarkDateMismatch':
+    'The market index’s price history ends on {index} and this stock’s on {stock}, so the market trend and the stock-versus-market comparison are measured through the last day both share ({through}).',
   'tiered.warning.newsHeadlinesFailed':
     'Company news could not be fetched, so this report has no headlines. The news source said: {detail}',
   'tiered.warning.sectorBarsFailed':
@@ -626,6 +638,8 @@ const en: Record<UiTextKey, string> = {
     'The LLM call for the deep analysis failed, so this run has no outlook.',
   'tiered.warning.planReviewCallFailed':
     'The LLM call for the plan review failed, so the computed plan stands as it is.',
+  'tiered.warning.planReviewNoReply':
+    'The AI’s plan-review reply could not be read even after asking again, so the computed plan stands as it is.',
   'tiered.warning.planReviewSkipped':
     'The plan review needs an AI key that is not configured, so the computed plan stands as it is.',
   'tiered.warning.insufficientHistory':
@@ -720,6 +734,8 @@ const en: Record<UiTextKey, string> = {
     'The LLM reply that rates each news article’s relevance and importance was missing or unreadable, so every article was kept unrated.',
   'tiered.warning.newsJudgeMissing':
     'The AI’s news-rating reply skipped {count} article(s) — those were kept unrated.',
+  'tiered.warning.newsJudgeUnreadable':
+    'The AI’s importance rating for {count} article(s) could not be read — those were kept for now and will be rated again on the next run.',
   'tiered.warning.newsGroupFailed':
     'The LLM reply that merges articles covering the same story was missing or unreadable, so no merging was done — the same story may appear more than once.',
   'tiered.warning.newsGroupPartial':
@@ -755,6 +771,8 @@ const en: Record<UiTextKey, string> = {
     'The data source did not return enough data to compute this value.',
   'tiered.warning.adjustmentRejected':
     'The AI wanted to tweak the {level}, but its suggestion broke the rules, so the formula’s number was kept.',
+  'tiered.warning.adjustmentRejectedEarlierKept':
+    'The AI’s later suggestion for the {level} broke the rules, so its earlier accepted value {value} was kept.',
   'tiered.warning.stopFallback':
     'The formula’s stop-loss price wasn’t usable, so a volatility-based (ATR) stop was used instead.',
   'tiered.warning.noAtrStop': 'No volatility data (ATR) was available, so no stop-loss price could be computed.',
@@ -838,9 +856,9 @@ const en: Record<UiTextKey, string> = {
     'A last LLM call writes the summary from the voted list; its numbers are citation-checked the same way, and if it fails the computed score still stands.',
   'tiered.tree.codeCheck': 'code check result',
   'tiered.warning.listerDegradedRole':
-    '{role} — the grade sheet kept coming back invalid; this run used the other lister’s sheet only.',
+    '{role} — no usable grade sheet came back; this run used the other lister’s sheet only.',
   'tiered.warning.sheetsVoided':
-    'Both listers kept returning invalid grade sheets — the deep analysis was voided.',
+    'Neither lister produced a usable grade sheet — the deep analysis was voided.',
   'tiered.warning.noOutlook':
     'The deep analysis produced no outlook — re-run the stock.',
   'tiered.warning.preliminaryNoOutlook':
@@ -850,9 +868,9 @@ const en: Record<UiTextKey, string> = {
   'tiered.warning.preliminaryReplyRejected':
     'The preliminary analysis’s reply was unusable ({problem}), so it was asked again.',
   'tiered.warning.checkDegraded':
-    'The check round kept coming back invalid — vote items were counted on their lister’s vote alone.',
+    'The check round produced no usable result — vote items were counted on their lister’s vote alone.',
   'tiered.warning.tiebreakDegraded':
-    'The deciding round kept coming back invalid — tied vote items were treated as unresolved and left out of the score.',
+    'The deciding round produced no usable result — tied vote items were treated as unresolved and left out of the score.',
   'tiered.warning.voteDiscarded':
     'A vote’s citations still failed the code check after the fix attempts — that vote was discarded.',
   'tiered.warning.unresolved':
@@ -866,6 +884,8 @@ const en: Record<UiTextKey, string> = {
     '{role} — the first reply was invalid; the retry succeeded.',
   'tiered.warning.stageInvalidRole':
     '{role} — the reply was still invalid after a retry.',
+  'tiered.warning.stageCallFailed':
+    '{role} — the LLM call itself failed ({error}); the deep analysis went on without this step.',
   'tiered.role.checkRound': 'Check vote',
   'tiered.role.decidingRound': 'Deciding vote',
   'tiered.role.reportOutline': 'Report writer',
