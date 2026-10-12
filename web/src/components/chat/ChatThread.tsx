@@ -33,7 +33,9 @@ export interface ChatThreadProps {
 // (owner request 2026-09-24, replacing the 2026-09-23 cards). Steps
 // count from 1 after each of the user's lines, and the line says what
 // the step was: "Step 1: LLM decided to call a tool", "Step 2: tool
-// call", "Step 3: LLM decided to say something".
+// call", "Step 3: LLM decided to say something". A reply that asks for
+// several tools is followed by one tool step per call, in the order
+// they ran (owner decision 2026-10-12: separate steps, not one batch).
 //
 // Every LLM call is one bot reply, and only LLM calls cost tokens
 // (owner decision 2026-09-23): each reply ends with its token line,
@@ -46,7 +48,7 @@ export interface ChatThreadProps {
 // reply will be. A tool call held for the user's yes is the next tool
 // step already, with a "decision: approve | decline" line in place of
 // its output (owner request 2026-09-24), and every tool step carries a
-// "status" line — waiting, processing, done or failed — in the run
+// "status" line — waiting, processing, succeeded or failed — in the run
 // history's status colors (owner request 2026-09-24).
 //
 // The user's lines sit against the right edge, capped at 85% of the
@@ -97,15 +99,21 @@ export const ChatThread = ({
     return map;
   }, [messages]);
 
+  // The rows shown as steps: a call the user's stop answered instead of
+  // ran is no step — the stopped line that follows names it as the step
+  // that was about to run (2026-10-12).
+  const shown = useMemo(() => messages.filter((message) => !isSkippedCall(message)), [messages]);
+
   // Each bot step's number: 1, 2, 3… after every line of the user's
-  // (0 for the user's own line).
+  // (0 for the user's own line; the "stopped" line is no step and
+  // keeps the count where it was).
   const stepNumbers = useMemo(
     () =>
-      messages.reduce<number[]>((numbers, message) => {
+      shown.reduce<number[]>((numbers, message) => {
         const previous = numbers.at(-1) ?? 0;
-        return [...numbers, message.role === 'user' ? 0 : previous + 1];
+        return [...numbers, message.role === 'user' ? 0 : message.role === 'stopped' ? previous : previous + 1];
       }, []),
-    [messages],
+    [shown],
   );
 
   useEffect(() => {
@@ -126,13 +134,14 @@ export const ChatThread = ({
           anywhere beside the text scrolls it; the text itself is capped
           and centered (owner request 2026-09-26). */}
       <div className={cn('flex min-w-0 flex-col gap-4', contentClassName)} data-testid="chat-thread-content">
-        {messages.map((message, index) => (
+        {shown.map((message, index) => (
           <MessageRow
             key={message.seq}
             message={message}
             step={stepNumbers[index]}
             args={argsByCall}
             loadTranscript={() => transcriptLoader(conversationId, message.seq)}
+            stopped={message.role === 'stopped' ? describeStop(messages, message.seq, shown[index - 1]) : null}
           />
         ))}
         {pending ? (
@@ -196,12 +205,15 @@ const MessageRow = ({
   step,
   args,
   loadTranscript,
+  stopped,
 }: {
   message: ChatMessage;
   /** The bot step's number since the user's last line; 0 for the user's own line. */
   step: number;
   args: Record<string, Record<string, unknown>>;
   loadTranscript: () => Promise<TieredTranscriptCall>;
+  /** Stopped rows: what the stop landed on and what would have followed. */
+  stopped?: StopFacts | null;
 }) => {
   if (message.role === 'user') {
     return (
@@ -212,8 +224,10 @@ const MessageRow = ({
       </div>
     );
   }
+  if (message.role === 'stopped') {
+    return <StoppedLine step={step} facts={stopped ?? { skipped: [], last: false }} />;
+  }
   if (message.role === 'tool') {
-    const error = resultError(message.output);
     return (
       <ToolStep
         step={step}
@@ -228,14 +242,76 @@ const MessageRow = ({
           truncated: message.truncated === true,
         }}
         decision={message.approved == null ? null : message.approved ? 'approved' : 'declined'}
-        status={error == null ? 'done' : 'failed'}
+        status={resultError(message.output) == null ? 'succeeded' : 'failed'}
       />
     );
   }
   return <ReplyRow message={message} step={step} loadTranscript={loadTranscript} />;
 };
 
-// One LLM call: its step line — "LLM decided to call a tool" when it
+// A tool row the user's stop answered instead of ran: the server stores
+// it so the model sees no open call, but the page shows it only through
+// the stopped line's words.
+const isSkippedCall = (message: ChatMessage): boolean =>
+  message.role === 'tool' && resultError(message.output) === 'stopped';
+
+/** What a stopped row stands for: the steps that were about to run. */
+interface StopFacts {
+  /** The names of the calls the stop skipped, in the order they would have run. */
+  skipped: string[];
+  /** The stop landed on the final reply (one that asked for no tool): nothing was cut. */
+  last: boolean;
+}
+
+// Read off the rows: the skipped calls are the tool rows right before
+// the stopped row (`seq`); `before` is the last step shown before it.
+// A final reply just before the stopped row means the stop landed on
+// the last step and cut nothing.
+const describeStop = (messages: ChatMessage[], seq: number, before: ChatMessage | undefined): StopFacts => {
+  const skipped: string[] = [];
+  for (let index = messages.findIndex((message) => message.seq === seq) - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isSkippedCall(message)) {
+      break;
+    }
+    skipped.unshift(message.name ?? '');
+  }
+  const last = before?.role === 'assistant' && !before.error && (before.tool_calls ?? []).length === 0;
+  return { skipped, last };
+};
+
+// The line that ends a turn the user stopped: quiet, centered, in the
+// caution color — a fact about the conversation, not one of its voices
+// (2026-10-12). It names the step the stop landed on (`step`: the last
+// one shown, which the server let finish) and what the next step would
+// have been: the calls the model had asked for that never ran, each as
+// the step it would have been — and nothing beyond those (owner
+// decision 2026-10-12: no guessing past what the model asked for); or,
+// when every call had run, the LLM call that always follows a finished
+// batch; or, when the stop landed on the final reply, that it was the
+// last step. The model sees the same row as a user line saying the
+// reply was stopped (or that it had already finished), so it does not
+// pick the old work back up.
+const StoppedLine = ({ step, facts }: { step: number; facts: StopFacts }) => {
+  const { t } = useUiLanguage();
+  const next = facts.last
+    ? t('chat.stopped.last')
+    : facts.skipped.length === 0
+      ? t('chat.stopped.nextLlm', { n: step + 1 })
+      : null;
+  const sentences = [
+    t('chat.stopped.during', { n: step }),
+    ...facts.skipped.map((tool, index) => t('chat.stopped.nextTool', { n: step + index + 1, tool })),
+    ...(next ? [next] : []),
+  ];
+  return (
+    <p className="py-1 text-center text-xs text-caution" data-testid="chat-stopped">
+      {sentences.join(' ')}
+    </p>
+  );
+};
+
+// One LLM call: its step line — "LLM decided to call N tools" when it
 // asked for tools, "LLM decided to say something" when it answered,
 // "LLM call failed" when it errored — then what it said, if anything
 // (a tool-only reply names no tools: the tool step right after it
@@ -345,20 +421,20 @@ const DECISION_COLOR: Record<Decision, string> = {
 // (the answer is with the server, or the tool is running), done, or
 // failed (the tool answered with an error). Colored as the run history
 // colors a run's status (RunHistory.tsx: queued amber-300, running
-// sky-300, done emerald-300, failed red-300) — owner request 2026-09-24.
-type Status = 'waiting' | 'processing' | 'done' | 'failed';
+// sky-300, succeeded emerald-300, failed red-300) — owner request 2026-09-24.
+type Status = 'waiting' | 'processing' | 'succeeded' | 'failed';
 
 const STATUS_TEXT: Record<Status, `chat.tool.status.${Status}`> = {
   waiting: 'chat.tool.status.waiting',
   processing: 'chat.tool.status.processing',
-  done: 'chat.tool.status.done',
+  succeeded: 'chat.tool.status.succeeded',
   failed: 'chat.tool.status.failed',
 };
 
 const STATUS_COLOR: Record<Status, string> = {
   waiting: 'text-caution',
   processing: 'text-info',
-  done: 'text-positive',
+  succeeded: 'text-positive',
   failed: 'text-negative',
 };
 
@@ -379,7 +455,7 @@ const STATUS_COLOR: Record<Status, string> = {
 // clicked; the finished row keeps that word. A tool that needed no
 // permission has no decision line. Under the decision (or, without
 // one, under the name) sits "status": waiting while the call is held,
-// processing once the answer is on its way, then done or failed
+// processing once the answer is on its way, then succeeded or failed
 // (owner request 2026-09-24). A failure has no line of its own: the
 // red status says it failed and the output fold holds the error code
 // and message (owner request 2026-09-25).

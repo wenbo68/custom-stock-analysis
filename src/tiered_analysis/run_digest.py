@@ -87,6 +87,6 @@ def digest_from_json(
     than failing."""
     digest = {key: None for key in RUN_LIST_COLUMNS}
     digest.update(digest_from_inputs(_load_object(inputs_json)))
-    if status == "done":
+    if status == "succeeded":
         digest.update(digest_from_result(_load_object(result_json)))
     return digest

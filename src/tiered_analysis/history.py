@@ -4,7 +4,7 @@
 The web tiered page shows these as a clickable run list: a run starts as
 ``queued`` (waiting for a free slot in the global run queue,
 src/tiered_analysis/run_queue.py), becomes ``running``, then flips to
-``done`` (with the full serialized report) or ``failed`` (with the
+``succeeded`` (with the full serialized report) or ``failed`` (with the
 error), and stays in the list as history across page navigation and
 server restarts. Queued rows outlive the process: the queue resumes them
 at startup, whereas running rows die with their thread and are failed.
@@ -49,13 +49,13 @@ MAX_PAGE_SIZE = 200
 STALE_RUN_ERROR = "server restarted while this run was in progress"
 
 #: Run statuses. A run is "active" (queued or running) until it settles
-#: as done or failed — the duplicate check only looks at active runs.
+#: as succeeded or failed — the duplicate check only looks at active runs.
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
-STATUS_DONE = "done"
+STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
-ALL_STATUSES = (STATUS_QUEUED, STATUS_RUNNING, STATUS_DONE, STATUS_FAILED)
+ALL_STATUSES = (STATUS_QUEUED, STATUS_RUNNING, STATUS_SUCCEEDED, STATUS_FAILED)
 
 #: The outlooks that count as an opinion. A finished run whose analysis
 #: produced nothing stores "no_outlook" (the page's "No outlook"), which
@@ -132,12 +132,12 @@ def _update_run(run_id: str, **fields: Any) -> None:
         session.commit()
 
 
-def mark_done(run_id: str, result: Dict[str, Any]) -> None:
+def mark_succeeded(run_id: str, result: Dict[str, Any]) -> None:
     """Store the finished report, and lay its own facts (outlook, shares,
     the sizing it actually used) over the creation-time columns."""
     _update_run(
         run_id,
-        status=STATUS_DONE,
+        status=STATUS_SUCCEEDED,
         result_json=json.dumps(result),
         **digest_from_result(result),
     )
@@ -197,6 +197,27 @@ def fail_stale_running_runs(error: str = STALE_RUN_ERROR) -> int:
             .filter_by(status=STATUS_RUNNING)
             .update({"status": STATUS_FAILED, "error": error},
                     synchronize_session=False)
+        )
+        session.commit()
+        return int(changed or 0)
+
+
+#: The word a finished run carried before 2026-10-12, when the status
+#: was renamed ``succeeded`` on the page and so everywhere else.
+LEGACY_STATUS_DONE = "done"
+
+
+def rename_legacy_done_runs() -> int:
+    """Startup housekeeping: rows still carrying the pre-2026-10-12
+    ``done`` status become ``succeeded``. Returns the number of rows
+    changed; 0 once every database has been through it."""
+    from src.storage import TieredRunRecord
+
+    with _session() as session:
+        changed = (
+            session.query(TieredRunRecord)
+            .filter_by(status=LEGACY_STATUS_DONE)
+            .update({"status": STATUS_SUCCEEDED}, synchronize_session=False)
         )
         session.commit()
         return int(changed or 0)
@@ -335,10 +356,10 @@ def _apply_filters(query: Any, filters: RunFilters) -> Any:
         words = [word for word in filters.outlooks if word in OUTLOOK_WORDS]
         clauses = []
         if words:
-            clauses.append(and_(R.status == STATUS_DONE, R.outlook.in_(words)))
+            clauses.append(and_(R.status == STATUS_SUCCEEDED, R.outlook.in_(words)))
         if NO_OUTLOOK in filters.outlooks:
             clauses.append(or_(
-                R.status != STATUS_DONE,
+                R.status != STATUS_SUCCEEDED,
                 R.outlook.is_(None),
                 R.outlook.notin_(list(OUTLOOK_WORDS)),
             ))

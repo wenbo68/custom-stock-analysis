@@ -250,3 +250,45 @@ class TestConfirmation:
         assert nothing.status_code == 409
         assert nothing.json()["detail"]["code"] == "nothing_pending"
         assert client.post("/chat/conversations/nope/confirm", json={"approved": True}).status_code == 404
+
+
+class TestStop:
+    def test_stop_during_a_turn_ends_it_with_a_stopped_row(self, client, scripted):
+        """The page's stop button (2026-10-12): the stop request answers
+        at once; the turn's own request waits for the step in flight,
+        then returns the stopped conversation — the reply, its calls
+        answered as stopped, and the `stopped` line last."""
+        model = scripted([call("list_tickers", {})])
+        model.release.clear()
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        outcome = {}
+
+        def send():
+            outcome["response"] = client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "hi"})
+
+        worker = threading.Thread(target=send)
+        worker.start()
+        try:
+            assert model.asked.wait(timeout=5)
+            stopped = client.post(f"/chat/conversations/{conversation_id}/stop")
+            assert stopped.status_code == 200
+            assert stopped.json() == {"id": conversation_id, "stopped": True}
+            # The turn waits for the step in flight.
+            worker.join(timeout=0.5)
+            assert worker.is_alive()
+        finally:
+            model.release.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert outcome["response"].status_code == 200
+        messages = outcome["response"].json()["messages"]
+        assert [m["role"] for m in messages] == ["user", "assistant", "tool", "stopped"]
+        assert messages[2]["output"]["error"] == "stopped"
+        assert messages[3]["text"].startswith("[The user stopped this reply")
+        assert client.get(f"/chat/conversations/{conversation_id}").json()["user_input_count"] == 1
+
+    def test_stop_with_nothing_running_is_false_and_unknown_is_404(self, client, scripted):
+        scripted([])
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        assert client.post(f"/chat/conversations/{conversation_id}/stop").json() == {"id": conversation_id, "stopped": False}
+        assert client.post("/chat/conversations/nope/stop").status_code == 404

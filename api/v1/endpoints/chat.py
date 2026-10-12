@@ -26,6 +26,7 @@ from api.v1.endpoints.chat_schemas import (
     ConversationList,
     ConversationView,
     SendMessageRequest,
+    TurnStopped,
 )
 from api.v1.endpoints.tiered_schemas import TranscriptCall
 from src.chat import store
@@ -198,6 +199,21 @@ def confirm_action(conversation_id: str, request: ConfirmRequest) -> Dict[str, A
     except NothingPendingError:
         raise HTTPException(status_code=409, detail={"code": "nothing_pending"})
     return _conversation_view(conversation_id)
+
+
+@router.post("/conversations/{conversation_id}/stop", response_model=TurnStopped)
+def stop_turn(conversation_id: str) -> Dict[str, Any]:
+    """Stop the turn running on the conversation (the page's stop button).
+    Answers at once; the turn's own `POST .../messages` or `.../confirm`
+    request then returns the conversation as stopped: the model call
+    in flight abandoned, tool calls not yet run answered with a
+    `stopped` error, and a `stopped` row at the end. `stopped` is false
+    when nothing was running. 404 for an unknown conversation."""
+    try:
+        stopped = harness.stop(conversation_id)
+    except UnknownConversationError:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"id": conversation_id, "stopped": stopped}
 
 
 @router.get("/conversations/{conversation_id}/messages/{seq}/transcript", response_model=TranscriptCall)

@@ -13,6 +13,7 @@ vi.mock('../../api/chat', () => ({
     sendMessage: vi.fn(),
     getTranscript: vi.fn(),
     confirm: vi.fn(),
+    stopTurn: vi.fn(),
   },
 }));
 
@@ -189,5 +190,78 @@ describe('ChatPage', () => {
     const content = screen.getByTestId('chat-thread-content');
     expect(content).toHaveClass('mx-auto', 'max-w-[59rem]', 'pt-[var(--chat-band-height,4rem)]', 'pb-[var(--chat-dock-height,8rem)]');
     expect(screen.getByTestId('chat-dock-content').parentElement).toHaveClass('mx-auto', 'max-w-[59rem]');
+  });
+});
+
+// The stop button (2026-10-12): the send arrow becomes a stop button
+// while the turn runs; a click asks the server to stop, and the turn's
+// own answer — the stopped conversation — brings the arrow back.
+describe('ChatPage — stop', () => {
+  const STOPPED: ChatConversation = {
+    ...SUMMARY,
+    message_count: 3, user_input_count: 1,
+    messages: [
+      { seq: 1, role: 'user', created_at: null, text: 'hi there' },
+      { seq: 2, role: 'assistant', created_at: null, text: 'Hello.', usage: null, llm: 'fake', time_ms: 5, transcript_chars: 10 },
+      { seq: 3, role: 'stopped', created_at: null, text: '[The user asked to stop this reply, but it had already finished.]' },
+    ],
+    pending: null,
+  };
+
+  it('turns the arrow into a stop button, asks the server to stop on a click, and shows the stopped turn', async () => {
+    let answer: (value: ChatConversation) => void = () => {};
+    vi.mocked(chatApi.sendMessage).mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    vi.mocked(chatApi.stopTurn).mockResolvedValue({ id: 'c1', stopped: true });
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <UiLanguageProvider>
+          <ChatPage />
+        </UiLanguageProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'hi there' } });
+    fireEvent.click(screen.getByTestId('chat-send'));
+
+    // Enabled once there is a turn to stop (the conversation exists and
+    // its request is on its way).
+    const stop = await screen.findByTestId('chat-stop');
+    await waitFor(() => expect(stop).toBeEnabled());
+    expect(screen.queryByTestId('chat-send')).toBeNull();
+    fireEvent.click(stop);
+    await waitFor(() => expect(chatApi.stopTurn).toHaveBeenCalledWith('c1'));
+    // Until the turn comes back (the server finishes the running step
+    // first), an unclickable "…" stands where the stop button was.
+    expect(screen.queryByTestId('chat-stop')).toBeNull();
+    expect(screen.getByTestId('chat-stopping')).toBeDisabled();
+    expect(screen.getByTestId('chat-working')).toBeInTheDocument();
+
+    await act(async () => {
+      answer(STOPPED);
+    });
+    await waitFor(() => expect(screen.getByTestId('chat-stopped')).toHaveTextContent(/(That was the last step|这已是最后一步)/));
+    expect(screen.queryByTestId('chat-working')).toBeNull();
+    expect(screen.queryByTestId('chat-stopping')).toBeNull();
+    expect(screen.getByTestId('chat-send')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-input')).toBeEnabled();
+  });
+
+  it('reports a stop that failed and offers the button again', async () => {
+    vi.mocked(chatApi.sendMessage).mockReturnValue(new Promise(() => {}));
+    vi.mocked(chatApi.stopTurn).mockRejectedValue(new Error('offline'));
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <UiLanguageProvider>
+          <ChatPage />
+        </UiLanguageProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'hi there' } });
+    fireEvent.click(screen.getByTestId('chat-send'));
+    const stop = await screen.findByTestId('chat-stop');
+    await waitFor(() => expect(stop).toBeEnabled());
+    fireEvent.click(stop);
+    await waitFor(() => expect(screen.getByTestId('chat-error')).toHaveTextContent(/(Could not stop|停止失败).*offline/));
+    expect(screen.queryByTestId('chat-stopping')).toBeNull();
+    expect(screen.getByTestId('chat-stop')).toBeEnabled();
   });
 });

@@ -76,7 +76,7 @@ describe('ChatThread', () => {
     // run history's green; a call that needed no permission has no
     // decision line (owner request 2026-09-24).
     const status = within(trace).getByTestId('chat-tool-status');
-    expect(status).toHaveTextContent(/^(status: done|状态: 已完成)$/);
+    expect(status).toHaveTextContent(/^(status: succeeded|状态: 成功)$/);
     expect(status.lastElementChild).toHaveClass('text-positive');
     expect(within(trace).queryByTestId('chat-tool-decision')).toBeNull();
     // The status line sits between the name and the input.
@@ -375,5 +375,82 @@ describe('ChatThread', () => {
     cleanup();
     renderThread({ messages: MESSAGES.slice(0, 1), working: true });
     expect(screen.getByTestId('chat-working')).toBeInTheDocument();
+  });
+});
+
+// The stop button (2026-10-12): the row that ends a stopped turn and
+// the calls the stop skipped.
+describe('ChatThread — a stopped turn', () => {
+  const user = (seq: number, text: string): ChatMessage => ({ seq, role: 'user', created_at: null, text });
+  const reply = (seq: number, text: string | null, calls: string[] = []): ChatMessage => ({
+    seq, role: 'assistant', created_at: null, text,
+    tool_calls: calls.map((name, index) => ({ id: `c${seq}-${index}`, name, arguments: {} })),
+    usage: null, llm: 'fake', time_ms: 5, transcript_chars: 10,
+  });
+  const ran = (seq: number, name: string): ChatMessage => ({
+    seq, role: 'tool', created_at: null, tool_call_id: 'x', name, output: { ok: true }, output_chars: 12, truncated: false, input: {},
+  });
+  const skipped = (seq: number, name: string): ChatMessage => ({
+    seq, role: 'tool', created_at: null, tool_call_id: 'x', name,
+    output: { error: 'stopped', message: 'the user stopped the reply before this call ran; it was not run' },
+    output_chars: 80, truncated: false, input: {},
+  });
+  const stopped = (seq: number): ChatMessage => ({ seq, role: 'stopped', created_at: null, text: '[The user stopped this reply before it finished.]' });
+  const stepLines = () => screen.getAllByTestId(/^chat-(assistant|tool)$/).map((step) => step.firstElementChild?.textContent);
+
+  it('names the step the stop landed on and each call that was about to run, and nothing beyond them', () => {
+    renderThread({
+      messages: [
+        user(1, 'go'), reply(2, null, ['list_tickers', 'list_runs']), skipped(3, 'list_tickers'), skipped(4, 'list_runs'), stopped(5),
+        user(6, 'again'), reply(7, 'ok'),
+      ],
+    });
+    const line = screen.getByTestId('chat-stopped');
+    // Only what the model asked for: no guess at the LLM call after.
+    expect(line).toHaveTextContent(
+      /^(You stopped the reply during step 1\. Step 1 is done\. Step 2 was about to call the tool list_tickers\. Step 3 was about to call the tool list_runs\.|你在第 1 步时停止了回复。第 1 步已完成。第 2 步原本要调用工具 list_tickers。第 3 步原本要调用工具 list_runs。)$/,
+    );
+    expect(line).toHaveClass('text-caution');
+    // The marker text the model sees is not what the page shows.
+    expect(screen.queryByText(/The user stopped/)).toBeNull();
+    // The skipped calls are told, not shown: no tool step for them; the
+    // next question starts the count again.
+    expect(screen.queryByTestId('chat-tool')).toBeNull();
+    expect(stepLines()).toEqual([
+      expect.stringMatching(/(Step 1|第 1 步)/),
+      expect.stringMatching(/^(Step 1: LLM decided to say something|第 1 步：LLM 决定作答)$/),
+    ]);
+  });
+
+  it('says the next step would have asked the LLM when every call the model asked for ran', () => {
+    // Nothing of the reply is left, so the one step that could follow
+    // is another LLM call: said, for a line shaped like the others.
+    renderThread({ messages: [user(1, 'go'), reply(2, null, ['list_runs']), ran(3, 'list_runs'), stopped(4)] });
+    expect(screen.getByTestId('chat-stopped')).toHaveTextContent(
+      /^(You stopped the reply during step 2\. Step 2 is done\. Step 3 was about to let the LLM decide what to do next\.|你在第 2 步时停止了回复。第 2 步已完成。第 3 步原本要让 LLM 决定下一步做什么。)$/,
+    );
+    expect(stepLines()).toHaveLength(2);
+  });
+
+  it('names the calls left in a batch when the stop landed under one of them', () => {
+    renderThread({
+      messages: [user(1, 'go'), reply(2, null, ['list_runs', 'delete_run']), ran(3, 'list_runs'), skipped(4, 'delete_run'), stopped(5)],
+    });
+    expect(screen.getByTestId('chat-stopped')).toHaveTextContent(
+      /^(You stopped the reply during step 2\. Step 2 is done\. Step 3 was about to call the tool delete_run\.|你在第 2 步时停止了回复。第 2 步已完成。第 3 步原本要调用工具 delete_run。)$/,
+    );
+  });
+
+  it('says that was the last step when the stop landed on the final reply', () => {
+    renderThread({
+      messages: [
+        user(1, 'go'), reply(2, null, ['list_runs']), ran(3, 'list_runs'), reply(4, 'You have one run.'),
+        { ...stopped(5), text: '[The user asked to stop this reply, but it had already finished.]' },
+      ],
+    });
+    expect(screen.getByTestId('chat-stopped')).toHaveTextContent(
+      /^(You stopped the reply during step 3\. Step 3 is done\. That was the last step\.|你在第 3 步时停止了回复。第 3 步已完成。这已是最后一步。)$/,
+    );
+    expect(screen.getAllByTestId('chat-assistant')).toHaveLength(2);
   });
 });

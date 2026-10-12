@@ -9,7 +9,7 @@ function makeRun(id: string, overrides: Partial<TieredRunSummary> = {}): TieredR
   return {
     run_id: id,
     ticker: 'AAPL',
-    status: 'done',
+    status: 'succeeded',
     error: null,
     created_at: '2026-07-10T04:00:00',
     updated_at: null,
@@ -170,7 +170,7 @@ describe('RunHistory', () => {
     expect(screen.getAllByText(/^\d{4}\/\d{2}\/\d{2}, \d{2}:\d{2}$/)).toHaveLength(2);
     expect(screen.getByText(/层级 2|Tier 2/)).toBeInTheDocument();
     // status and outlook are separate columns (owner request 2026-09-17)
-    expect(screen.getByText(/^(已完成|Done)$/)).toBeInTheDocument();
+    expect(screen.getByText(/^(成功|Succeeded)$/)).toBeInTheDocument();
     expect(screen.getByText(/看多|Bullish/)).toBeInTheDocument();
     // the shares column was dropped (owner request 2026-08-16)
     expect(screen.queryByText(/41/)).toBeNull();
@@ -295,8 +295,8 @@ describe('RunHistory', () => {
     });
 
     fireEvent.focus(screen.getByPlaceholderText(/输入状态|Enter status/));
-    fireEvent.click(screen.getByRole('button', { name: /^(已完成|Done)$/ }));
-    expect(props.onFilters).toHaveBeenLastCalledWith({ statuses: ['failed', 'done'] });
+    fireEvent.click(screen.getByRole('button', { name: /^(成功|Succeeded)$/ }));
+    expect(props.onFilters).toHaveBeenLastCalledWith({ statuses: ['failed', 'succeeded'] });
     fireEvent.mouseDown(document.body);
 
     // the failed row's outlook cell is a dash (plus its reward and hold
@@ -314,7 +314,7 @@ describe('RunHistory', () => {
       runs: [makeRun('t1', { ticker: 'MSFT', outlook: 'no_outlook' })],
     });
 
-    expect(screen.getByText(/^(已完成|Done)$/)).toBeInTheDocument();
+    expect(screen.getByText(/^(成功|Succeeded)$/)).toBeInTheDocument();
     // outlook dash plus the reward and hold dashes
     expect(screen.getAllByText('—')).toHaveLength(3);
   });
@@ -437,7 +437,7 @@ describe('RunHistory', () => {
   it("colors a set filter's title like its pill and leaves the others gray", () => {
     renderHistory({
       runs: [makeRun('t1', { ticker: 'MSFT' })],
-      filters: { ...NO_FILTERS, capitalMin: '50000', statuses: ['done'] },
+      filters: { ...NO_FILTERS, capitalMin: '50000', statuses: ['succeeded'] },
     });
     // one end of a range is enough to count as set
     expect(titleOf(/^Capital$|^本金$/)).toHaveClass('text-orange-700', 'dark:text-orange-300');

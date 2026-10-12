@@ -62,20 +62,20 @@ class TestDigestFromJson:
             json.dumps({"tier": 2, "capital": 100000, "max_hold_weeks": 3}),
             json.dumps({"outlook": "bearish", "sizing": {"shares": 5,
                         "inputs": {"capital": 60000}}}),
-            "done",
+            "succeeded",
         )
         assert digest == {"tier": 2, "capital": 60000, "risk_pct": None,
                           "reward_ratio": None, "max_hold_weeks": 3,
                           "outlook": "bearish", "shares": 5}
 
-    def test_report_ignored_unless_done(self):
+    def test_report_ignored_unless_succeeded(self):
         digest = digest_from_json(
             json.dumps({"tier": 1}), json.dumps({"outlook": "bullish"}), "failed",
         )
         assert digest["tier"] == 1 and digest["outlook"] is None
 
     def test_unreadable_json_degrades_to_none(self):
-        digest = digest_from_json("{not json", "[1, 2]", "done")
+        digest = digest_from_json("{not json", "[1, 2]", "succeeded")
         assert digest == {column: None for column in RUN_LIST_COLUMNS}
 
 
@@ -126,7 +126,7 @@ class TestLegacyTableReset:
                 "stock_code VARCHAR(16), status VARCHAR(16))"
             )
             connection.exec_driver_sql(
-                "INSERT INTO tiered_runs (task_id, stock_code, status) VALUES ('old', 'AAPL', 'done')"
+                "INSERT INTO tiered_runs (task_id, stock_code, status) VALUES ('old', 'AAPL', 'succeeded')"
             )
             connection.exec_driver_sql(
                 "CREATE TABLE tiered_run_transcripts (id INTEGER PRIMARY KEY, task_id VARCHAR(64), seq INTEGER)"
@@ -155,7 +155,7 @@ class TestLegacyTableReset:
         )
 
         with isolated_db.get_session() as session:
-            session.add(TieredRunRecord(run_id="fresh", ticker="AAPL", status="done"))
+            session.add(TieredRunRecord(run_id="fresh", ticker="AAPL", status="succeeded"))
             session.commit()
         DatabaseManager.reset_instance()
         db = DatabaseManager.get_instance()

@@ -71,7 +71,7 @@ REPORT = {
 def _done_run(run_id="run1", ticker="AAPL", tier=2):
     history.create_run(run_id, ticker, inputs={"tier": tier, "max_hold_weeks": 2}, status="queued")
     history.mark_running(run_id)
-    history.mark_done(run_id, REPORT)
+    history.mark_succeeded(run_id, REPORT)
     return run_id
 
 

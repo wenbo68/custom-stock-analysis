@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { ArrowUp } from 'lucide-react';
+import { ArrowUp, Ellipsis, Square } from 'lucide-react';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { cn } from '../../utils/cn';
 import { ALT_COLOR } from '../analysis/styles';
@@ -10,10 +10,22 @@ export interface ChatComposerProps {
   disabled: boolean;
   /** Why, shown under the box when disabled. */
   disabledHint?: string | null;
+  /** A turn is in flight: the send arrow becomes a stop button. */
+  working?: boolean;
+  /** The stop was asked and the turn has not yet come back: the server
+   *  lets the step in flight finish first, so this can take a while, and
+   *  the stop button gives way to an unclickable "…" meanwhile. */
+  stopping?: boolean;
   onSend: (text: string) => void;
+  onStop?: () => void;
 }
 
-const SEND_BUTTON = `inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full ring-1 ring-inset transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50 ${ALT_COLOR[7]}`;
+const ROUND_BUTTON = 'inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-full ring-1 ring-inset transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50';
+const SEND_BUTTON = `${ROUND_BUTTON} ${ALT_COLOR[7]}`;
+/** The stop button: the same round button in the outlook palette's red, so it reads as "stop", not "send". */
+const STOP_BUTTON = `${ROUND_BUTTON} ${ALT_COLOR[1]}`;
+/** The "…" that stands in for the stop button once clicked: the same shape, muted, never clickable. */
+const STOPPING_BUTTON = `${ROUND_BUTTON} ring-ink-5 text-ink-4`;
 /** The box grows with the text up to this many lines, then scrolls. */
 export const MAX_ROWS = 6;
 /** The width the send arrow takes beside a one-line draft: h-7 (28px) plus gap-3 (12px). */
@@ -67,7 +79,11 @@ const measureDraft = (box: HTMLTextAreaElement, draft: string): Measured => {
 // arrow sits beside a one-line draft; once the text needs a second line
 // (typed or wrapped) the arrow drops to its own row so text never runs
 // into it. The draft stays when a send fails so nothing typed is lost.
-export const ChatComposer = ({ disabled, disabledHint, onSend }: ChatComposerProps) => {
+// While a turn runs the arrow is a stop button in its place (owner
+// request 2026-10-12, after Claude Code's Esc): one click asks the
+// server to stop, and the button stays, disabled, until the turn comes
+// back stopped.
+export const ChatComposer = ({ disabled, disabledHint, working = false, stopping = false, onSend, onStop }: ChatComposerProps) => {
   const { t } = useUiLanguage();
   const [draft, setDraft] = useState('');
   const [isMultiline, setMultiline] = useState(false);
@@ -122,17 +138,42 @@ export const ChatComposer = ({ disabled, disabledHint, onSend }: ChatComposerPro
             disabled && 'opacity-60',
           )}
         />
-        <button
-          type="button"
-          data-testid="chat-send"
-          disabled={!canSend}
-          onClick={send}
-          aria-label={t('chat.composer.send')}
-          title={t('chat.composer.send')}
-          className={cn(SEND_BUTTON, isMultiline && 'self-end')}
-        >
-          <ArrowUp className="h-4 w-4" />
-        </button>
+        {working && stopping ? (
+          <button
+            type="button"
+            data-testid="chat-stopping"
+            disabled
+            aria-label={t('chat.composer.stopping')}
+            title={t('chat.composer.stopping')}
+            className={cn(STOPPING_BUTTON, isMultiline && 'self-end')}
+          >
+            <Ellipsis className="h-4 w-4 animate-pulse" />
+          </button>
+        ) : working ? (
+          <button
+            type="button"
+            data-testid="chat-stop"
+            disabled={onStop == null}
+            onClick={onStop}
+            aria-label={t('chat.composer.stop')}
+            title={t('chat.composer.stop')}
+            className={cn(STOP_BUTTON, isMultiline && 'self-end')}
+          >
+            <Square className="h-3 w-3 fill-current" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-testid="chat-send"
+            disabled={!canSend}
+            onClick={send}
+            aria-label={t('chat.composer.send')}
+            title={t('chat.composer.send')}
+            className={cn(SEND_BUTTON, isMultiline && 'self-end')}
+          >
+            <ArrowUp className="h-4 w-4" />
+          </button>
+        )}
       </div>
       {disabled && disabledHint ? <p className="text-xs text-ink-4">{disabledHint}</p> : null}
     </div>

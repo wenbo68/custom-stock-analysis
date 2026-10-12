@@ -403,7 +403,7 @@ export type TieredResult = {
 
 // queued (2026-09-15): waiting for a free slot in the server's global run
 // queue; it becomes running by itself.
-export type TieredRunStatus = 'queued' | 'running' | 'done' | 'failed';
+export type TieredRunStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
 // A history row speaks the run form's own words and order (2026-09-24):
 // ticker, capital, risk_pct, reward_ratio, max_hold_weeks, tier — the
@@ -484,7 +484,7 @@ export type TieredRunPage = {
 export type TieredRunDeleted = {
   run_id: string;
   ticker: string;
-  status: 'queued' | 'done' | 'failed';
+  status: 'queued' | 'succeeded' | 'failed';
 };
 
 // GET /runs/{id}/vote_items: one page of a deep run's vote items.

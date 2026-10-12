@@ -173,7 +173,7 @@ class TestTieredAnalyzeEndpoint:
             run_id = accepted.json()["run_id"]
             body = _poll_until_done(client, run_id)
 
-        assert body["status"] == "done"
+        assert body["status"] == "succeeded"
         result = body["result"]
         assert result["ticker"] == "AAPL"
         assert result["outlook"] == "neutral"
@@ -217,7 +217,7 @@ class TestTieredAnalyzeEndpoint:
 
         items = client.get("/tiered/runs").json()["items"]
         assert [item["ticker"] for item in items[:2]] == ["NVDA", "AAPL"]
-        assert all(item["status"] == "done" for item in items[:2])
+        assert all(item["status"] == "succeeded" for item in items[:2])
         # summaries stay light — full reports come from the detail route
         assert all("result" not in item for item in items)
 
@@ -283,7 +283,7 @@ class TestRunListEndpoint:
             "updated_at", "queue_position", "capital", "risk_pct",
             "reward_ratio", "max_hold_weeks", "tier", "outlook", "shares",
         ]
-        assert row["ticker"] == "AAPL" and row["status"] == "done"
+        assert row["ticker"] == "AAPL" and row["status"] == "succeeded"
         assert (row["tier"], row["max_hold_weeks"]) == (2, 3)
         assert (row["capital"], row["risk_pct"], row["reward_ratio"]) == (50000, 2.0, 3.0)
         assert row["outlook"] == "neutral"
@@ -378,7 +378,7 @@ class TestDeleteEndpoint:
 
         assert response.status_code == 200
         assert response.json() == {"run_id": run_id, "ticker": "AAPL",
-                                   "status": "done"}
+                                   "status": "succeeded"}
         assert client.get(f"/tiered/runs/{run_id}").status_code == 404
         assert client.get(f"/tiered/runs/{run_id}/transcript").status_code == 404
         assert client.delete(f"/tiered/runs/{run_id}").status_code == 404
@@ -403,7 +403,7 @@ class TestDeleteEndpoint:
             assert cancelled.json()["status"] == "queued"
 
             release.set()
-            assert _poll_until_done(client, first["run_id"])["status"] == "done"
+            assert _poll_until_done(client, first["run_id"])["status"] == "succeeded"
         # The cancelled run never ran and is not in the history.
         items = client.get("/tiered/runs").json()["items"]
         assert [item["run_id"] for item in items] == [first["run_id"]]
@@ -807,8 +807,8 @@ class TestRunQueueEndpoint:
             assert items[second["run_id"]]["tier"] == 1
 
             release.set()
-            assert _poll_until_done(client, first["run_id"])["status"] == "done"
-            assert _poll_until_done(client, second["run_id"])["status"] == "done"
+            assert _poll_until_done(client, first["run_id"])["status"] == "succeeded"
+            assert _poll_until_done(client, second["run_id"])["status"] == "succeeded"
 
     def test_exact_duplicate_of_an_unfinished_run_is_409(self, client, monkeypatch):
         monkeypatch.setenv("MAX_CONCURRENT_RUNS", "1")

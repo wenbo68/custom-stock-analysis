@@ -75,4 +75,39 @@ describe('ChatComposer', () => {
     expect(button).toHaveTextContent('');
     expect(screen.getByTestId('chat-input')).toHaveAttribute('placeholder', 'Enter = send; Shift+Enter = new line');
   });
+
+  it('puts a stop button in the arrow\'s place while a turn runs, and an unclickable "…" once clicked', () => {
+    const onStop = vi.fn();
+    const composer = (stopping: boolean) => (
+      <UiLanguageProvider>
+        <ChatComposer disabled working stopping={stopping} onSend={vi.fn()} onStop={onStop} />
+      </UiLanguageProvider>
+    );
+    const { rerender } = render(composer(false));
+    expect(screen.queryByTestId('chat-send')).toBeNull();
+    const stop = screen.getByTestId('chat-stop');
+    expect(stop).toBeEnabled();
+    expect(stop).toHaveAccessibleName('Stop');
+    expect(stop).toHaveTextContent('');
+    fireEvent.click(stop);
+    expect(onStop).toHaveBeenCalledTimes(1);
+
+    // The server lets the running step finish before it stops, so the
+    // wait can be long: the button gives way to a disabled "…".
+    rerender(composer(true));
+    expect(screen.queryByTestId('chat-stop')).toBeNull();
+    const stopping = screen.getByTestId('chat-stopping');
+    expect(stopping).toBeDisabled();
+    expect(stopping).toHaveAccessibleName('Stopping after the current step…');
+    expect(stopping).toHaveTextContent('');
+  });
+
+  it('shows the stop button disabled when there is nothing to stop yet', () => {
+    render(
+      <UiLanguageProvider>
+        <ChatComposer disabled working onSend={vi.fn()} />
+      </UiLanguageProvider>,
+    );
+    expect(screen.getByTestId('chat-stop')).toBeDisabled();
+  });
 });

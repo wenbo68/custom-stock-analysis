@@ -25,7 +25,7 @@ from src.tiered_analysis.history import (
     list_runs,
     list_tickers,
     list_transcript,
-    mark_done,
+    mark_succeeded,
     mark_failed,
     run_exists,
     status_counts,
@@ -77,11 +77,11 @@ class TestTieredRunHistory:
         assert run["created_at"]
         assert run_exists("task-1") and not run_exists("nope")
 
-    def test_mark_done_stores_result(self, isolated_db):
+    def test_mark_succeeded_stores_result(self, isolated_db):
         create_run("task-1", "AAPL")
-        mark_done("task-1", RESULT)
+        mark_succeeded("task-1", RESULT)
         run = get_run("task-1")
-        assert run["status"] == "done"
+        assert run["status"] == "succeeded"
         assert run["result"]["outlook"] == "neutral"
         assert run["result"]["data_reports"][0]["coverage"] == "full"
         assert run["sections"] == ["core", "data_reports", "deep_analysis", "plan"]
@@ -98,20 +98,20 @@ class TestTieredRunHistory:
 
     def test_list_runs_newest_first_without_results(self, isolated_db):
         create_run("task-1", "AAPL")
-        mark_done("task-1", RESULT)
+        mark_succeeded("task-1", RESULT)
         create_run("task-2", "NVDA")
         page = list_runs()
         runs = page["items"]
         assert [r["run_id"] for r in runs] == ["task-2", "task-1"]
         assert runs[0]["status"] == "running"
-        assert runs[1]["status"] == "done"
+        assert runs[1]["status"] == "succeeded"
         # list is lightweight: no full result payloads
         assert all("result" not in r for r in runs)
         assert (page["page"], page["page_size"], page["total"], page["page_count"]) == (1, 10, 2, 1)
 
     def test_list_digest_has_outlook_shares_and_tier(self, isolated_db):
         create_run("task-1", "AAPL")
-        mark_done("task-1", {**RESULT,
+        mark_succeeded("task-1", {**RESULT,
                              "tier": 2,
                              "outlook": "bullish",
                              "final": {"outlook": "bullish", "tier": 2},
@@ -157,7 +157,7 @@ class TestTieredRunHistory:
             "tier": 2, "capital": 100000,
             "risk_pct": 1.0, "reward_ratio": 2.0, "max_hold_weeks": 3,
         })
-        mark_done("task-1", {**RESULT,
+        mark_succeeded("task-1", {**RESULT,
                              "tier": 2,
                              "outlook": "bullish",
                              "final": {"outlook": "bullish", "tier": 2},
@@ -182,11 +182,11 @@ class TestTieredRunHistory:
     def test_list_digest_degrades_on_refused_runs(self, isolated_db):
         # no sizing block at all -> dash shares
         create_run("task-1", "AAPL")
-        mark_done("task-1", {**RESULT, "tier": 1})
+        mark_succeeded("task-1", {**RESULT, "tier": 1})
         # sizing ran but refused to buy (shares None) -> 0, like the report
         # card
         create_run("task-2", "MSFT")
-        mark_done("task-2", {**RESULT, "tier": 2,
+        mark_succeeded("task-2", {**RESULT, "tier": 2,
                              "final": {"outlook": "neutral", "tier": 2},
                              "sizing": {"shares": None}})
         runs = _rows()
@@ -200,7 +200,7 @@ class TestTieredRunHistory:
         from src.storage import DatabaseManager, TieredRunRecord
 
         create_run("task-1", "AAPL")
-        mark_done("task-1", RESULT)
+        mark_succeeded("task-1", RESULT)
         with DatabaseManager.get_instance().get_session() as session:
             row = session.query(TieredRunRecord).filter_by(run_id="task-1").one()
             row.result_json = "{not json"
@@ -239,14 +239,14 @@ class TestFilters:
             "tier": 2, "capital": 100000, "risk_pct": 1.0,
             "reward_ratio": 2.0, "max_hold_weeks": 2,
         })
-        mark_done("bull", {**RESULT, "outlook": "bullish", "tier": 2})
+        mark_succeeded("bull", {**RESULT, "outlook": "bullish", "tier": 2})
         create_run("bear", "nvda", inputs={
             "tier": 1, "capital": 50000, "risk_pct": 2.0,
             "reward_ratio": 3.0, "max_hold_weeks": 4,
         })
-        mark_done("bear", {**RESULT, "outlook": "bearish", "tier": 1})
+        mark_succeeded("bear", {**RESULT, "outlook": "bearish", "tier": 1})
         create_run("blank", "MSFT", inputs={"tier": 1, "capital": 20000})
-        mark_done("blank", {**RESULT, "outlook": "no_outlook", "tier": 1})
+        mark_succeeded("blank", {**RESULT, "outlook": "no_outlook", "tier": 1})
         create_run("dead", "AAPL", inputs={"tier": 1, "capital": 100000})
         mark_failed("dead", "boom")
         create_run("live", "TSLA", inputs={"tier": 2, "capital": 100000})
@@ -291,7 +291,7 @@ class TestFilters:
 
     def test_filters_combine_with_and(self, isolated_db):
         self._seed()
-        assert self._ids(tickers=["AAPL"], statuses=["done"]) == ["bull"]
+        assert self._ids(tickers=["AAPL"], statuses=["succeeded"]) == ["bull"]
         assert self._ids(tiers=[1], outlooks=["no_outlook"]) == ["blank", "dead"]
 
     def test_timestamps_carry_the_utc_offset(self, isolated_db):
@@ -323,7 +323,7 @@ class TestFilters:
 
     def test_total_counts_matches_not_page(self, isolated_db):
         self._seed()
-        page = list_runs(RunFilters(statuses=["done"]), page=1, page_size=2)
+        page = list_runs(RunFilters(statuses=["succeeded"]), page=1, page_size=2)
         assert page["total"] == 3 and page["page_count"] == 2
         assert len(page["items"]) == 2
 
@@ -354,7 +354,7 @@ class TestSections:
 
     def test_default_is_everything_with_the_deep_analysis_as_overview(self, isolated_db):
         create_run("task-1", "AAPL")
-        mark_done("task-1", self.FULL)
+        mark_succeeded("task-1", self.FULL)
         assert get_run("task-1")["result"] == {
             **self.FULL,
             "deep_analysis": {"outlook": "bullish", "score": 7.5,
@@ -364,7 +364,7 @@ class TestSections:
 
     def test_core_only_drops_the_heavy_parts_but_keeps_tier2_headline(self, isolated_db):
         create_run("task-1", "AAPL")
-        mark_done("task-1", self.FULL)
+        mark_succeeded("task-1", self.FULL)
         run = get_run("task-1", sections=("core",))
         assert run["sections"] == ["core"]
         assert run["result"] == {
@@ -375,7 +375,7 @@ class TestSections:
 
     def test_one_section_plus_a_named_data_report(self, isolated_db):
         create_run("task-1", "AAPL")
-        mark_done("task-1", self.FULL)
+        mark_succeeded("task-1", self.FULL)
         run = get_run("task-1", sections=("core", "data_reports"),
                       data_reports=["Fundamentals"])
         assert run["result"]["data_reports"] == [
@@ -397,7 +397,7 @@ class TestDebateItems:
         assert get_vote_items("nope") is None
         create_run("task-1", "AAPL")
         assert get_vote_items("task-1")["total"] == 0
-        mark_done("task-1", RESULT)  # tier 1: no debate record
+        mark_succeeded("task-1", RESULT)  # tier 1: no debate record
         assert get_vote_items("task-1") == {
             "items": [], "page": 1, "page_size": 20, "total": 0, "page_count": 1,
         }
@@ -409,7 +409,7 @@ class TestDebateItems:
             {"id": "F1", "data_report": "fundamentals", "final_status": "counted"},
         ]
         create_run("task-1", "AAPL")
-        mark_done("task-1", {**RESULT, "deep_analysis": {"detail": {"items": items}}})
+        mark_succeeded("task-1", {**RESULT, "deep_analysis": {"detail": {"items": items}}})
         page = get_vote_items("task-1", statuses=["counted"], page=2, page_size=1)
         assert [i["id"] for i in page["items"]] == ["F1"]
         assert page["total"] == 2 and page["page_count"] == 2
@@ -435,14 +435,14 @@ class TestDeleteRun:
 
     def test_finished_run_goes_with_its_transcript(self, isolated_db):
         create_run("task-1", "AAPL", inputs={"tier": 2})
-        mark_done("task-1", RESULT)
+        mark_succeeded("task-1", RESULT)
         _record_call("task-1", 1)
         create_run("task-2", "NVDA")
         _record_call("task-2", 1)
 
         deleted = delete_run("task-1")
 
-        assert deleted["run_id"] == "task-1" and deleted["status"] == "done"
+        assert deleted["run_id"] == "task-1" and deleted["status"] == "succeeded"
         assert deleted["ticker"] == "AAPL" and deleted["tier"] == 2
         assert not run_exists("task-1")
         assert list_transcript("task-1") == []
@@ -465,13 +465,13 @@ class TestDeleteRun:
 
 class TestStatusCounts:
     def test_every_status_is_present(self, isolated_db):
-        assert status_counts() == {"queued": 0, "running": 0, "done": 0, "failed": 0}
+        assert status_counts() == {"queued": 0, "running": 0, "succeeded": 0, "failed": 0}
         create_run("a", "AAPL", status="queued")
         create_run("b", "AAPL", status="queued")
         create_run("c", "AAPL")
         create_run("d", "AAPL")
-        mark_done("d", RESULT)
-        assert status_counts() == {"queued": 2, "running": 1, "done": 1, "failed": 0}
+        mark_succeeded("d", RESULT)
+        assert status_counts() == {"queued": 2, "running": 1, "succeeded": 1, "failed": 0}
 
 
 class TestTranscript:

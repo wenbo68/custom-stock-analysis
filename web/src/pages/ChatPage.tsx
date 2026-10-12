@@ -87,6 +87,11 @@ const ChatPage = () => {
   const [conversations, setConversations] = useState<ChatConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ChatConversation | null>(null);
   const [working, setWorking] = useState(false);
+  // The conversation whose turn is in flight — what the stop button
+  // stops, whichever conversation is open by then — and whether the
+  // stop was clicked and the turn has not come back yet.
+  const [turnId, setTurnId] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The band the menus float in and the dock the message box floats
   // in; their heights are the text's top and bottom insets.
@@ -129,6 +134,7 @@ const ChatPage = () => {
   // turn (the user's line, a tool's result); show what it has.
   const applyTurn = async (target: ChatConversation, turn: () => Promise<ChatConversation>) => {
     setWorking(true);
+    setTurnId(target.id);
     setError(null);
     // Only a longer conversation is news; the same length is what the
     // page already shows (the user's own line, added before sending).
@@ -147,7 +153,27 @@ const ChatPage = () => {
       }
     } finally {
       setWorking(false);
+      setTurnId(null);
+      setStopping(false);
     }
+  };
+
+  // The stop button: ask the server to stop the turn in flight. The
+  // server lets the step that is running finish (so the tokens shown
+  // match the bill, whichever model), then the turn's own request comes
+  // back with the stopped conversation — its last row is the stopped
+  // line, which names the step the stop landed on and what would have
+  // followed — and `applyTurn` shows it as it would any answer.
+  // Until then an unclickable "…" takes the button's place.
+  const stopTurn = () => {
+    if (!turnId || stopping) {
+      return;
+    }
+    setStopping(true);
+    void chatApi.stopTurn(turnId).catch((stopError) => {
+      setError(describe(stopError, t, 'chat.error.stop'));
+      setStopping(false);
+    });
   };
 
   const send = (text: string) =>
@@ -257,7 +283,11 @@ const ChatPage = () => {
               <ChatComposer
                 disabled={working || pending !== null}
                 disabledHint={pending ? t('chat.composer.waitConfirm') : null}
+                working={working}
+                stopping={stopping}
                 onSend={send}
+                // Nothing to stop yet while the conversation itself is being created.
+                onStop={turnId ? stopTurn : undefined}
               />
             </div>
           </div>
@@ -268,8 +298,15 @@ const ChatPage = () => {
 };
 
 // What went wrong, in the page's words: the server's own code when it
-// gave one (busy, no model), else the parsed message.
-function describe(error: unknown, t: (key: 'chat.error.busy' | 'chat.error.notConfigured' | 'chat.error.send', params?: Record<string, string>) => string): string {
+// gave one (busy, no model), else the parsed message under `fallback`
+// ("Could not send" unless told otherwise).
+type ErrorKey = 'chat.error.busy' | 'chat.error.notConfigured' | 'chat.error.send' | 'chat.error.stop';
+
+function describe(
+  error: unknown,
+  t: (key: ErrorKey, params?: Record<string, string>) => string,
+  fallback: 'chat.error.send' | 'chat.error.stop' = 'chat.error.send',
+): string {
   if (axios.isAxiosError(error)) {
     const data = error.response?.data as
       | { detail?: { code?: string; error?: string }; error?: string; message?: string }
@@ -282,9 +319,9 @@ function describe(error: unknown, t: (key: 'chat.error.busy' | 'chat.error.notCo
       return t('chat.error.notConfigured');
     }
     const parsed = (error as { parsedError?: { message?: string } }).parsedError?.message;
-    return t('chat.error.send', { error: parsed ?? data?.message ?? error.message });
+    return t(fallback, { error: parsed ?? data?.message ?? error.message });
   }
-  return t('chat.error.send', { error: error instanceof Error ? error.message : String(error) });
+  return t(fallback, { error: error instanceof Error ? error.message : String(error) });
 }
 
 export default ChatPage;

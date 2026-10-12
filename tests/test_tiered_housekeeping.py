@@ -82,15 +82,31 @@ class TestStartupHousekeeping:
     def test_running_runs_are_marked_failed(self, isolated_db):
         history.create_run("orphan", "AAPL")
         history.create_run("finished", "MSFT")
-        history.mark_done("finished", {"ticker": "MSFT"})
+        history.mark_succeeded("finished", {"ticker": "MSFT"})
 
         assert history.fail_stale_running_runs() == 1
 
         orphan = history.get_run("orphan")
         assert orphan["status"] == "failed"
         assert orphan["error"] == history.STALE_RUN_ERROR
-        assert history.get_run("finished")["status"] == "done"
+        assert history.get_run("finished")["status"] == "succeeded"
         assert history.fail_stale_running_runs() == 0
+
+    def test_older_done_runs_are_renamed_succeeded(self, isolated_db):
+        from src.storage import TieredRunRecord
+
+        history.create_run("old", "AAPL")
+        history.create_run("new", "MSFT")
+        history.mark_succeeded("new", {"ticker": "MSFT"})
+        with isolated_db.get_session() as session:
+            session.query(TieredRunRecord).filter_by(run_id="old").update({"status": "done"})
+            session.commit()
+
+        assert history.rename_legacy_done_runs() == 1
+
+        assert history.get_run("old")["status"] == "succeeded"
+        assert history.get_run("new")["status"] == "succeeded"
+        assert history.rename_legacy_done_runs() == 0
 
     def test_old_transcript_rows_are_pruned_fresh_ones_kept(self, isolated_db):
         from src.storage import TieredRunTranscriptRecord, utc_naive_now
@@ -138,9 +154,9 @@ class TestStartupHousekeeping:
             with TestClient(create_app()) as client:
                 assert client.get("/api/health").status_code == 200
                 deadline = time.time() + 5
-                while time.time() < deadline and history.get_run("waiting")["status"] != "done":
+                while time.time() < deadline and history.get_run("waiting")["status"] != "succeeded":
                     time.sleep(0.05)
-        assert history.get_run("waiting")["status"] == "done"
+        assert history.get_run("waiting")["status"] == "succeeded"
         assert seen["code"] == "AAPL"
         assert seen["tier"] == 2
         assert seen["max_hold_weeks"] == 1

@@ -113,9 +113,10 @@ def preload_libraries() -> None:
 
 
 def startup_housekeeping() -> None:
-    """Mark orphaned runs failed, resume queued ones, and prune expired
-    rows. Never fails startup: a housekeeping error is logged and the
-    app serves anyway."""
+    """Mark orphaned runs failed, rename older ``done`` rows
+    ``succeeded``, resume queued ones, and prune expired rows. Never
+    fails startup: a housekeeping error is logged and the app serves
+    anyway."""
     from src.tiered_analysis import history
     from src.tiered_analysis.cache_store import prune_cache
 
@@ -125,6 +126,12 @@ def startup_housekeeping() -> None:
             logger.warning("marked %d orphaned run(s) failed at startup", orphaned)
     except Exception as exc:
         logger.warning("startup run cleanup skipped: %s", exc)
+    try:
+        renamed = history.rename_legacy_done_runs()
+        if renamed:
+            logger.info("renamed the status of %d older run(s) from done to succeeded", renamed)
+    except Exception as exc:
+        logger.warning("startup run status rename skipped: %s", exc)
     try:
         run_service.run_queue.resume()
     except Exception as exc:

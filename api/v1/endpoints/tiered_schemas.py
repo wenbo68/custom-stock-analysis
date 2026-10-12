@@ -22,7 +22,7 @@ from src.tiered_analysis.run_request import TieredAnalyzeRequest as _TieredAnaly
 # the chat's tool and the user share one vocabulary (owner request
 # 2026-09-24). The engine and the database use the same words too.
 
-RunStatus = Literal["queued", "running", "done", "failed"]
+RunStatus = Literal["queued", "running", "succeeded", "failed"]
 #: `no_outlook` = the run finished but the analysis produced no outlook
 #: (the page's "No outlook").
 Outlook = Literal["bullish", "neutral", "bearish", "no_outlook"]
@@ -125,7 +125,7 @@ class RunDeleted(BaseModel):
 
     run_id: str
     ticker: str
-    status: Literal["queued", "done", "failed"] = Field(
+    status: Literal["queued", "succeeded", "failed"] = Field(
         description="What the run was. `queued` means it was cancelled before it started.",
     )
 

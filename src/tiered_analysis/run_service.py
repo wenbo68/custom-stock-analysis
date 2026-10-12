@@ -160,7 +160,7 @@ def _execute_run(run: QueuedRun) -> None:
             transcript=LlmTranscript.for_run(run.run_id),
             language=str(inputs.get("language") or DEFAULT_LANGUAGE),
         )
-        history.mark_done(run.run_id, _serialize_outcome(outcome))
+        history.mark_succeeded(run.run_id, _serialize_outcome(outcome))
     except Exception as exc:
         logger.error("tiered analysis task failed for %s: %s",
                      run.ticker, exc, exc_info=True)

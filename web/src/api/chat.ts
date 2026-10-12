@@ -4,7 +4,9 @@ import type { TieredTranscriptCall } from './tiered';
 
 // Types mirror the backend JSON verbatim (api/v1/endpoints/chat_schemas.py).
 
-export type ChatRole = 'user' | 'assistant' | 'tool';
+/** `stopped` is the row that ends a turn the user stopped (the "You
+ *  stopped this reply" line): neither a user input nor a bot step. */
+export type ChatRole = 'user' | 'assistant' | 'tool' | 'stopped';
 
 export type ChatToolCall = {
   id: string;
@@ -123,6 +125,14 @@ export const chatApi = {
     const response = await apiClient.get<TieredTranscriptCall>(
       `/api/v1/chat/conversations/${id}/messages/${seq}/transcript`,
     );
+    return response.data;
+  },
+
+  // Stop the turn in flight (the stop button). Answers at once; the
+  // turn's own request then returns the conversation as stopped. `stopped`
+  // is false when nothing was running (the turn may just have ended).
+  stopTurn: async (id: string): Promise<{ id: string; stopped: boolean }> => {
+    const response = await apiClient.post<{ id: string; stopped: boolean }>(`/api/v1/chat/conversations/${id}/stop`);
     return response.data;
   },
 

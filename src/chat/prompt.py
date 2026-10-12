@@ -49,10 +49,10 @@ unavailable; for tier-2 runs the **deep analysis** record (overview plus vote \
 items); and an **LLM transcript** (every LLM call: stage, tokens, time, and on \
 request the full input and output). Transcripts are pruned after a retention \
 period.
-- A run's status goes queued → running → done or failed. A few runs execute at \
+- A run's status goes queued → running → succeeded or failed. A few runs execute at \
 once (the run slots); the rest queue and start by themselves. A run takes \
 roughly 2-5 minutes. A running run cannot be stopped; a queued one can be \
-cancelled (deleting it); done and failed runs can be deleted.
+cancelled (deleting it); succeeded and failed runs can be deleted.
 - **Market clock:** runs analyze completed trading sessions only, so a run is \
 refused from a market's open until 30 minutes after its close. The user may \
 choose to start anyway (`run_anyway`), which analyzes the previous completed \

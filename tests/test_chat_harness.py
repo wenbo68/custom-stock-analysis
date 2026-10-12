@@ -4,6 +4,7 @@ scripted model: every reply is queued in advance, so the tests pin
 exactly what the loop stores, when it stops, and what it asks."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import threading
@@ -15,6 +16,9 @@ from src.chat import harness as harness_module
 from src.chat import store
 from src.chat.harness import (
     LANGUAGE_RETRY_LIMIT,
+    STOPPED_LATE_MESSAGE,
+    STOPPED_MESSAGE,
+    STOPPED_ROLE,
     TOOL_CALL_LIMIT,
     ChatHarness,
     ConfirmationPendingError,
@@ -26,6 +30,7 @@ from src.chat.harness import (
     trim_history,
 )
 from src.chat.model import ModelReply
+from src.chat.tools import TOOLS, NoParams, Tool, ToolCatalog
 from src.tiered_analysis import history
 
 
@@ -59,8 +64,11 @@ class ScriptedModel:
         self.requests: List[Dict[str, Any]] = []
         self.release = threading.Event()
         self.release.set()
+        #: Set the moment the model is asked, before it waits on `release`.
+        self.asked = threading.Event()
 
     def complete(self, messages, tools):
+        self.asked.set()
         self.release.wait(timeout=5)
         self.requests.append({"messages": messages, "tools": tools})
         if not self.replies:
@@ -545,3 +553,163 @@ class TestHelpers:
 
     def test_history_limit_is_the_documented_one(self):
         assert harness_module.HISTORY_MESSAGE_LIMIT == 40
+
+
+class TestStop:
+    """The stop button (2026-10-12): a turn asked to stop lets the model
+    call in flight finish and stores its reply, tokens and all (so the
+    page's spent total matches the bill, whichever provider); then every
+    tool call not yet run is answered with a `stopped` error instead of
+    run (never held), and a `stopped` row ends the turn — one the model
+    later sees as a user line, so the stopped turn stays in the context
+    as what it was. A stop during the final reply cuts nothing: the reply
+    stands and the row says so."""
+
+    @staticmethod
+    def _start(bot, conversation_id, text_="one"):
+        errors: List[Exception] = []
+
+        def turn():
+            try:
+                bot.send(conversation_id, text_)
+            except Exception as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        worker = threading.Thread(target=turn)
+        worker.start()
+        return worker, errors
+
+    def test_stop_during_the_model_call_waits_for_its_reply_then_ends_the_turn(self, isolated_db):
+        slow = dataclasses.replace(call("list_tickers", {}), input_tokens=120, output_tokens=30)
+        model = ScriptedModel([slow, text("again")])
+        model.release.clear()
+        bot = ChatHarness(model)
+        conversation_id = store.create_conversation()["id"]
+        worker, errors = self._start(bot, conversation_id)
+        try:
+            assert model.asked.wait(timeout=5)
+            assert bot.stop(conversation_id) is True
+            # The turn does not end while the model is still "thinking":
+            # the step in flight is let finish, so its tokens are known.
+            worker.join(timeout=0.5)
+            assert worker.is_alive()
+            assert roles(conversation_id) == ["user"]
+        finally:
+            model.release.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert errors == []
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", "tool", STOPPED_ROLE]
+        # The reply stands, with what it cost; its call is answered, not run.
+        assert rows[1]["usage"] == {"input_tokens": 120, "output_tokens": 30}
+        assert rows[1]["tool_calls"][0]["id"] == "c1"
+        assert tool_result(rows[2])["error"] == "stopped"
+        assert "time_ms" not in rows[2]
+        assert rows[3]["content"] == STOPPED_MESSAGE
+        assert conversation_id not in bot._stops
+        assert len(model.requests) == 1
+        # Not one of the user's inputs: the sidebar counts one question,
+        # and the step's tokens are in its total.
+        facts = store.get_conversation(conversation_id)
+        assert facts["user_input_count"] == 1
+        assert facts["total_tokens"] == 150
+
+        # The next turn runs as usual; the model sees the stop as a user
+        # line before the new question.
+        bot.send(conversation_id, "two")
+        assert roles(conversation_id) == ["user", "assistant", "tool", STOPPED_ROLE, "user", "assistant"]
+        shown = next(r["messages"] for r in model.requests if r["messages"][-1] == {"role": "user", "content": "two"})
+        assert shown[-2] == {"role": "user", "content": STOPPED_MESSAGE}
+        assert shown[-3]["role"] == "tool"
+
+    def test_stop_during_the_final_reply_keeps_it_whole_and_says_so(self, isolated_db):
+        # The last step asks for no tool, so stopping it cuts nothing:
+        # the reply is whole, and the stopped row tells the model (and
+        # the page) that, not that a finished answer was cut short.
+        model = ScriptedModel([text("done")])
+        model.release.clear()
+        bot = ChatHarness(model)
+        conversation_id = store.create_conversation()["id"]
+        worker, errors = self._start(bot, conversation_id)
+        try:
+            assert model.asked.wait(timeout=5)
+            assert bot.stop(conversation_id) is True
+        finally:
+            model.release.set()
+        worker.join(timeout=5)
+        assert errors == []
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", STOPPED_ROLE]
+        assert rows[1]["content"] == "done"
+        assert rows[2]["content"] == STOPPED_LATE_MESSAGE
+
+    def test_stop_during_a_final_reply_in_the_wrong_language_sends_no_retry(self, isolated_db):
+        holder: Dict[str, Any] = {}
+
+        class StoppingModel(ScriptedModel):
+            def complete(self, messages, tools):
+                holder["bot"].stop(holder["id"])
+                return super().complete(messages, tools)
+
+        model = StoppingModel([text("English where Chinese was asked")])
+        bot = ChatHarness(model)
+        conversation_id = store.create_conversation()["id"]
+        holder.update(bot=bot, id=conversation_id)
+        bot.send(conversation_id, "你好", language="zh")
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", STOPPED_ROLE]
+        assert rows[1]["notice"] == "wrong_language"
+        assert rows[2]["content"] == STOPPED_LATE_MESSAGE
+        assert len(model.requests) == 1
+
+    def test_stop_under_a_tool_answers_the_rest_and_asks_the_model_nothing_more(self, isolated_db):
+        history.create_run("q1", "AAPL", inputs={"tier": 1}, status="queued")
+        holder: Dict[str, Any] = {}
+
+        def stopper(params):
+            holder["bot"].stop(holder["id"])
+            return {"ok": True}
+
+        catalog = ToolCatalog((Tool(name="stopper", description="stops the turn", params=NoParams, run=stopper), *TOOLS))
+        model = ScriptedModel([calls(
+            ("c1", "delete_run", {"run_id": "q1"}), ("c2", "stopper", {}), ("c3", "list_tickers", {}),
+        )])
+        bot = ChatHarness(model, catalog)
+        conversation_id = store.create_conversation()["id"]
+        holder.update(bot=bot, id=conversation_id)
+        bot.send(conversation_id, "go")
+
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", "tool", "tool", "tool", STOPPED_ROLE]
+        assert tool_result(rows[2]) == {"ok": True}
+        # Not run after the stop: an answer, so the provider sees no open call.
+        assert rows[3]["tool_call_id"] == "c3"
+        assert tool_result(rows[3])["error"] == "stopped"
+        assert "time_ms" not in rows[3]
+        # Would have waited for a yes: answered the same way, not held.
+        assert rows[4]["tool_call_id"] == "c1"
+        assert tool_result(rows[4])["error"] == "stopped"
+        assert rows[4]["input"] == {"run_id": "q1"}
+        assert store.get_pending(conversation_id) is None
+        assert history.run_exists("q1")
+        assert len(model.requests) == 1
+
+    def test_stop_with_no_turn_running_is_false_and_unknown_is_an_error(self, isolated_db):
+        bot = ChatHarness(ScriptedModel([]))
+        conversation_id = store.create_conversation()["id"]
+        assert bot.stop(conversation_id) is False
+        with pytest.raises(UnknownConversationError):
+            bot.stop("nope")
+
+    def test_the_stopped_row_is_a_user_line_to_the_model_and_starts_no_turn(self):
+        assert model_view({"role": STOPPED_ROLE, "content": "x", "seq": 3, "created_at": "t"}) == {"role": "user", "content": "x"}
+        messages = [
+            {"role": "user", "content": "one"}, {"role": "assistant", "content": "a"},
+            {"role": STOPPED_ROLE, "content": "x"},
+            {"role": "user", "content": "two"}, {"role": "assistant", "content": "b"},
+        ]
+        # Were the stopped row a turn start, three rows would fit and the
+        # turn would open on it, orphaning its own question.
+        assert trim_history(messages, limit=3) == messages[3:]
+        assert trim_history(messages, limit=5) == messages

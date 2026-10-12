@@ -37,6 +37,29 @@ Guardrails (owner discussion 2026-09-19):
   a correction line (not stored — it is in the call's transcript) up to
   ``LANGUAGE_RETRY_LIMIT`` times (src/chat/language.py).
 
+- **Stop.** The page's send button turns into a stop button while a
+  turn runs (owner request 2026-10-12, after Claude Code's Esc). ``stop``
+  raises the turn's flag; the loop checks it after every model call
+  and before every tool. A model call in flight is never cut short:
+  the loop waits for its reply and stores it with its token counts,
+  so what the page shows as spent is what the provider billed, with
+  every provider alike (owner decision 2026-10-12 — a provider may bill
+  a cancelled stream in full anyway, Gemini does). Then the reply's
+  tool calls, and any not yet run under a tool, are answered with a
+  ``stopped`` error result instead of run, so the provider sees no
+  unanswered call; a call that would have been held for a yes is
+  answered the same way, not held. Last comes a ``stopped`` row,
+  which the model sees as the user saying the reply was stopped — so
+  the stopped turn stays in the context as what it was, and the model
+  does not pick the old work back up on the next message unless
+  asked. A stop that lands while the final reply (one asking for no
+  tool) is being written cuts nothing: that reply is whole and stands,
+  and the ``stopped`` row that follows says so (``STOPPED_LATE_MESSAGE``)
+  — the page tells the user that was the last step. The page's stopped
+  line names the step the stop landed on and what the next steps would
+  have been (the answered calls), so the answered calls are stored as
+  tool rows but not shown as steps.
+
 One turn runs at a time per conversation; a second request while one
 is in flight is refused (``ConversationBusyError``), and so is deleting
 the conversation (``delete_conversation``) — otherwise the turn would
@@ -73,6 +96,22 @@ HISTORY_MESSAGE_LIMIT = 40
 #: else (usage, sizes, errors, approval, the call's transcript) is for
 #: the page and is named as the page labels it.
 MODEL_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
+
+#: The row that ends a stopped turn. Stored under its own role, as the
+#: page labels it, so it is neither one of the user's inputs (the
+#: sidebar counts those) nor a bot step; ``model_view`` hands it to the
+#: model as a user line, which is what it is.
+STOPPED_ROLE = "stopped"
+STOPPED_MESSAGE = (
+    "[The user stopped this reply before it finished. Wait for the user's "
+    "next message; do not continue the stopped work unless asked.]"
+)
+#: The same row when the stop landed on the final reply: nothing was cut
+#: short, and the model should not think it was.
+STOPPED_LATE_MESSAGE = (
+    "[The user asked to stop this reply, but it had already finished; "
+    "nothing was cut short. Wait for the user's next message.]"
+)
 
 
 class ConversationBusyError(RuntimeError):
@@ -112,8 +151,12 @@ class PendingCall:
 
 
 def model_view(message: Dict[str, Any]) -> Dict[str, Any]:
-    """A stored message cut down to what the provider may see."""
-    return {key: message[key] for key in MODEL_KEYS if message.get(key) is not None}
+    """A stored message cut down to what the provider may see. The
+    ``stopped`` row goes as a user line."""
+    view = {key: message[key] for key in MODEL_KEYS if message.get(key) is not None}
+    if view.get("role") == STOPPED_ROLE:
+        view["role"] = "user"
+    return view
 
 
 def trim_history(messages: List[Dict[str, Any]], limit: int = HISTORY_MESSAGE_LIMIT) -> List[Dict[str, Any]]:
@@ -155,6 +198,10 @@ class ChatHarness:
         self._catalog = catalog or ToolCatalog()
         self._locks: Dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        #: The stop flag of each turn in flight, by conversation; a turn
+        #: makes its own on entry and takes it away on exit, so a stop
+        #: that lands between turns raises a flag nobody reads.
+        self._stops: Dict[str, threading.Event] = {}
 
     # -- public ---------------------------------------------------------
 
@@ -162,11 +209,25 @@ class ChatHarness:
         """Store the user's message and run the loop until it rests.
         ``language`` is the one the user chose for the app; the bot
         answers in it."""
-        with self._turn(conversation_id), using_turn_language(language):
+        with self._turn(conversation_id) as turn, using_turn_language(language):
             if store.get_pending(conversation_id):
                 raise ConfirmationPendingError(conversation_id)
             store.append_message(conversation_id, {"role": "user", "content": text})
-            self._loop(conversation_id, tool_calls=0, language=language)
+            self._loop(conversation_id, tool_calls=0, language=language, stop=turn.stop)
+
+    def stop(self, conversation_id: str) -> bool:
+        """Ask the turn running on the conversation to stop (see the
+        module notes): True when one was running, False when nothing
+        was — the turn may just have ended, which is no error.
+        ``UnknownConversationError`` for an id that does not exist."""
+        with self._locks_guard:
+            flag = self._stops.get(conversation_id)
+        if flag is None:
+            if not store.conversation_exists(conversation_id):
+                raise UnknownConversationError(conversation_id)
+            return False
+        flag.set()
+        return True
 
     def delete_conversation(self, conversation_id: str) -> bool:
         """Remove the conversation and its messages. Refused
@@ -191,7 +252,7 @@ class ChatHarness:
         the shortened list of held calls are one write, so a crash
         between them cannot leave an already-run action held, to be
         run again on the next yes (2026-10-10)."""
-        with self._turn(conversation_id), using_turn_language(language):
+        with self._turn(conversation_id) as turn, using_turn_language(language):
             pending = store.get_pending(conversation_id)
             if not pending or not pending.get("calls"):
                 raise NothingPendingError(conversation_id)
@@ -220,15 +281,20 @@ class ChatHarness:
                                     pending=still_held)
             if remaining:
                 return
-            self._loop(conversation_id, tool_calls=int(pending.get("tool_calls", 0)), language=language)
+            self._loop(conversation_id, tool_calls=int(pending.get("tool_calls", 0)),
+                       language=language, stop=turn.stop)
 
     # -- the loop -------------------------------------------------------
 
-    def _loop(self, conversation_id: str, tool_calls: int, language: str) -> None:
+    def _loop(self, conversation_id: str, tool_calls: int, language: str,
+              stop: threading.Event) -> None:
         """``tool_calls`` counts the model replies that asked for tools in
         this turn, against ``TOOL_CALL_LIMIT``. A final reply in the wrong
         language goes back with a correction, ``LANGUAGE_RETRY_LIMIT``
-        times at most; after that the last reply stands, with its notice."""
+        times at most; after that the last reply stands, with its notice.
+        ``stop`` is the turn's stop flag (see the module notes): checked
+        after every model call and before every tool, never during a
+        call — the step in flight finishes and is stored."""
         language_retries = 0
         correction: Optional[str] = None
         while True:
@@ -237,11 +303,26 @@ class ChatHarness:
             if reply is None:
                 return
             if not reply.tool_calls:
+                if stop.is_set():
+                    # A stop during the final reply cuts nothing: the
+                    # reply is whole, so it stands (even in the wrong
+                    # language — no retry is sent), and the row says so.
+                    self._store_stopped(conversation_id, late=True)
+                    return
                 if matches_language(reply.content, language) or language_retries >= LANGUAGE_RETRY_LIMIT:
                     return
                 language_retries += 1
                 correction = correction_message(language)
                 continue
+            if stop.is_set():
+                # Stopped while the model was thinking: its reply stands,
+                # tokens and all; its calls are answered, not run.
+                self._answer_stopped(conversation_id, [
+                    (str(call.get("id") or ""), str((call.get("function") or {}).get("name") or ""), None)
+                    for call in reply.tool_calls
+                ])
+                self._store_stopped(conversation_id)
+                return
             if tool_calls >= TOOL_CALL_LIMIT:
                 # The calls of this reply are answered, not run: a
                 # provider rejects every later request that carries an
@@ -265,6 +346,9 @@ class ChatHarness:
                 call_id = str(call.get("id") or "")
                 function = call.get("function") or {}
                 name = str(function.get("name") or "")
+                if stop.is_set():
+                    self._answer_stopped(conversation_id, [(call_id, name, None)])
+                    continue
                 tool = self._catalog.get(name)
                 if tool is None:
                     self._store_tool_result(conversation_id, call_id, name,
@@ -285,9 +369,34 @@ class ChatHarness:
                 result, time_ms = self._execute(tool, params)
                 self._store_tool_result(conversation_id, call_id, name, result,
                                         time_ms=time_ms, input=inputs)
+            if stop.is_set():
+                # Stopped under a tool: the calls that would have waited
+                # for a yes are answered too, not held.
+                self._answer_stopped(conversation_id, [(c.call_id, c.name, c.input) for c in held])
+                self._store_stopped(conversation_id)
+                return
             if held:
                 store.set_pending(conversation_id, {"calls": [c.to_dict() for c in held], "tool_calls": tool_calls})
                 return
+
+    def _answer_stopped(self, conversation_id: str,
+                        calls: List[Tuple[str, str, Optional[Dict[str, Any]]]]) -> None:
+        """Answer each (call_id, name, input) with the ``stopped`` error
+        result: the user stopped the turn before the call ran."""
+        for call_id, name, inputs in calls:
+            self._store_tool_result(
+                conversation_id, call_id, name,
+                {"error": "stopped", "message": "the user stopped the reply before this call ran; it was not run"},
+                input=inputs,
+            )
+
+    @staticmethod
+    def _store_stopped(conversation_id: str, late: bool = False) -> None:
+        """The row that ends a stopped turn (``STOPPED_ROLE``); ``late``
+        when the stop landed on the final reply and cut nothing."""
+        store.append_message(conversation_id, {
+            "role": STOPPED_ROLE, "content": STOPPED_LATE_MESSAGE if late else STOPPED_MESSAGE,
+        })
 
     def _ask_model(self, conversation_id: str, language: str,
                    correction: Optional[str] = None) -> Optional[ModelReply]:
@@ -386,17 +495,23 @@ class ChatHarness:
             return self._locks.setdefault(conversation_id, threading.Lock())
 
     def _turn(self, conversation_id: str) -> "_Turn":
-        return _Turn(self._lock_for(conversation_id), conversation_id)
+        return _Turn(self._lock_for(conversation_id), conversation_id, self._stops, self._locks_guard)
 
 
 class _Turn:
     """Context manager: the conversation's lock, refused when held. The
     conversation is looked up under the lock, so a delete cannot slip
-    in between the check and the turn (2026-10-10)."""
+    in between the check and the turn (2026-10-10). The turn's stop
+    flag (``stop``) is registered for ``ChatHarness.stop`` to raise and
+    taken away again on exit."""
 
-    def __init__(self, lock: threading.Lock, conversation_id: str) -> None:
+    def __init__(self, lock: threading.Lock, conversation_id: str,
+                 stops: Dict[str, threading.Event], stops_guard: threading.Lock) -> None:
         self._lock = lock
         self._conversation_id = conversation_id
+        self._stops = stops
+        self._stops_guard = stops_guard
+        self.stop = threading.Event()
 
     def __enter__(self) -> "_Turn":
         if not self._lock.acquire(blocking=False):
@@ -404,7 +519,12 @@ class _Turn:
         if not store.conversation_exists(self._conversation_id):
             self._lock.release()
             raise UnknownConversationError(self._conversation_id)
+        with self._stops_guard:
+            self._stops[self._conversation_id] = self.stop
         return self
 
     def __exit__(self, *_: Any) -> None:
+        with self._stops_guard:
+            if self._stops.get(self._conversation_id) is self.stop:
+                del self._stops[self._conversation_id]
         self._lock.release()

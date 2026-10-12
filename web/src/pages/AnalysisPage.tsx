@@ -236,7 +236,7 @@ const AnalysisPage = () => {
   // started as Running loads here too, the moment polling flips it to done).
   useEffect(() => {
     const runId = expandedTaskId;
-    if (!runId || expandedRun?.status !== 'done' || details[runId]) {
+    if (!runId || expandedRun?.status !== 'succeeded' || details[runId]) {
       return;
     }
     if (loadingDetailRef.current === runId) {

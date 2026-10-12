@@ -66,7 +66,7 @@ class _GatedRunner:
     def __call__(self, run: QueuedRun) -> None:
         self.started.append(run)
         self.release.wait(timeout=5)
-        history.mark_done(run.run_id, {"ticker": run.ticker})
+        history.mark_succeeded(run.run_id, {"ticker": run.ticker})
         self.finished.append(run.run_id)
 
 
@@ -106,7 +106,7 @@ class TestRunQueue:
 
         runner.release.set()
         _wait_until(lambda: runner.finished == ["first", "second"])
-        assert history.get_run("second")["status"] == "done"
+        assert history.get_run("second")["status"] == "succeeded"
         assert queue.active_count == 0
 
     def test_two_slots_run_two_at_once(self, isolated_db, monkeypatch):
@@ -129,7 +129,7 @@ class TestRunQueue:
         runner.release.set()
         history.create_run("left-over", "AAPL", status=history.STATUS_QUEUED)
         history.create_run("finished", "MSFT")
-        history.mark_done("finished", {})
+        history.mark_succeeded("finished", {})
 
         assert RunQueue(runner).resume() == ["left-over"]
         _wait_until(lambda: runner.finished == ["left-over"])
@@ -195,7 +195,7 @@ class TestRunQueue:
         _wait_until(lambda: queue.active_count == 0)
         assert [run.run_id for run in runner.started] == ["first"]
         # And a finished run can go.
-        assert queue.remove("first")["status"] == "done"
+        assert queue.remove("first")["status"] == "succeeded"
 
     def test_queue_ahead_counts_the_earlier_rows(self, isolated_db):
         history.create_run("p", "AAPL", status=history.STATUS_QUEUED)
@@ -206,7 +206,7 @@ class TestRunQueue:
         assert by_id["q"]["queue_position"] == 2
         assert by_id["r"]["queue_position"] == 3
         assert history.get_run("q")["queue_position"] == 2
-        history.mark_done("p", {})
+        history.mark_succeeded("p", {})
         assert history.get_run("p")["queue_position"] is None
 
 
@@ -223,8 +223,8 @@ class TestActiveDuplicate:
         assert history.find_active_duplicate("AAPL", self.INPUTS)["status"] == "running"
 
     def test_finished_failed_or_other_inputs_are_not(self, isolated_db):
-        history.create_run("done", "AAPL", inputs=self.INPUTS)
-        history.mark_done("done", {})
+        history.create_run("succeeded", "AAPL", inputs=self.INPUTS)
+        history.mark_succeeded("succeeded", {})
         history.create_run("failed", "AAPL", inputs=self.INPUTS)
         history.mark_failed("failed", "x")
         history.create_run("deeper", "AAPL",

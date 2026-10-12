@@ -43,7 +43,7 @@ DEFAULT_LIST_PAGE = 10
 CHARS_PER_TOKEN = 4
 
 VoteItemStatus = Literal["counted", "excluded"]
-RunStatus = Literal["queued", "running", "done", "failed"]
+RunStatus = Literal["queued", "running", "succeeded", "failed"]
 OutlookFilter = Literal["bullish", "neutral", "bearish", "no_outlook"]
 ExtraSection = Literal["plan", "deep_analysis"]
 DATA_REPORTS = (
@@ -381,7 +381,7 @@ TOOLS: Tuple[Tool, ...] = (
         description=(
             "One page of the run history, newest first, filtered in the database. "
             "Each row: run_id, ticker, status, error, times, capital, risk_pct, "
-            "reward_ratio, max_hold_weeks, tier, outlook (once done) and share count. "
+            "reward_ratio, max_hold_weeks, tier, outlook (once succeeded) and share count. "
             "Filters combine with AND."
         ),
         params=ListRunsParams, run=run_list_runs,
@@ -394,7 +394,7 @@ TOOLS: Tuple[Tool, ...] = (
     Tool(
         name="get_run",
         description=(
-            "One run's core facts and, once done, its report's headline: outlook, "
+            "One run's core facts and, once succeeded, its report's headline: outlook, "
             "score, confidence, levels (entry, stop loss, target), share count, summary, "
             "warnings, earnings date, per-stage LLM usage, and data_report_index — one "
             "light row per data report (name, whether it counted, its warnings). "

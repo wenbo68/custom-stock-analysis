@@ -35,7 +35,7 @@ describe('historyFilters', () => {
       {
         ...NO_FILTERS,
         tickers: ['AAPL'],
-        statuses: ['done'],
+        statuses: ['succeeded'],
         outlooks: ['none'],
         tiers: ['2'],
         maxHoldWeeks: ['1', '4'],

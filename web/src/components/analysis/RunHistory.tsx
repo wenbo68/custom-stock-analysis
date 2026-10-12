@@ -16,7 +16,7 @@ import { hasAnyFilter, isValidDay, toggled, type HistoryFilters } from './histor
 // 2026-09-17). Only a real opinion counts as an outlook: a run with none
 // (unfinished, failed, or the judge produced nothing) shows a dash —
 // and the outlook filter offers that dash too (owner request 2026-09-18).
-const FILTER_STATUSES = ['queued', 'running', 'done', 'failed'] as const;
+const FILTER_STATUSES = ['queued', 'running', 'succeeded', 'failed'] as const;
 const OUTLOOK_WORDS = ['bullish', 'neutral', 'bearish'] as const;
 // The server's name for "rows with no opinion" in the outlook filter.
 const NO_OUTLOOK = 'no_outlook';
@@ -100,7 +100,7 @@ function runOutlook(run: TieredRunSummary): string {
 
 // Whether the row has an outlook worth a word (see OUTLOOK_WORDS).
 function hasOutlook(run: TieredRunSummary): boolean {
-  return run.status === 'done' && (OUTLOOK_WORDS as readonly string[]).includes(runOutlook(run));
+  return run.status === 'succeeded' && (OUTLOOK_WORDS as readonly string[]).includes(runOutlook(run));
 }
 
 // The outlook filter's option text: the outlook word, or the dash.
@@ -112,7 +112,7 @@ function outlookOptionLabel(value: string, t: (key: UiTextKey) => string): strin
 // the finished report is good to use, amber when it is from a previous
 // trading day (clicking it says so), gray while there is no report.
 function dateTone(run: TieredRunSummary): 'fresh' | 'stale' | 'none' {
-  if (run.status !== 'done') {
+  if (run.status !== 'succeeded') {
     return 'none';
   }
   const time = runTime(run);
@@ -467,7 +467,7 @@ export const RunHistory = ({
                   ) : run.status === 'failed' ? (
                     <span className="text-xs text-negative">{t('tiered.status.failed')}</span>
                   ) : (
-                    <span className="text-xs text-positive">{t('tiered.status.done')}</span>
+                    <span className="text-xs text-positive">{t('tiered.status.succeeded')}</span>
                   )}
                   {hasOutlook(run) ? (
                     <span className={cn('text-xs', OUTLOOK_TEXT[runOutlook(run)])}>

@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from src.languages import DEFAULT_LANGUAGE, LANGUAGES, require_supported
 
-ChatRole = Literal["user", "assistant", "tool"]
+#: `stopped` is the row that ends a turn the user stopped (the page's
+#: "You stopped this reply" line); it is neither a user input nor a bot step.
+ChatRole = Literal["user", "assistant", "tool", "stopped"]
 
 
 class ConversationSummary(BaseModel):
@@ -132,3 +134,11 @@ class ConfirmRequest(BaseModel):
 
 class ConversationDeleted(BaseModel):
     id: str
+
+
+class TurnStopped(BaseModel):
+    id: str
+    stopped: bool = Field(description=(
+        "true: a turn was running and was told to stop; the turn's own request answers "
+        "shortly with the stopped conversation. false: nothing was running (the turn may just have ended)."
+    ))
