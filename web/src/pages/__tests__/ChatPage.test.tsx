@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import type { ChatConversation, ChatConversationSummary } from '../../api/chat';
+import type { ChatContextUsage, ChatConversation, ChatConversationSummary } from '../../api/chat';
 import { UiLanguageProvider } from '../../contexts/UiLanguageContext';
 
 vi.mock('../../api/chat', () => ({
@@ -14,6 +14,8 @@ vi.mock('../../api/chat', () => ({
     getTranscript: vi.fn(),
     confirm: vi.fn(),
     stopTurn: vi.fn(),
+    getContext: vi.fn(),
+    compact: vi.fn(),
   },
 }));
 
@@ -263,5 +265,74 @@ describe('ChatPage — stop', () => {
     await waitFor(() => expect(screen.getByTestId('chat-error')).toHaveTextContent(/(Could not stop|停止失败).*offline/));
     expect(screen.queryByTestId('chat-stopping')).toBeNull();
     expect(screen.getByTestId('chat-stop')).toBeEnabled();
+  });
+});
+
+describe('ChatPage slash commands', () => {
+  const USAGE: ChatContextUsage = {
+    llm: 'gemini/gemini-3.8-flash', source: 'litellm', window: 1048576, output_limit: 65536, max_tokens: 983040,
+    used_tokens: 14200, percent: 1, compact_at_tokens: 835584, compact_at_percent: 85, chars_per_token: 4.1, calibrated: true,
+    system_prompt_tokens: 2000, tools_tokens: 4000, conversation_tokens: 8200,
+  };
+  // Earlier tests' calls must not count here.
+  beforeEach(() => vi.clearAllMocks());
+  const page = () =>
+    render(
+      <MemoryRouter initialEntries={['/chat']}>
+        <UiLanguageProvider>
+          <ChatPage />
+        </UiLanguageProvider>
+      </MemoryRouter>,
+    );
+  const type = (text: string) => {
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: text } });
+    fireEvent.click(screen.getByTestId('chat-send'));
+  };
+
+  it('answers /help and /context on the page, without a conversation, and sends nothing', async () => {
+    vi.mocked(chatApi.getContext).mockResolvedValue(USAGE);
+    page();
+    type('/help');
+    expect(await screen.findByTestId('chat-note-help')).toHaveTextContent('/compact');
+    expect(screen.getByTestId('chat-empty')).toBeInTheDocument();
+    type('/context');
+    const note = await screen.findByTestId('chat-note-context');
+    expect(chatApi.getContext).toHaveBeenCalledWith(null, 'en');
+    expect(note).toHaveTextContent(/(14,200 of 983,040 tokens \(1%\)|14,200 \/ 983,040 tokens（1%）)/);
+    expect(note).toHaveTextContent(/(minus 65,536|减去为回复预留的 65,536)/);
+    expect(note).toHaveTextContent(/(measured from the last reply|按上一条回复实测)/);
+    expect(screen.queryByTestId('chat-note-help')).toBeNull();
+    expect(chatApi.sendMessage).not.toHaveBeenCalled();
+    expect(chatApi.createConversation).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unknown command and /compact with nothing to summarize', async () => {
+    page();
+    type('/model');
+    expect(await screen.findByTestId('chat-error')).toHaveTextContent(/(Unknown command \/model|未知命令 \/model)/);
+    type('/compact');
+    expect(await screen.findByTestId('chat-error')).toHaveTextContent(/(Nothing to summarize yet|还没有可总结的内容)/);
+    expect(chatApi.compact).not.toHaveBeenCalled();
+    expect(chatApi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('runs /compact as a turn and shows the summary step', async () => {
+    vi.mocked(chatApi.sendMessage).mockResolvedValue(ANSWERED);
+    const compacted: ChatConversation = {
+      ...ANSWERED,
+      messages: [
+        ...ANSWERED.messages,
+        { seq: 3, role: 'summary', created_at: null, text: 'Summary.', compacted: { trigger: 'manual', first_seq: 1, last_seq: 2, tokens_before: 738 }, usage: { input_tokens: 800, output_tokens: 20 }, llm: 'fake' },
+      ],
+    };
+    vi.mocked(chatApi.compact).mockResolvedValue(compacted);
+    page();
+    type('hi there');
+    await waitFor(() => expect(screen.getByText('hello')).toBeInTheDocument());
+    type('/compact');
+    await waitFor(() => expect(chatApi.compact).toHaveBeenCalledWith('c1', 'en'));
+    expect(await screen.findByTestId('chat-summary')).toHaveTextContent('Summary.');
+    expect(screen.getAllByTestId('chat-user')).toHaveLength(1);
+    expect(screen.getByTestId('chat-input')).toBeEnabled();
   });
 });

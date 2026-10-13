@@ -35,7 +35,12 @@ class ModelReply:
 
 
 class ModelClient(Protocol):
-    def complete(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> ModelReply: ...
+    def complete(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]],
+                 tool_choice: str = "auto") -> ModelReply:
+        """``tool_choice`` is the provider's own word: ``auto`` lets the
+        model pick a tool, ``none`` offers the menu but refuses every
+        call (the summary request, src/chat/compact.py)."""
+        ...
 
 
 class ModelCallError(RuntimeError):
@@ -61,7 +66,8 @@ class LiteLlmClient:
     """The configured model through litellm. Raises ``LlmConfigError``
     when no model is set and ``ModelCallError`` when the call fails."""
 
-    def complete(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> ModelReply:
+    def complete(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]],
+                 tool_choice: str = "auto") -> ModelReply:
         model = llm_model()
         if not model:
             raise LlmConfigError("no LLM model configured: MAIN_LLM is not set")
@@ -73,7 +79,7 @@ class LiteLlmClient:
             kwargs["api_key"] = api_key
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice
         try:
             response = litellm.completion(
                 model=model, messages=messages, temperature=CHAT_TEMPERATURE, **kwargs,

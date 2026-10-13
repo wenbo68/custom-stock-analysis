@@ -11,6 +11,11 @@ loop rests until `POST .../confirm` resolves it.
 
 The bot uses the configured model (`MAIN_LLM`, `LLM_API_KEY`), the same
 as the analysis: with no model set, sending a message is a 400.
+
+`GET /context` sizes the next request against the model's max, and
+`POST .../compact` summarizes the conversation to free up context
+(2026-10-13, src/chat/context.py and src/chat/compact.py); the loop
+does the latter by itself past 85% of the max.
 """
 from __future__ import annotations
 
@@ -18,16 +23,21 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.v1.endpoints.chat_schemas import (
+    LANGUAGE_FIELD_DESCRIPTION,
+    CompactRequest,
     ConfirmRequest,
+    ContextUsageView,
     ConversationDeleted,
     ConversationList,
     ConversationView,
     SendMessageRequest,
     TurnStopped,
+    validate_language,
 )
+from api.v1.endpoints.tiered import reject_unknown_query_params
 from api.v1.endpoints.tiered_schemas import TranscriptCall
 from src.chat import store
 from src.chat.harness import (
@@ -35,10 +45,12 @@ from src.chat.harness import (
     ConfirmationPendingError,
     ConversationBusyError,
     NothingPendingError,
+    NothingToCompactError,
     UnknownConversationError,
 )
 from src.chat.model import LiteLlmClient
 from src.chat.transcript import transcript_chars, transcript_view
+from src.languages import DEFAULT_LANGUAGE
 from src.tiered_analysis.run_context import llm_model
 
 logger = logging.getLogger(__name__)
@@ -78,6 +90,12 @@ def _message_view(message: Dict[str, Any]) -> Dict[str, Any]:
         })
         return view
     view["text"] = message.get("content")
+    if role == "summary":
+        view.update({
+            "usage": message.get("usage"), "llm": message.get("llm"), "error": message.get("error"),
+            "time_ms": message.get("time_ms"), "transcript_chars": transcript_chars(message),
+            "compacted": message.get("compacted"),
+        })
     if role == "assistant":
         view["tool_calls"] = [
             {
@@ -199,6 +217,51 @@ def confirm_action(conversation_id: str, request: ConfirmRequest) -> Dict[str, A
     except NothingPendingError:
         raise HTTPException(status_code=409, detail={"code": "nothing_pending"})
     return _conversation_view(conversation_id)
+
+
+@router.post("/conversations/{conversation_id}/compact", response_model=ConversationView)
+def compact_conversation(conversation_id: str, request: CompactRequest) -> Dict[str, Any]:
+    """Summarize the conversation now to free up context (the page's
+    `/compact`): one LLM call, stored as a `summary` row the model sees
+    in place of everything before it. Answers with the whole
+    conversation; a failed summary is a `summary` row with `error`.
+    Errors: 400 `llm_not_configured`; 404 unknown conversation; 409
+    `busy` (a turn is running), 409 `confirmation_pending` (answer the
+    held action first), 409 `nothing_to_compact` (the model sees no
+    messages yet)."""
+    _require_llm_configured()
+    try:
+        harness.compact(conversation_id, request.language)
+    except UnknownConversationError:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    except ConversationBusyError:
+        raise HTTPException(status_code=409, detail={"code": "busy"})
+    except ConfirmationPendingError:
+        raise HTTPException(status_code=409, detail={"code": "confirmation_pending"})
+    except NothingToCompactError:
+        raise HTTPException(status_code=409, detail={"code": "nothing_to_compact"})
+    return _conversation_view(conversation_id)
+
+
+@router.get("/context", response_model=ContextUsageView, dependencies=[Depends(reject_unknown_query_params)])
+def get_context(
+    conversation_id: Optional[str] = Query(default=None, description="The conversation to size; none sizes the standing instructions and tool menu alone."),
+    language: str = Query(default=DEFAULT_LANGUAGE, description=LANGUAGE_FIELD_DESCRIPTION),
+) -> Dict[str, Any]:
+    """How much of the model's context the next request would take (the
+    page's `/context`): the max, what the next request holds by part,
+    and where the bot will summarize by itself. Works without a model
+    configured (the max then comes from CHAT_CONTEXT_WINDOW). 404 for
+    an unknown conversation."""
+    try:
+        validate_language(language)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        usage = harness.context_usage(conversation_id, language)
+    except UnknownConversationError:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return usage.view()
 
 
 @router.post("/conversations/{conversation_id}/stop", response_model=TurnStopped)

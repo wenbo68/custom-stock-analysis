@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState, type CSSProperties } from 'react';
 import axios from 'axios';
 import { chatApi, type ChatConversation, type ChatConversationSummary } from '../api/chat';
+import { ChatCommandNote, type ChatNote } from '../components/chat/ChatCommandNote';
 import { ChatComposer } from '../components/chat/ChatComposer';
 import { ChatSidebar } from '../components/chat/ChatSidebar';
 import { ChatThread } from '../components/chat/ChatThread';
+import { parseInput, type ChatCommand } from '../components/chat/commands';
 import { HeaderControls } from '../components/common/HeaderControls';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import { useElementHeight } from '../hooks/useElementHeight';
@@ -41,6 +43,14 @@ import { cn } from '../utils/cn';
 // call: its buttons could not be answered until the request returns,
 // so the request's own answer brings it (a moment later) and the dots
 // stay until then. A peek that fails changes nothing.
+//
+// A line that starts with "/" is a command, not a message (owner
+// request 2026-10-13, after Claude Code's slash commands; commands.ts
+// is the table). /help and /context answer on the page, as a panel at
+// the end of the thread that the next message or command replaces;
+// /compact is a turn against the server like a message is, and its
+// answer — the conversation with its new summary step — lands the same
+// way. An unknown command is an error line, and nothing is sent.
 const TURN_POLL_MS = 800;
 
 // The text's cap: the analysis page's 1280px column less its 32px side
@@ -93,6 +103,8 @@ const ChatPage = () => {
   const [turnId, setTurnId] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A page-side command's answer, shown at the end of the thread.
+  const [note, setNote] = useState<ChatNote | null>(null);
   // The band the menus float in and the dock the message box floats
   // in; their heights are the text's top and bottom insets.
   const [band, setBand] = useState<HTMLDivElement | null>(null);
@@ -115,6 +127,7 @@ const ChatPage = () => {
   const open = useCallback(
     async (id: string) => {
       setError(null);
+      setNote(null);
       try {
         setConversation(await chatApi.getConversation(id));
       } catch (openError) {
@@ -127,6 +140,7 @@ const ChatPage = () => {
   const startNew = () => {
     setConversation(null);
     setError(null);
+    setNote(null);
   };
 
   // One turn against `target`: the server's answer replaces the shown
@@ -176,8 +190,43 @@ const ChatPage = () => {
     });
   };
 
-  const send = (text: string) =>
+  // A command typed into the box: answered on the page, or run against
+  // the server (see the notes above).
+  const runCommand = async (command: ChatCommand) => {
+    if (command.name === 'help') {
+      setNote({ kind: 'help' });
+      return;
+    }
+    if (command.name === 'context') {
+      try {
+        setNote({ kind: 'context', usage: await chatApi.getContext(conversation?.id ?? null, language) });
+      } catch (contextError) {
+        setError(describe(contextError, t));
+      }
+      return;
+    }
+    if (!conversation || conversation.messages.length === 0) {
+      setError(t('chat.error.nothingToCompact'));
+      return;
+    }
+    const target = conversation;
+    await applyTurn(target, () => chatApi.compact(target.id, language));
+  };
+
+  const send = (input: string) =>
     void (async () => {
+      setNote(null);
+      setError(null);
+      const parsed = parseInput(input);
+      if (parsed.kind === 'unknown') {
+        setError(t('chat.command.unknown', { command: parsed.name }));
+        return;
+      }
+      if (parsed.kind === 'command') {
+        await runCommand(parsed.command);
+        return;
+      }
+      const text = parsed.text;
       let target = conversation;
       if (!target) {
         setWorking(true);
@@ -222,6 +271,7 @@ const ChatPage = () => {
   };
 
   const pending = conversation?.pending?.calls[0] ?? null;
+  const trailing = note ? <ChatCommandNote note={note} /> : null;
 
   return (
     <main className="grid min-h-0 w-full flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[16rem_minmax(0,1fr)] md:grid-rows-1">
@@ -255,14 +305,17 @@ const ChatPage = () => {
             onConfirm={confirm}
             className="h-full overflow-y-auto"
             contentClassName={cn('pt-[var(--chat-band-height,4rem)] pb-[var(--chat-dock-height,8rem)]', CHAT_FRAME)}
+            trailing={trailing}
           />
         ) : (
           // What the agent is, centered in the empty thread (owner
-          // request 2026-09-26) — not a heading in the corner.
-          <div className="flex h-full items-center justify-center px-6 py-6" data-testid="chat-empty">
+          // request 2026-09-26) — not a heading in the corner; a
+          // command's answer, when there is one, under it.
+          <div className="flex h-full flex-col items-center justify-center gap-6 px-6 py-6" data-testid="chat-empty">
             <p className="max-w-prose text-center text-sm leading-relaxed text-ink-3">
               {t('chat.empty.hint')}
             </p>
+            {trailing ? <div className={cn('w-full', CHAT_MAX_WIDTH)}>{trailing}</div> : null}
           </div>
         )}
         {/* The band: the menus in the top right corner, each cluster on its own shade; only the buttons take clicks. */}
@@ -298,9 +351,16 @@ const ChatPage = () => {
 };
 
 // What went wrong, in the page's words: the server's own code when it
-// gave one (busy, no model), else the parsed message under `fallback`
-// ("Could not send" unless told otherwise).
-type ErrorKey = 'chat.error.busy' | 'chat.error.notConfigured' | 'chat.error.send' | 'chat.error.stop';
+// gave one (busy, no model, a question still waiting, nothing to
+// summarize), else the parsed message under `fallback` ("Could not
+// send" unless told otherwise).
+type ErrorKey =
+  | 'chat.error.busy'
+  | 'chat.error.notConfigured'
+  | 'chat.error.send'
+  | 'chat.error.stop'
+  | 'chat.error.nothingToCompact'
+  | 'chat.composer.waitConfirm';
 
 function describe(
   error: unknown,
@@ -317,6 +377,12 @@ function describe(
     }
     if (code === 'llm_not_configured') {
       return t('chat.error.notConfigured');
+    }
+    if (code === 'confirmation_pending') {
+      return t('chat.composer.waitConfirm');
+    }
+    if (code === 'nothing_to_compact') {
+      return t('chat.error.nothingToCompact');
     }
     const parsed = (error as { parsedError?: { message?: string } }).parsedError?.message;
     return t(fallback, { error: parsed ?? data?.message ?? error.message });

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, ChatPendingCall } from '../../../api/chat';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
@@ -452,5 +452,41 @@ describe('ChatThread — a stopped turn', () => {
       /^(You stopped the reply during step 3\. Step 3 is done\. That was the last step\.|你在第 3 步时停止了回复。第 3 步已完成。这已是最后一步。)$/,
     );
     expect(screen.getAllByTestId('chat-assistant')).toHaveLength(2);
+  });
+});
+
+describe('ChatThread summary rows', () => {
+  const user = (seq: number, text: string): ChatMessage => ({ seq, role: 'user', created_at: null, text });
+  const summary = (seq: number, overrides: Partial<ChatMessage> = {}): ChatMessage => ({
+    seq, role: 'summary', created_at: null, text: 'The user asked about **AAPL**.',
+    compacted: { trigger: 'auto', first_seq: 1, last_seq: 4, tokens_before: 12345 },
+    usage: { input_tokens: 12000, output_tokens: 300 }, llm: 'fake', time_ms: 900, transcript_chars: 50000,
+    ...overrides,
+  });
+
+  it('shows a summary as a step with its note, text and token line', async () => {
+    renderThread({
+      messages: [user(1, 'hi'), summary(2), { seq: 3, role: 'assistant', created_at: null, text: 'ok', usage: { input_tokens: 10, output_tokens: 1 } }],
+    });
+    const row = screen.getByTestId('chat-summary');
+    expect(row.firstElementChild?.textContent).toMatch(/^(Step 1: LLM summarized the conversation|第 1 步：LLM 总结了对话)$/);
+    expect(screen.getByTestId('chat-summary-note')).toHaveTextContent(/(messages 1–4 were summarized \(12,345 tokens before\)|第 1–4 条消息已被总结（总结前 12,345 tokens）)/);
+    // The markdown renderer loads on demand.
+    await waitFor(() => expect(row).toHaveTextContent('AAPL'));
+    expect(within(row).getByTestId('chat-usage')).toHaveTextContent(/12300/);
+    // The reply after it counts on from the summary's step.
+    expect(screen.getByTestId('chat-assistant').firstElementChild?.textContent).toMatch(/^(Step 2|第 2 步)/);
+  });
+
+  it('says a manual summary was asked for, and a failed one left the model seeing everything', () => {
+    renderThread({ messages: [user(1, 'hi'), summary(2, { compacted: { trigger: 'manual', first_seq: 1, last_seq: 1, tokens_before: 500 } })] });
+    expect(screen.getByTestId('chat-summary-note')).toHaveTextContent(/^(On your request|应你的要求)/);
+    cleanup();
+    renderThread({ messages: [user(1, 'hi'), summary(2, { text: null, error: 'quota', usage: null, transcript_chars: 40 })] });
+    const row = screen.getByTestId('chat-summary');
+    expect(row.firstElementChild?.textContent).toMatch(/^(Step 1: summary failed|第 1 步：总结失败)$/);
+    expect(row).toHaveTextContent('quota');
+    expect(row).toHaveTextContent(/(still sees every message|仍然看到全部消息)/);
+    expect(screen.queryByTestId('chat-summary-note')).toBeNull();
   });
 });

@@ -111,3 +111,36 @@ describe('ChatComposer', () => {
     expect(screen.getByTestId('chat-stop')).toBeDisabled();
   });
 });
+
+describe('ChatComposer slash commands', () => {
+  it('lists the commands the typed word could become, fills one in on a click or Tab, and sends the line as typed', () => {
+    const onSend = renderComposer();
+    const box = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+    expect(screen.queryByTestId('chat-command-menu')).toBeNull();
+    fireEvent.change(box, { target: { value: '/co' } });
+    const menu = screen.getByTestId('chat-command-menu');
+    expect(menu).toHaveTextContent('/context');
+    expect(menu).toHaveTextContent('/compact');
+    expect(menu).not.toHaveTextContent('/help');
+    // Tab fills in the first; the menu closes once the word is whole.
+    fireEvent.keyDown(box, { key: 'Tab' });
+    expect(box.value).toBe('/context');
+    expect(screen.getByTestId('chat-command-menu')).toHaveTextContent('/context');
+    fireEvent.change(box, { target: { value: '/' } });
+    fireEvent.click(screen.getByTestId('chat-command-compact'));
+    expect(box.value).toBe('/compact');
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(onSend).toHaveBeenCalledWith('/compact');
+    expect(screen.queryByTestId('chat-command-menu')).toBeNull();
+  });
+
+  it('offers no menu for a message or while disabled', () => {
+    renderComposer();
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'tell me /co' } });
+    expect(screen.queryByTestId('chat-command-menu')).toBeNull();
+    cleanup();
+    renderComposer(true, 'wait');
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: '/co' } });
+    expect(screen.queryByTestId('chat-command-menu')).toBeNull();
+  });
+});

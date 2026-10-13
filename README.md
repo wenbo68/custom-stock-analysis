@@ -78,6 +78,7 @@ Everything is read from `.env` (or real environment variables). Only the first t
 | `FINNHUB_API_KEY` | no | [Finnhub](https://finnhub.io/) key for the company news report, which gives a real date range per ticker. Without it, company news comes from Yahoo Finance instead. |
 | `ALPHAVANTAGE_API_KEY` | no | [Alpha Vantage](https://www.alphavantage.co/support/#api-key) key for the world news report, and to top up the newest US price bars. Without it, world news is blank. |
 | `MAX_CONCURRENT_RUNS` | no | How many analyses run at once (default 4). The rest queue and start by themselves. |
+| `CHAT_CONTEXT_WINDOW` | no | The context window, in tokens, of a chat model litellm's table does not know (default 128000); the chat then fills at most half of it. Ignored for a model the table knows. |
 | `DATABASE_URL` | no | A Postgres address. Blank uses a sqlite file at `./data/stock_analysis.db` (`DATABASE_PATH` to move it). |
 | `SERVER_HOST`, `SERVER_PORT` | no | Where to listen. Default `127.0.0.1:8000` from source, `0.0.0.0:8000` inside Docker. |
 
@@ -104,6 +105,8 @@ Every model reply that must be JSON is asked for in a schema-enforced mode and t
 - **You confirm every action and every large read.** Starting or deleting a run, and reading a full data report or a model call's text into the context, pause the bot and ask you first, showing the exact inputs or the size and a rough token count.
 - **Everything is on the record.** Each tool call and its result is a line in the conversation you can open. Every reply ends with its token line; click it to see the exact prompt and raw reply. Conversations are stored in the database and survive a restart.
 - **Guardrails.** At most 8 tool-calling steps per message, refusals come back to the model as readable results, oversized results are cut before the model sees them, and only the last 40 messages are sent each turn.
+- **A context limit, and a summary when it nears.** Every model call resends the whole conversation, and a model reads only so much per call: its *context window*, in tokens. The chat knows each model's window and output limit from [litellm's model table](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json), and lets a request fill the window minus the output limit. Past 85% of that, the bot first has the model summarize the conversation and stores the summary as a step of its own; from then on the model sees the summary in place of the messages before it. Nothing is deleted: the page still shows every message, the summary, and the token line of the call that wrote it. For a model litellm does not know, set `CHAT_CONTEXT_WINDOW`.
+- **Slash commands.** A line that starts with `/` is a command, not a message. `/help` lists them, `/context` shows how much of the model's context the next request would take and where the summary kicks in, and `/compact` writes the summary now.
 
 ## Languages
 
@@ -134,7 +137,7 @@ The web app talks to a JSON API under `/api/v1/tiered` and `/api/v1/chat`. The s
 | `GET /runs/{run_id}/transcript` | The run's model calls without their text (stage, model, time, tokens, sizes). |
 | `GET /runs/{run_id}/transcript/{call_number}` | One model call with its full prompt and raw reply. |
 
-The chat routes (conversations, messages, confirm, and one message's model-call transcript) are documented at `/docs` beside these.
+The chat routes (conversations, messages, confirm, stop, compact, one message's model-call transcript, and `GET /chat/context` for the context usage) are documented at `/docs` beside these.
 
 ## Development
 

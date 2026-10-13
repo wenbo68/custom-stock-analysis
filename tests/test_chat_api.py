@@ -39,6 +39,16 @@ def isolated_db(tmp_path):
             os.environ["DATABASE_PATH"] = old_database_path
 
 
+@pytest.fixture(autouse=True)
+def fallback_window(monkeypatch):
+    """Size requests against the fallback window: the model-table lookup
+    imports litellm, which takes seconds on a cold process."""
+    from src.chat import context
+
+    context.litellm_limits.cache_clear()
+    monkeypatch.setattr(context, "litellm_limits", lambda llm: None)
+
+
 class ScriptedModel:
     def __init__(self, replies: List[ModelReply]) -> None:
         self.replies = list(replies)
@@ -47,7 +57,7 @@ class ScriptedModel:
         self.release.set()
         self.asked = threading.Event()
 
-    def complete(self, messages, tools):
+    def complete(self, messages, tools, tool_choice="auto"):
         self.asked.set()
         self.release.wait(timeout=5)
         return self.replies.pop(0)
@@ -292,3 +302,55 @@ class TestStop:
         conversation_id = client.post("/chat/conversations").json()["id"]
         assert client.post(f"/chat/conversations/{conversation_id}/stop").json() == {"id": conversation_id, "stopped": False}
         assert client.post("/chat/conversations/nope/stop").status_code == 404
+
+
+class TestContextAndCompact:
+    def test_context_with_and_without_a_conversation(self, client, scripted, monkeypatch):
+        from src.chat import context
+
+        monkeypatch.setenv(context.CONTEXT_WINDOW_ENV, "50000")
+        scripted([ModelReply(content="answer", input_tokens=3000, output_tokens=4, llm="fake")])
+        empty = client.get("/chat/context")
+        assert empty.status_code == 200
+        body = empty.json()
+        assert (body["llm"], body["source"], body["window"], body["max_tokens"]) == ("gemini/test-model", "env", 50_000, 25_000)
+        assert body["conversation_tokens"] == 0 and body["used_tokens"] > 0
+        assert body["compact_at_tokens"] == 25_000 * 85 // 100
+
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "hi"})
+        sized = client.get("/chat/context", params={"conversation_id": conversation_id, "language": "ko"}).json()
+        assert sized["conversation_tokens"] > 0 and sized["calibrated"] is True
+        assert client.get("/chat/context", params={"conversation_id": "nope"}).status_code == 404
+        assert client.get("/chat/context", params={"language": "xx"}).status_code == 422
+        assert client.get("/chat/context", params={"page": 2}).status_code == 422
+
+    def test_compact_stores_a_summary_step_the_page_can_show(self, client, scripted):
+        scripted([text("answer"), text("the summary")])
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        refused = client.post(f"/chat/conversations/{conversation_id}/compact", json={})
+        assert refused.status_code == 409 and refused.json()["detail"]["code"] == "nothing_to_compact"
+
+        client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "hi"})
+        compacted = client.post(f"/chat/conversations/{conversation_id}/compact", json={"language": "en"})
+        assert compacted.status_code == 200
+        rows = compacted.json()["messages"]
+        assert [m["role"] for m in rows] == ["user", "assistant", "summary"]
+        summary = rows[2]
+        assert summary["text"] == "the summary"
+        assert summary["compacted"] == {"trigger": "manual", "first_seq": 1, "last_seq": 2, "tokens_before": summary["compacted"]["tokens_before"]}
+        assert summary["usage"] == {"input_tokens": 20, "output_tokens": 4}
+        assert summary["llm"] == "fake" and summary["error"] is None and summary["transcript_chars"] > 0
+        transcript = client.get(f"/chat/conversations/{conversation_id}/messages/3/transcript").json()
+        assert transcript["stage"] == "summary" and transcript["output"] == "the summary"
+        assert compacted.json()["total_tokens"] == 48
+        assert client.post("/chat/conversations/nope/compact", json={}).status_code == 404
+        assert client.post(f"/chat/conversations/{conversation_id}/compact", json={"language": "xx"}).status_code == 422
+
+    def test_compact_while_a_call_waits_is_refused(self, client, scripted):
+        scripted([call("delete_run", {"run_id": "q1"})])
+        history.create_run("q1", "AAPL", inputs={"tier": 1}, status="queued")
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        assert client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "cancel q1"}).json()["pending"]
+        refused = client.post(f"/chat/conversations/{conversation_id}/compact", json={})
+        assert refused.status_code == 409 and refused.json()["detail"]["code"] == "confirmation_pending"

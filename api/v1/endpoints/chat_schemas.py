@@ -14,7 +14,10 @@ from src.languages import DEFAULT_LANGUAGE, LANGUAGES, require_supported
 
 #: `stopped` is the row that ends a turn the user stopped (the page's
 #: "You stopped this reply" line); it is neither a user input nor a bot step.
-ChatRole = Literal["user", "assistant", "tool", "stopped"]
+#: `summary` is a bot step that summarized the conversation to free up
+#: context (2026-10-13): from it on, the model sees the summary in place
+#: of the rows before it.
+ChatRole = Literal["user", "assistant", "tool", "stopped", "summary"]
 
 
 class ConversationSummary(BaseModel):
@@ -43,10 +46,22 @@ class TokenUsage(BaseModel):
     output_tokens: Optional[int] = None
 
 
+class CompactedFacts(BaseModel):
+    """What a summary row stands for (2026-10-13)."""
+
+    trigger: Literal["auto", "manual"] = Field(description="`auto`: the bot crossed the context line by itself; `manual`: the user typed /compact.")
+    first_seq: Optional[int] = Field(default=None, description="The first message the summary stands for.")
+    last_seq: Optional[int] = Field(default=None, description="The last message the summary stands for.")
+    tokens_before: Optional[int] = Field(default=None, description="The estimated tokens the request held before the summary.")
+
+
 class ChatMessage(BaseModel):
     """One message as the page shows it. A user message has `text`. An
     assistant message (one LLM call) has `text` and/or `tool_calls`. A
-    tool message answers one call (`tool_call_id`) with `output`."""
+    tool message answers one call (`tool_call_id`) with `output`. A
+    summary message (one LLM call too) has `text` — the summary — and
+    `compacted`; with `error` set, the summary failed and the model
+    still sees the full history."""
 
     seq: int
     role: ChatRole
@@ -65,6 +80,7 @@ class ChatMessage(BaseModel):
         "`GET /conversations/{id}/messages/{seq}/transcript`. Null when there is none."
     ))
     notice: Optional[str] = Field(default=None, description="Assistant rows only: `tool_call_limit` when the turn hit the tool-call limit.")
+    compacted: Optional[CompactedFacts] = Field(default=None, description="Summary rows only: what the summary stands for.")
     tool_call_id: Optional[str] = None
     name: Optional[str] = Field(default=None, description="Tool rows: the tool's name.")
     output: Optional[Any] = Field(default=None, description="Tool rows: what the tool answered (an `error` key on a refusal or miss).")
@@ -130,6 +146,36 @@ class ConfirmRequest(BaseModel):
     language: str = Field(default=DEFAULT_LANGUAGE, description=LANGUAGE_FIELD_DESCRIPTION)
 
     _language = field_validator("language")(validate_language)
+
+
+class CompactRequest(BaseModel):
+    language: str = Field(default=DEFAULT_LANGUAGE, description=LANGUAGE_FIELD_DESCRIPTION + " The summary is written in it.")
+
+    _language = field_validator("language")(validate_language)
+
+
+class ContextUsageView(BaseModel):
+    """How much of the model's context the next request would take
+    (the page's /context, 2026-10-13). Every count is in tokens."""
+
+    llm: Optional[str] = Field(default=None, description="The configured model; null when none is set.")
+    source: Literal["litellm", "env"] = Field(description=(
+        "`litellm`: the window and output limit come from litellm's model table, and the max is "
+        "their difference. `env`: litellm does not know the model; the window is CHAT_CONTEXT_WINDOW "
+        "and the max is half of it."
+    ))
+    window: int = Field(description="The model's context window.")
+    output_limit: Optional[int] = Field(default=None, description="The model's output limit, when the table gives one.")
+    max_tokens: int = Field(description="How much a request may hold.")
+    used_tokens: int = Field(description="The estimated size of the next request.")
+    percent: int = Field(description="used_tokens as a share of max_tokens, rounded.")
+    compact_at_tokens: int = Field(description="Past this the bot summarizes the conversation by itself.")
+    compact_at_percent: int
+    chars_per_token: float = Field(description="The ratio the estimate used.")
+    calibrated: bool = Field(description="The ratio was measured from the newest stored reply (false: assumed).")
+    system_prompt_tokens: int = Field(description="The standing instructions' share.")
+    tools_tokens: int = Field(description="The tool menu's share.")
+    conversation_tokens: int = Field(description="The messages' share.")
 
 
 class ConversationDeleted(BaseModel):

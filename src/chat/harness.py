@@ -31,6 +31,15 @@ Guardrails (owner discussion 2026-09-19):
   older turns, whole, while the total stays within
   ``HISTORY_MESSAGE_LIMIT`` messages. Cutting only at a user-message
   boundary means a tool result never arrives without its call.
+- **Context limit and compaction** (owner request 2026-10-13, after
+  Claude Code's ``/context`` and autocompact). Before every model
+  call the request is sized against the model's max
+  (src/chat/context.py). Past ``COMPACT_AT_PERCENT`` of it, the loop
+  first has the model summarize the conversation (src/chat/compact.py)
+  and stores the summary as a ``summary`` row; from then on the model's
+  view starts at that row. Once per turn at most, never while a held
+  call waits. ``compact`` does the same on request (the page's
+  ``/compact``); ``context_usage`` is the page's ``/context``.
 - **The chosen language.** Each turn carries the language the user chose
   for the app; the prompt names it, and a final reply written in another
   script is stored with the notice ``wrong_language`` and sent back with
@@ -71,12 +80,18 @@ import json
 import logging
 import time
 import threading
-from dataclasses import dataclass
-from typing import Tuple, Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Callable, Tuple, Any, Dict, List, Optional
 
+from src.tiered_analysis.run_context import llm_model
 from src.tiered_analysis.server_status import server_status
 
 from . import store
+from .compact import (
+    SUMMARY_ROLE, TRIGGER_AUTO, TRIGGER_MANUAL, after_last_summary, is_boundary, summary_for_model,
+    summary_instruction,
+)
+from .context import ContextLimit, ContextUsage, chars_per_token, context_limit, measure
 from .language import (
     DEFAULT_LANGUAGE, LANGUAGE_RETRY_LIMIT, correction_message, matches_language, using_turn_language,
 )
@@ -130,6 +145,18 @@ class NothingPendingError(RuntimeError):
     """``confirm`` was called with no action held."""
 
 
+class NothingToCompactError(RuntimeError):
+    """``compact`` was called on a conversation the model sees nothing of."""
+
+
+def starts_turn(message: Dict[str, Any]) -> bool:
+    """A row a turn starts at, for ``trim_history``: the user's line,
+    or a summary row that stood and stands in for everything before
+    it. A failed summary row is nothing to the model, so it starts no
+    turn — else the window could open on it and hold no user line."""
+    return message.get("role") == "user" or is_boundary(message)
+
+
 @dataclass(frozen=True)
 class PendingCall:
     call_id: str
@@ -150,12 +177,19 @@ class PendingCall:
         )
 
 
-def model_view(message: Dict[str, Any]) -> Dict[str, Any]:
+def model_view(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """A stored message cut down to what the provider may see. The
-    ``stopped`` row goes as a user line."""
+    ``stopped`` row goes as a user line; so does a summary row, with
+    its preface. A summary row that failed is nothing to the model
+    (None)."""
     view = {key: message[key] for key in MODEL_KEYS if message.get(key) is not None}
     if view.get("role") == STOPPED_ROLE:
         view["role"] = "user"
+    elif view.get("role") == SUMMARY_ROLE:
+        if message.get("error") or not view.get("content"):
+            return None
+        view["role"] = "user"
+        view["content"] = summary_for_model(str(view["content"]))
     return view
 
 
@@ -163,14 +197,15 @@ def trim_history(messages: List[Dict[str, Any]], limit: int = HISTORY_MESSAGE_LI
     """The most recent turn whole — from the last user message to the
     end, even when the turn alone runs past ``limit`` — then older
     turns, whole, newest first, while the total fits in ``limit``. A
-    turn starts at its user message, so no tool result arrives without
+    turn starts at its user message (or at a summary row, which stands
+    for all the turns before it), so no tool result arrives without
     its call. Nothing when there is no user message at all.
 
     Why not simply the last ``limit`` rows advanced to a user row: one
     turn of eight tool-calling replies with several calls each is more
     than 40 rows, and that window then held no user row — the model got
     the system prompt and nothing else (2026-10-10)."""
-    turn_starts = [index for index, message in enumerate(messages) if message.get("role") == "user"]
+    turn_starts = [index for index, message in enumerate(messages) if starts_turn(message)]
     if not turn_starts:
         return []
     start = turn_starts[-1]
@@ -192,10 +227,32 @@ def cap_result(result: Dict[str, Any], cap: int = RESULT_CHAR_CAP) -> Dict[str, 
     return {"content": text[:cap] + note, "output_chars": chars, "truncated": True}
 
 
+@dataclass(frozen=True)
+class Request:
+    """One model call's input: the system prompt first, then the
+    stored rows the model may see (``history``, after the newest
+    summary and within ``HISTORY_MESSAGE_LIMIT``) as the provider sees
+    them, then the correction line when there is one. ``base`` is the
+    same without the correction — what a summary request builds on."""
+
+    messages: List[Dict[str, Any]]
+    base: List[Dict[str, Any]]
+    tools: List[Dict[str, Any]]
+    history: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def current_limit() -> ContextLimit:
+    """The configured model's limit (src/chat/context.py)."""
+    return context_limit(llm_model())
+
+
 class ChatHarness:
-    def __init__(self, model: ModelClient, catalog: Optional[ToolCatalog] = None) -> None:
+    def __init__(self, model: ModelClient, catalog: Optional[ToolCatalog] = None,
+                 limit: Callable[[], ContextLimit] = current_limit) -> None:
         self._model = model
         self._catalog = catalog or ToolCatalog()
+        #: How much a request may hold; tests hand in a fixed one.
+        self._limit = limit
         self._locks: Dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         #: The stop flag of each turn in flight, by conversation; a turn
@@ -284,6 +341,36 @@ class ChatHarness:
             self._loop(conversation_id, tool_calls=int(pending.get("tool_calls", 0)),
                        language=language, stop=turn.stop)
 
+    def compact(self, conversation_id: str, language: str = DEFAULT_LANGUAGE) -> bool:
+        """Summarize the conversation now (the page's ``/compact``): one
+        model call, stored as a summary row (src/chat/compact.py). True
+        when the summary stands, False when the call failed and the
+        row says so. Refused while a held call waits
+        (``ConfirmationPendingError``) and when the model sees nothing
+        to summarize (``NothingToCompactError``)."""
+        with self._turn(conversation_id) as turn, using_turn_language(language):
+            if store.get_pending(conversation_id):
+                raise ConfirmationPendingError(conversation_id)
+            request = self._request(conversation_id, language)
+            if not request.history:
+                raise NothingToCompactError(conversation_id)
+            stood = self._compact(conversation_id, language, TRIGGER_MANUAL, request)
+            if turn.stop.is_set():
+                # The summary call was the whole turn and ran to its
+                # end: nothing was cut short, and the row says so.
+                self._store_stopped(conversation_id, late=True)
+            return stood
+
+    def context_usage(self, conversation_id: Optional[str], language: str = DEFAULT_LANGUAGE) -> ContextUsage:
+        """How much of the model's context the next request would take
+        (the page's ``/context``): the conversation's, or with None
+        the standing instructions and tool menu alone. Read without
+        the turn lock — a turn in flight only makes it a moment stale.
+        ``UnknownConversationError`` for an id that does not exist."""
+        if conversation_id is not None and not store.conversation_exists(conversation_id):
+            raise UnknownConversationError(conversation_id)
+        return self._measure(self._request(conversation_id, language))
+
     # -- the loop -------------------------------------------------------
 
     def _loop(self, conversation_id: str, tool_calls: int, language: str,
@@ -297,9 +384,24 @@ class ChatHarness:
         call — the step in flight finishes and is stored."""
         language_retries = 0
         correction: Optional[str] = None
+        #: One summary per turn at most, whether it stood or failed.
+        compacted = False
         while True:
-            reply = self._ask_model(conversation_id, language, correction)
+            request = self._request(conversation_id, language, correction)
+            if not compacted and self._measure(request).needs_compaction:
+                compacted = True
+                stood = self._compact(conversation_id, language, TRIGGER_AUTO, request)
+                if stop.is_set():
+                    # The summary was the step the stop landed on.
+                    self._store_stopped(conversation_id)
+                    return
+                if stood:
+                    # The summary stands for the reply a correction was
+                    # about, so the correction goes with it; a failed
+                    # summary changes nothing and the request stands.
+                    request = self._request(conversation_id, language)
             correction = None
+            reply = self._ask_model(conversation_id, language, request)
             if reply is None:
                 return
             if not reply.tool_calls:
@@ -398,24 +500,79 @@ class ChatHarness:
             "role": STOPPED_ROLE, "content": STOPPED_LATE_MESSAGE if late else STOPPED_MESSAGE,
         })
 
-    def _ask_model(self, conversation_id: str, language: str,
-                   correction: Optional[str] = None) -> Optional[ModelReply]:
+    def _request(self, conversation_id: Optional[str], language: str,
+                 correction: Optional[str] = None) -> Request:
+        """What the next model call would be sent (see ``Request``).
+        ``correction`` is the retry's line after a wrong-language reply,
+        sent as the last user message and kept only in the transcript.
+        With no conversation, the system prompt and tool menu alone."""
+        stored = store.messages(conversation_id) if conversation_id is not None else []
+        history = trim_history(after_last_summary(stored))
+        base = [{"role": "system", "content": system_prompt(server_status(), language)}]
+        base.extend(view for view in (model_view(m) for m in history) if view is not None)
+        messages = base + ([{"role": "user", "content": correction}] if correction else [])
+        return Request(messages=messages, base=base, tools=self._catalog.specs(), history=history)
+
+    def _measure(self, request: Request) -> ContextUsage:
+        """The request against the model's limit, at the ratio the
+        newest stored reply measured (src/chat/context.py)."""
+        ratio, calibrated = chars_per_token(request.history)
+        return measure(self._limit(), request.messages, request.tools, ratio, calibrated)
+
+    def _compact(self, conversation_id: str, language: str, trigger: str, request: Request) -> bool:
+        """The summary call (src/chat/compact.py): the request's rows
+        plus the summary instruction, tools offered but refused. Stored
+        as a summary row either way — with the text, or with the error
+        when the call failed or wrote nothing — carrying what it stands
+        for under ``compacted``. True when the summary stands. Nothing
+        happens, and False, when the model sees no rows at all."""
+        if not request.history:
+            return False
+        messages = request.base + [{"role": "user", "content": summary_instruction(language)}]
+        usage = self._measure(request)
+        compacted = {
+            "trigger": trigger,
+            "first_seq": request.history[0].get("seq"),
+            "last_seq": request.history[-1].get("seq"),
+            "tokens_before": usage.used_tokens,
+        }
+        transcript: Dict[str, Any] = {
+            "input": render_prompt(messages, request.tools), "output": None, "temperature": CHAT_TEMPERATURE,
+        }
+        started = time.monotonic()
+        try:
+            reply = self._model.complete(messages, request.tools, tool_choice="none")
+        except Exception as exc:
+            logger.warning("chat summary call failed for %s: %s", conversation_id, exc)
+            store.append_message(conversation_id, {
+                "role": SUMMARY_ROLE, "content": None, "error": str(exc), "compacted": compacted,
+                "time_ms": int((time.monotonic() - started) * 1000), "transcript": transcript,
+            })
+            return False
+        summary = (reply.content or "").strip()
+        message: Dict[str, Any] = {
+            "role": SUMMARY_ROLE, "content": summary or None, "compacted": compacted,
+            "time_ms": int((time.monotonic() - started) * 1000),
+            "transcript": {**transcript, "output": render_reply(reply.content, reply.tool_calls)},
+        }
+        if not summary:
+            message["error"] = "the model wrote no summary"
+        if reply.input_tokens is not None or reply.output_tokens is not None:
+            message["usage"] = {"input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens}
+        if reply.llm:
+            message["llm"] = reply.llm
+        store.append_message(conversation_id, message)
+        return bool(summary)
+
+    def _ask_model(self, conversation_id: str, language: str, request: Request) -> Optional[ModelReply]:
         """One model call, stored as an assistant message. A failed call
         is stored as an assistant message carrying the error, and None
         is returned so the loop rests; the user can simply write again.
         Either way the message keeps the call's transcript (the exact
-        input, the raw output, the time it took) for the page.
-
-        ``correction`` is the retry's line after a wrong-language reply:
-        sent as the last user message, kept only in the transcript. A
-        final reply that is again in the wrong language is stored with
-        the notice ``wrong_language``."""
-        history = trim_history(store.messages(conversation_id))
-        messages = [{"role": "system", "content": system_prompt(server_status(), language)}]
-        messages.extend(model_view(m) for m in history)
-        if correction:
-            messages.append({"role": "user", "content": correction})
-        tools = self._catalog.specs()
+        input, the raw output, the time it took) for the page. A final
+        reply in the wrong language is stored with the notice
+        ``wrong_language``."""
+        messages, tools = request.messages, request.tools
         transcript: Dict[str, Any] = {
             "input": render_prompt(messages, tools), "output": None, "temperature": CHAT_TEMPERATURE,
         }

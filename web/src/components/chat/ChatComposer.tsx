@@ -4,6 +4,7 @@ import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { cn } from '../../utils/cn';
 import { ALT_COLOR } from '../analysis/styles';
 import { CHAT_SURFACE_1 } from './chatSurfaces';
+import { matchingCommands } from './commands';
 
 export interface ChatComposerProps {
   /** Nothing can be sent right now: a turn is running or a question waits. */
@@ -83,12 +84,23 @@ const measureDraft = (box: HTMLTextAreaElement, draft: string): Measured => {
 // request 2026-10-12, after Claude Code's Esc): one click asks the
 // server to stop, and the button stays, disabled, until the turn comes
 // back stopped.
+//
+// A draft that starts with "/" is a command (commands.ts, 2026-10-13):
+// while the word is being typed a menu over the box lists the commands
+// it could be, one line each; a click fills the word in and Tab fills
+// in the first. Enter sends the line as typed, and the page runs it.
 export const ChatComposer = ({ disabled, disabledHint, working = false, stopping = false, onSend, onStop }: ChatComposerProps) => {
   const { t } = useUiLanguage();
   const [draft, setDraft] = useState('');
   const [isMultiline, setMultiline] = useState(false);
   const boxRef = useRef<HTMLTextAreaElement>(null);
   const canSend = !disabled && draft.trim().length > 0;
+  const commands = disabled ? [] : matchingCommands(draft);
+
+  const pick = (name: string) => {
+    setDraft(`/${name}`);
+    boxRef.current?.focus();
+  };
 
   useLayoutEffect(() => {
     if (boxRef.current) {
@@ -105,6 +117,11 @@ export const ChatComposer = ({ disabled, disabledHint, working = false, stopping
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Tab' && commands.length > 0 && !event.shiftKey) {
+      event.preventDefault();
+      pick(commands[0].name);
+      return;
+    }
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       send();
@@ -115,6 +132,28 @@ export const ChatComposer = ({ disabled, disabledHint, working = false, stopping
 
   return (
     <div className="flex flex-col gap-2">
+      {commands.length > 0 ? (
+        <ul
+          data-testid="chat-command-menu"
+          aria-label={t('chat.command.menu')}
+          className={cn('flex flex-col rounded px-2 py-1 text-xs', CHAT_SURFACE_1)}
+        >
+          {commands.map((command) => (
+            <li key={command.name}>
+              <button
+                type="button"
+                data-testid={`chat-command-${command.name}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => pick(command.name)}
+                className="flex w-full cursor-pointer gap-3 rounded px-2 py-1 text-left hover:bg-surface-2"
+              >
+                <span className="font-mono font-semibold text-ink-1">/{command.name}</span>
+                <span className="text-ink-4">{t(command.descriptionKey)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div
         data-testid="chat-composer"
         data-multiline={isMultiline ? 'true' : 'false'}

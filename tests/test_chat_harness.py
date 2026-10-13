@@ -24,6 +24,7 @@ from src.chat.harness import (
     ConfirmationPendingError,
     ConversationBusyError,
     NothingPendingError,
+    NothingToCompactError,
     UnknownConversationError,
     cap_result,
     model_view,
@@ -55,6 +56,16 @@ def isolated_db(tmp_path):
             os.environ["DATABASE_PATH"] = old_database_path
 
 
+@pytest.fixture(autouse=True)
+def fallback_window(monkeypatch):
+    """Size requests against the fallback window: the model-table lookup
+    imports litellm, which takes seconds on a cold process."""
+    from src.chat import context
+
+    context.litellm_limits.cache_clear()
+    monkeypatch.setattr(context, "litellm_limits", lambda llm: None)
+
+
 class ScriptedModel:
     """Answers with the queued replies in order and records every
     request, so a test can inspect what the model was shown."""
@@ -67,7 +78,7 @@ class ScriptedModel:
         #: Set the moment the model is asked, before it waits on `release`.
         self.asked = threading.Event()
 
-    def complete(self, messages, tools):
+    def complete(self, messages, tools, tool_choice="auto"):
         self.asked.set()
         self.release.wait(timeout=5)
         self.requests.append({"messages": messages, "tools": tools})
@@ -713,3 +724,262 @@ class TestStop:
         # turn would open on it, orphaning its own question.
         assert trim_history(messages, limit=3) == messages[3:]
         assert trim_history(messages, limit=5) == messages
+
+
+class TestCompaction:
+    """The context limit and the summary (src/chat/context.py,
+    src/chat/compact.py): the loop summarizes by itself past the line,
+    the user can ask for it, and the model's view starts at the summary."""
+
+    @staticmethod
+    def limit(max_tokens):
+        from src.chat.context import ContextLimit
+
+        return lambda: ContextLimit(llm="fake", window=max_tokens * 2, output_limit=max_tokens,
+                                    max_tokens=max_tokens, source="litellm")
+
+    def test_past_the_line_the_loop_summarizes_first_and_the_model_sees_the_summary(self, isolated_db):
+        from src.chat.compact import SUMMARY_PREFACE, SUMMARY_ROLE, TRIGGER_AUTO
+
+        model = ScriptedModel([text("first answer", prompt=100, completion=5)])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "hello")
+        assert roles(conversation_id) == ["user", "assistant"]
+
+        # A max the standing instructions alone pass: the next turn
+        # summarizes before it answers.
+        bot = ChatHarness(ScriptedModel([
+            text("SUMMARY: the user said hello and was answered.", prompt=120, completion=10),
+            text("second answer", prompt=50, completion=5),
+        ]), limit=self.limit(100))
+        bot.send(conversation_id, "and now?")
+
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", "user", SUMMARY_ROLE, "assistant"]
+        summary = rows[3]
+        assert summary["content"].startswith("SUMMARY:")
+        assert summary["compacted"] == {"trigger": TRIGGER_AUTO, "first_seq": 1, "last_seq": 3,
+                                        "tokens_before": summary["compacted"]["tokens_before"]}
+        assert summary["compacted"]["tokens_before"] >= 85
+        assert summary["usage"] == {"input_tokens": 120, "output_tokens": 10}
+        assert summary["transcript"]["output"].startswith("SUMMARY:")
+        # The summary request: the conversation, the instruction last, tools refused.
+        summary_request = bot._model.requests[0]
+        assert summary_request["messages"][-1]["role"] == "user"
+        assert "summarized to free up context" in summary_request["messages"][-1]["content"]
+        assert [m["content"] for m in summary_request["messages"][1:-1]] == ["hello", "first answer", "and now?"]
+        assert summary_request["tools"]
+        # The answer's request: the summary as a user line, nothing before it.
+        answer_request = bot._model.requests[1]
+        assert [m["role"] for m in answer_request["messages"]] == ["system", "user"]
+        assert answer_request["messages"][1]["content"] == f"{SUMMARY_PREFACE}\n\nSUMMARY: the user said hello and was answered."
+        assert rows[4]["content"] == "second answer"
+
+    def test_one_summary_per_turn_and_the_next_message_starts_after_it(self, isolated_db):
+        from src.chat.compact import SUMMARY_ROLE
+
+        model = ScriptedModel([
+            text("S1", prompt=1, completion=1),
+            call("list_tickers", {}),
+            text("done", prompt=1, completion=1),
+            text("S2", prompt=1, completion=1),
+            text("again", prompt=1, completion=1),
+        ])
+        bot = ChatHarness(model, limit=self.limit(100))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "list")
+        # Still past the line after the tool ran: no second summary this turn.
+        assert roles(conversation_id) == ["user", SUMMARY_ROLE, "assistant", "tool", "assistant"]
+
+        bot.send(conversation_id, "more")
+        assert roles(conversation_id) == ["user", SUMMARY_ROLE, "assistant", "tool", "assistant", "user", SUMMARY_ROLE, "assistant"]
+        rows = store.messages(conversation_id)
+        # The second summary stands for everything from the first one on.
+        assert (rows[6]["compacted"]["first_seq"], rows[6]["compacted"]["last_seq"]) == (2, 6)
+        assert model.requests[3]["messages"][1]["content"].endswith("S1")
+
+    def test_a_failed_summary_is_stored_with_its_error_and_is_no_boundary(self, isolated_db):
+        from src.chat.compact import SUMMARY_ROLE
+        from src.chat.model import ModelCallError
+
+        model = ScriptedModel([ModelCallError("quota"), text("still answered", prompt=1, completion=1)])
+        bot = ChatHarness(model, limit=self.limit(100))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "hi")
+
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", SUMMARY_ROLE, "assistant"]
+        assert rows[1]["error"] == "quota" and rows[1]["content"] is None
+        assert rows[1]["compacted"]["trigger"] == "auto"
+        assert "time_ms" in rows[1] and rows[1]["transcript"]["output"] is None
+        # The model still saw the whole history, and the failed row not at all.
+        assert [m["content"] for m in model.requests[1]["messages"][1:]] == ["hi"]
+        assert model_view(rows[1]) is None
+
+        # A reply with no text is a failure too.
+        model = ScriptedModel([text(None, prompt=1, completion=1), text("ok", prompt=1, completion=1)])
+        bot = ChatHarness(model, limit=self.limit(100))
+        bot.send(conversation_id, "again")
+        failed = store.messages(conversation_id)[4]
+        assert failed["role"] == SUMMARY_ROLE and failed["error"] == "the model wrote no summary"
+
+    def test_compact_on_request_and_its_refusals(self, isolated_db):
+        from src.chat.compact import SUMMARY_ROLE, TRIGGER_MANUAL
+
+        model = ScriptedModel([text("answer", prompt=1, completion=1), text("S", prompt=1, completion=1)])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        with pytest.raises(NothingToCompactError):
+            bot.compact(conversation_id)
+        with pytest.raises(UnknownConversationError):
+            bot.compact("nope")
+
+        bot.send(conversation_id, "hi")
+        assert bot.compact(conversation_id, language="zh") is True
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", SUMMARY_ROLE]
+        assert rows[2]["compacted"] == {"trigger": TRIGGER_MANUAL, "first_seq": 1, "last_seq": 2,
+                                        "tokens_before": rows[2]["compacted"]["tokens_before"]}
+        # The instruction names the chosen language.
+        assert "Simplified Chinese" in model.requests[1]["messages"][-1]["content"]
+        assert store.get_conversation(conversation_id)["total_tokens"] == 4
+
+        # Nothing new since the summary: the model sees the summary row only, which is something.
+        bot = ChatHarness(ScriptedModel([text("S2", prompt=1, completion=1)]), limit=self.limit(10_000_000))
+        assert bot.compact(conversation_id) is True
+
+    def test_compact_is_refused_while_a_call_waits(self, isolated_db):
+        model = ScriptedModel([call("delete_run", {"run_id": "q1"})])
+        history.create_run("q1", "AAPL", inputs={"tier": 1}, status="queued")
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "cancel q1")
+        assert store.get_pending(conversation_id)
+        with pytest.raises(ConfirmationPendingError):
+            bot.compact(conversation_id)
+
+    def test_context_usage_sizes_the_next_request(self, isolated_db):
+        # A receipt in a real tokenizer's range: the prompt is some
+        # 12,000 characters of instructions and tool menu.
+        model = ScriptedModel([text("answer", prompt=3000, completion=5)])
+        bot = ChatHarness(model, limit=self.limit(10_000))
+        empty = bot.context_usage(None)
+        assert empty.conversation_tokens == 0 and empty.system_prompt_tokens > 0 and empty.tools_tokens > 0
+        assert empty.calibrated is False
+
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "hi")
+        usage = bot.context_usage(conversation_id)
+        # Measured: the stored reply's prompt text over its 400 input tokens.
+        sent = store.messages(conversation_id)[1]["transcript"]["input"]
+        assert usage.calibrated is True
+        assert usage.chars_per_token == pytest.approx(len(sent) / 3000)
+        assert usage.conversation_tokens > 0
+        assert usage.view()["max_tokens"] == 10_000
+        with pytest.raises(UnknownConversationError):
+            bot.context_usage("nope")
+
+    def test_a_stop_during_the_summary_ends_the_turn_after_it(self, isolated_db):
+        from src.chat.compact import SUMMARY_ROLE
+
+        holder: Dict[str, Any] = {}
+
+        class StopDuringSummary(ScriptedModel):
+            def complete(self, messages, tools, tool_choice="auto"):
+                reply = super().complete(messages, tools, tool_choice)
+                holder["bot"].stop(holder["id"])
+                return reply
+
+        model = StopDuringSummary([text("S", prompt=1, completion=1)])
+        bot = ChatHarness(model, limit=self.limit(100))
+        conversation_id = store.create_conversation()["id"]
+        holder.update(bot=bot, id=conversation_id)
+        bot.send(conversation_id, "hi")
+        assert roles(conversation_id) == ["user", SUMMARY_ROLE, STOPPED_ROLE]
+        assert store.messages(conversation_id)[2]["content"] == STOPPED_MESSAGE
+        assert len(model.requests) == 1
+
+    def test_a_failed_summary_mid_turn_leaves_the_turn_whole(self, isolated_db):
+        """Regression (review 2026-10-13): a failed summary row started a
+        turn for the window, so a long turn's next request could open
+        on it — and the model, which sees no failed row, got the system
+        prompt alone."""
+        from src.chat.compact import SUMMARY_ROLE
+        from src.chat.model import ModelCallError
+
+        model = ScriptedModel([
+            calls(*[(f"c{i}", "list_tickers", {}) for i in range(3)]),
+            ModelCallError("quota"),
+            text("done", prompt=1, completion=1),
+        ])
+        bot = ChatHarness(model, limit=self.limit(100))
+        # Past the line only once the tool results are in.
+        limits = iter([self.limit(10_000_000)(), self.limit(100)(), self.limit(100)(), self.limit(100)()])
+        bot._limit = lambda: next(limits)
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "list three times")
+        assert roles(conversation_id) == ["user", "assistant", "tool", "tool", "tool", SUMMARY_ROLE, "assistant"]
+        # With a window of three rows the failed row must not open it.
+        window = trim_history(store.messages(conversation_id)[:6], limit=3)
+        assert [m["role"] for m in window][0] == "user"
+        # And the loop's own request after the failure held the whole turn.
+        sent = model.requests[2]["messages"]
+        assert [m["role"] for m in sent] == ["system", "user", "assistant", "tool", "tool", "tool"]
+
+    def test_a_failed_summary_keeps_the_language_correction(self, isolated_db):
+        """Regression (review 2026-10-13): the retry after a wrong-language
+        reply dropped its correction line when the summary before it failed."""
+        from src.chat.model import ModelCallError
+
+        model = ScriptedModel([
+            text(TestReplyLanguage.ENGLISH, prompt=1, completion=1),
+            ModelCallError("quota"),
+            text(TestReplyLanguage.CHINESE, prompt=1, completion=1),
+        ])
+        bot = ChatHarness(model, limit=self.limit(100))
+        conversation_id = store.create_conversation()["id"]
+        # Past the line only from the second call on: the first measure
+        # sees a max of 10M, the retry's a max of 100.
+        limits = iter([self.limit(10_000_000)(), self.limit(100)(), self.limit(100)(), self.limit(100)()])
+        bot._limit = lambda: next(limits)
+        bot.send(conversation_id, "how is AAPL?", language="zh")
+        retry = model.requests[2]["messages"]
+        assert retry[-1]["role"] == "user" and "Simplified Chinese" in retry[-1]["content"]
+        assert store.messages(conversation_id)[-1]["content"] == TestReplyLanguage.CHINESE
+
+    def test_a_stop_during_a_requested_summary_is_recorded_as_late(self, isolated_db):
+        from src.chat.compact import SUMMARY_ROLE
+
+        holder: Dict[str, Any] = {}
+
+        class StopDuringSummary(ScriptedModel):
+            def complete(self, messages, tools, tool_choice="auto"):
+                reply = super().complete(messages, tools, tool_choice)
+                holder["bot"].stop(holder["id"])
+                return reply
+
+        model = StopDuringSummary([text("answer", prompt=1, completion=1), text("S", prompt=1, completion=1)])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "hi")
+        holder.update(bot=bot, id=conversation_id)
+        assert bot.compact(conversation_id) is True
+        assert roles(conversation_id)[-2:] == [SUMMARY_ROLE, STOPPED_ROLE]
+        assert store.messages(conversation_id)[-1]["content"] == STOPPED_LATE_MESSAGE
+
+    def test_a_summary_row_is_a_turn_start_and_a_user_line_to_the_model(self):
+        from src.chat.compact import SUMMARY_PREFACE, SUMMARY_ROLE, after_last_summary
+
+        messages = [
+            {"role": "user", "content": "one", "seq": 1}, {"role": "assistant", "content": "a", "seq": 2},
+            {"role": SUMMARY_ROLE, "content": "S", "seq": 3},
+            {"role": "user", "content": "two", "seq": 4}, {"role": "assistant", "content": "b", "seq": 5},
+        ]
+        assert after_last_summary(messages) == messages[2:]
+        assert trim_history(messages[2:], limit=2) == messages[3:]
+        assert trim_history(messages[2:], limit=3) == messages[2:]
+        assert model_view(messages[2]) == {"role": "user", "content": f"{SUMMARY_PREFACE}\n\nS"}
+        failed = {"role": SUMMARY_ROLE, "content": None, "error": "x", "seq": 6}
+        assert after_last_summary(messages + [failed]) == messages[2:] + [failed]
+        assert model_view(failed) is None

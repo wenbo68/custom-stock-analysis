@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { chatApi, type ChatMessage, type ChatPendingCall } from '../../api/chat';
 import type { TieredTranscriptCall } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
@@ -25,6 +25,8 @@ export interface ChatThreadProps {
   className?: string;
   /** Classes on the content inside the scroll box: its cap, centering and insets. */
   contentClassName?: string;
+  /** Shown after the last step: a page-side command's answer (ChatCommandNote). */
+  trailing?: ReactNode;
 }
 
 // The conversation, oldest first: the user's lines as quiet right-hand
@@ -57,6 +59,11 @@ export interface ChatThreadProps {
 // breaks inside itself anywhere on the thread rather than widening it
 // (owner bug report 2026-09-23).
 //
+// A summary row (2026-10-13) is a bot step too — "LLM summarized the
+// conversation" — with the summary as its text, a note on which
+// messages it stands for, and its token line; a failed one says so in
+// red and leaves the model seeing everything.
+//
 // The root is the scroll box (the page bounds its height): whenever
 // the conversation changes or grows, it scrolls to its own bottom, so
 // nothing else on the page moves.
@@ -69,6 +76,7 @@ export const ChatThread = ({
   transcriptLoader = chatApi.getTranscript,
   className,
   contentClassName,
+  trailing,
 }: ChatThreadProps) => {
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -122,7 +130,7 @@ export const ChatThread = ({
     if (root) {
       root.scrollTop = root.scrollHeight;
     }
-  }, [conversationId, messages.length, pending, working]);
+  }, [conversationId, messages.length, pending, working, trailing]);
 
   return (
     <div
@@ -156,6 +164,7 @@ export const ChatThread = ({
           />
         ) : null}
         {working && !pending ? <TypingDots /> : null}
+        {trailing}
       </div>
     </div>
   );
@@ -226,6 +235,9 @@ const MessageRow = ({
   }
   if (message.role === 'stopped') {
     return <StoppedLine step={step} facts={stopped ?? { skipped: [], last: false }} />;
+  }
+  if (message.role === 'summary') {
+    return <SummaryRow message={message} step={step} loadTranscript={loadTranscript} />;
   }
   if (message.role === 'tool') {
     return (
@@ -391,6 +403,90 @@ const ReplyRow = ({
                   }}
                   load={loadTranscript}
                   missing={hasTranscript ? undefined : t('chat.transcript.missing')}
+                  foldSurface={FOLD_CONTENT}
+                />
+              </div>
+            ) : null}
+          </UsageLine>
+        ) : null}
+      </div>
+    </section>
+  );
+};
+
+// One summary call (2026-10-13): the step line says the LLM summarized
+// the conversation (or that the summary failed), a caution line names
+// the messages the summary stands for and that the model now sees it
+// in their place, then the summary itself and its token line opening
+// the call's transcript. A failed summary shows its error in red and
+// says the model still sees every message.
+const SummaryRow = ({
+  message,
+  step,
+  loadTranscript,
+}: {
+  message: ChatMessage;
+  step: number;
+  loadTranscript: () => Promise<TieredTranscriptCall>;
+}) => {
+  const { t } = useUiLanguage();
+  const [open, setOpen] = useState(false);
+  const usage = message.usage;
+  const hasUsage = usage != null && (usage.input_tokens != null || usage.output_tokens != null);
+  const canOpen = hasUsage || message.transcript_chars != null;
+  const facts = message.compacted;
+  const noteParams = {
+    first: facts?.first_seq ?? '?',
+    last: facts?.last_seq ?? '?',
+    tokens: (facts?.tokens_before ?? 0).toLocaleString('en-US'),
+  };
+  return (
+    <section data-testid="chat-summary" className="flex min-w-0 flex-col gap-2">
+      <StepLine text={message.error ? t('chat.step.summaryFailed', { n: step }) : t('chat.step.summary', { n: step })} />
+      <div className={STEP_BODY}>
+        {message.error ? (
+          <>
+            <p className="text-sm text-negative">{message.error}</p>
+            <p className="text-xs text-caution">{t('chat.summary.failed')}</p>
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-caution" data-testid="chat-summary-note">
+              {t(facts?.trigger === 'manual' ? 'chat.summary.manual' : 'chat.summary.auto', noteParams)}
+            </p>
+            {message.text ? (
+              <div className="text-sm leading-relaxed text-ink-2">
+                <ChatMarkdown text={message.text} />
+              </div>
+            ) : null}
+          </>
+        )}
+        {canOpen ? (
+          <UsageLine
+            label={hasUsage ? t('chat.usage', { tokens: (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) }) : t('chat.step.noUsage')}
+            help={t('chat.help.usage')}
+            open={open}
+            onToggle={() => setOpen((was) => !was)}
+            testId="chat-usage"
+          >
+            {open ? (
+              <div data-testid="chat-transcript" className={cn('mt-3 flex min-w-0 flex-col text-xs', FOLD_INDENT)}>
+                <TranscriptCall
+                  showTitle={false}
+                  showStage={false}
+                  item={{
+                    call_number: message.seq,
+                    created_at: message.created_at,
+                    stage: 'summary',
+                    llm: message.llm ?? null,
+                    temperature: null,
+                    time_ms: message.time_ms ?? null,
+                    input_tokens: usage?.input_tokens ?? null,
+                    output_tokens: usage?.output_tokens ?? null,
+                    structured: null,
+                    error: message.error ?? null,
+                  }}
+                  load={loadTranscript}
                   foldSurface={FOLD_CONTENT}
                 />
               </div>
