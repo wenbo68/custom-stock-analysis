@@ -5,11 +5,11 @@ import { ChatComposer, MAX_ROWS } from '../ChatComposer';
 
 afterEach(cleanup);
 
-const renderComposer = (disabled = false, hint: string | null = null) => {
-  const onSend = vi.fn();
+const renderComposer = (blocked = false, hint: string | null = null) => {
+  const onSend = vi.fn(() => true);
   render(
     <UiLanguageProvider>
-      <ChatComposer disabled={disabled} disabledHint={hint} onSend={onSend} />
+      <ChatComposer blocked={blocked} blockedHint={hint} onSend={onSend} />
     </UiLanguageProvider>,
   );
   return onSend;
@@ -29,6 +29,16 @@ describe('ChatComposer', () => {
     expect(box.value).toBe('');
   });
 
+  it('keeps the draft when the page refuses the line', () => {
+    const onSend = renderComposer();
+    vi.mocked(onSend).mockReturnValueOnce(false);
+    const box = screen.getByTestId('chat-input');
+    fireEvent.change(box, { target: { value: '/context' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(onSend).toHaveBeenCalledWith('/context');
+    expect(box).toHaveValue('/context');
+  });
+
   it('sends with the button', () => {
     const onSend = renderComposer();
     fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'go' } });
@@ -36,13 +46,25 @@ describe('ChatComposer', () => {
     expect(onSend).toHaveBeenCalledWith('go');
   });
 
-  it('is inert with its hint while disabled', () => {
+  it('while blocked still takes typing and sends a command line, but never a message', () => {
     const onSend = renderComposer(true, 'wait');
     const box = screen.getByTestId('chat-input');
-    expect(box).toBeDisabled();
-    expect(screen.getByText('wait')).toBeInTheDocument();
+    // The hint stands in the empty box in place of the key hint, not under it.
+    expect(box).toBeEnabled();
+    expect(box).toHaveAttribute('placeholder', 'wait');
+    expect(screen.queryByText('wait')).toBeNull();
+    // A message can be drafted meanwhile, and stays, but does not go.
+    fireEvent.change(box, { target: { value: 'next question' } });
+    expect(screen.getByTestId('chat-send')).toBeDisabled();
     fireEvent.keyDown(box, { key: 'Enter' });
     expect(onSend).not.toHaveBeenCalled();
+    expect(box).toHaveValue('next question');
+    // A command line goes as ever; the page decides when it runs.
+    fireEvent.change(box, { target: { value: '/help' } });
+    expect(screen.getByTestId('chat-send')).toBeEnabled();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(onSend).toHaveBeenCalledWith('/help');
+    expect(box).toHaveValue('');
   });
 
   it('grows with the lines typed, up to a cap', () => {
@@ -80,7 +102,7 @@ describe('ChatComposer', () => {
     const onStop = vi.fn();
     const composer = (stopping: boolean) => (
       <UiLanguageProvider>
-        <ChatComposer disabled working stopping={stopping} onSend={vi.fn()} onStop={onStop} />
+        <ChatComposer blocked working stopping={stopping} onSend={vi.fn()} onStop={onStop} />
       </UiLanguageProvider>
     );
     const { rerender } = render(composer(false));
@@ -105,7 +127,7 @@ describe('ChatComposer', () => {
   it('shows the stop button disabled when there is nothing to stop yet', () => {
     render(
       <UiLanguageProvider>
-        <ChatComposer disabled working onSend={vi.fn()} />
+        <ChatComposer blocked working onSend={vi.fn()} />
       </UiLanguageProvider>,
     );
     expect(screen.getByTestId('chat-stop')).toBeDisabled();
@@ -134,13 +156,21 @@ describe('ChatComposer slash commands', () => {
     expect(screen.queryByTestId('chat-command-menu')).toBeNull();
   });
 
-  it('offers no menu for a message or while disabled', () => {
+  it('names what /btw takes in the menu', () => {
+    renderComposer();
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: '/b' } });
+    const menu = screen.getByTestId('chat-command-menu');
+    expect(menu).toHaveTextContent(/\/btw <(question|问题|질문)>/);
+    expect(menu).not.toHaveTextContent('/help');
+  });
+
+  it('offers no menu for a message, but still one while blocked (a command may run then)', () => {
     renderComposer();
     fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'tell me /co' } });
     expect(screen.queryByTestId('chat-command-menu')).toBeNull();
     cleanup();
     renderComposer(true, 'wait');
     fireEvent.change(screen.getByTestId('chat-input'), { target: { value: '/co' } });
-    expect(screen.queryByTestId('chat-command-menu')).toBeNull();
+    expect(screen.getByTestId('chat-command-menu')).toBeInTheDocument();
   });
 });

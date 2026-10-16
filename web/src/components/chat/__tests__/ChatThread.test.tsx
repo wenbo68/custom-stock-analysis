@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, ChatPendingCall } from '../../../api/chat';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
@@ -326,6 +326,21 @@ describe('ChatThread', () => {
     expect(scrolledTo).toBe(500);
   });
 
+  it('hands its scroll box to onScrollBox when it mounts and null when it goes', () => {
+    const onScrollBox = vi.fn();
+    const { unmount } = render(
+      <UiLanguageProvider>
+        <ChatThread
+          conversationId="conv1" messages={MESSAGES.slice(0, 1)} pending={null} working={false}
+          onConfirm={vi.fn()} transcriptLoader={vi.fn()} onScrollBox={onScrollBox}
+        />
+      </UiLanguageProvider>,
+    );
+    expect(onScrollBox).toHaveBeenLastCalledWith(screen.getByTestId('chat-thread'));
+    unmount();
+    expect(onScrollBox).toHaveBeenLastCalledWith(null);
+  });
+
   it('shows the answer as approved and the status as processing while the server works, then falls back if it failed', () => {
     const pending: ChatPendingCall = { call_id: 'c1', name: 'list_tickers', input: {}, facts: {} };
     const props: ChatThreadProps = {
@@ -441,17 +456,73 @@ describe('ChatThread — a stopped turn', () => {
     );
   });
 
-  it('says that was the last step when the stop landed on the final reply', () => {
+  it('says that was the last step when the server marks the stop late, whatever the row before', () => {
+    const late = (seq: number): ChatMessage => ({
+      ...stopped(seq), text: '[The user asked to stop this reply, but it had already finished.]', late: true,
+    });
     renderThread({
-      messages: [
-        user(1, 'go'), reply(2, null, ['list_runs']), ran(3, 'list_runs'), reply(4, 'You have one run.'),
-        { ...stopped(5), text: '[The user asked to stop this reply, but it had already finished.]' },
-      ],
+      messages: [user(1, 'go'), reply(2, null, ['list_runs']), ran(3, 'list_runs'), reply(4, 'You have one run.'), late(5)],
     });
     expect(screen.getByTestId('chat-stopped')).toHaveTextContent(
       /^(You stopped the reply during step 3\. Step 3 is done\. That was the last step\.|你在第 3 步时停止了回复。第 3 步已完成。这已是最后一步。)$/,
     );
     expect(screen.getAllByTestId('chat-assistant')).toHaveLength(2);
+    cleanup();
+    // A /compact the user stopped: the summary was the whole turn (owner bug report 2026-10-14).
+    const summary: ChatMessage = {
+      seq: 3, role: 'summary', created_at: null, text: 'S', compacted: { trigger: 'manual', first_seq: 1, last_seq: 1, tokens_before: 9 },
+      usage: { input_tokens: 5, output_tokens: 1 }, llm: 'fake', time_ms: 1, transcript_chars: 9,
+    };
+    renderThread({ messages: [user(1, 'hi'), user(2, '/compact'), summary, late(4)] });
+    expect(screen.getByTestId('chat-stopped')).toHaveTextContent(
+      /^(You stopped the reply during step 1\. Step 1 is done\. That was the last step\.|你在第 1 步时停止了回复。第 1 步已完成。这已是最后一步。)$/,
+    );
+  });
+
+  it('takes only the server’s word for the last step, never the shape of the row before', () => {
+    // An automatic summary mid-turn, stopped: the server says nothing
+    // was late, and the LLM call that would have followed is named.
+    const summary: ChatMessage = {
+      seq: 2, role: 'summary', created_at: null, text: 'S', compacted: { trigger: 'auto', first_seq: 1, last_seq: 1, tokens_before: 9 },
+      usage: { input_tokens: 5, output_tokens: 1 }, llm: 'fake', time_ms: 1, transcript_chars: 9,
+    };
+    renderThread({ messages: [user(1, 'go'), summary, { ...stopped(3), late: false }] });
+    expect(screen.getByTestId('chat-stopped')).toHaveTextContent(
+      /^(You stopped the reply during step 1\. Step 1 is done\. Step 2 was about to let the LLM decide what to do next\.|你在第 1 步时停止了回复。第 1 步已完成。第 2 步原本要让 LLM 决定下一步做什么。)$/,
+    );
+    cleanup();
+    // A final-looking reply with the flag off is not called the last step either.
+    renderThread({ messages: [user(1, 'go'), reply(2, 'done'), { ...stopped(3), late: false }] });
+    expect(screen.getByTestId('chat-stopped')).toHaveTextContent(/(Step 2 was about to let the LLM decide|第 2 步原本要让 LLM 决定)/);
+  });
+});
+
+describe('ChatThread side questions', () => {
+  it('marks the question with /btw, names the step, and says the LLM will not remember it', () => {
+    renderThread({
+      messages: [
+        { seq: 1, role: 'user', created_at: null, text: 'hi' },
+        { seq: 2, role: 'assistant', created_at: null, text: 'hello', usage: { input_tokens: 10, output_tokens: 1 } },
+        { seq: 3, role: 'user', created_at: null, text: 'what is tier 2?', side_question: true },
+        {
+          seq: 4, role: 'assistant', created_at: null, text: 'The deep analysis.', side_question: true,
+          usage: { input_tokens: 20, output_tokens: 3 }, llm: 'fake', time_ms: 5, transcript_chars: 50,
+        },
+      ],
+    });
+    const lines = screen.getAllByTestId('chat-user');
+    expect(lines[0]).not.toHaveTextContent('/btw');
+    expect(lines[1]).toHaveTextContent('/btw what is tier 2?');
+    expect(within(lines[1]).getByTestId('chat-side-question-mark')).toHaveTextContent('/btw');
+    const replies = screen.getAllByTestId('chat-assistant');
+    // The answer counts as step 1 after the question, like any reply.
+    expect(replies[1].firstElementChild?.textContent).toMatch(/^(Step 1: LLM answered the side question|第 1 步：LLM 回答了题外问题)$/);
+    expect(replies[1]).toHaveTextContent('The deep analysis.');
+    expect(within(replies[1]).getByTestId('chat-side-question-note')).toHaveTextContent(/(will not see|不会看到)/);
+    expect(within(replies[1]).getByTestId('chat-usage')).toHaveTextContent(/23/);
+    // An ordinary reply carries no such note.
+    expect(within(replies[0]).queryByTestId('chat-side-question-note')).toBeNull();
+    expect(replies[0].firstElementChild?.textContent).toMatch(/^(Step 1: LLM decided to say something|第 1 步：LLM 决定作答)$/);
   });
 });
 
@@ -464,29 +535,26 @@ describe('ChatThread summary rows', () => {
     ...overrides,
   });
 
-  it('shows a summary as a step with its note, text and token line', async () => {
+  it('shows a summary as a step line and a token line, nothing else', () => {
     renderThread({
       messages: [user(1, 'hi'), summary(2), { seq: 3, role: 'assistant', created_at: null, text: 'ok', usage: { input_tokens: 10, output_tokens: 1 } }],
     });
     const row = screen.getByTestId('chat-summary');
     expect(row.firstElementChild?.textContent).toMatch(/^(Step 1: LLM summarized the conversation|第 1 步：LLM 总结了对话)$/);
-    expect(screen.getByTestId('chat-summary-note')).toHaveTextContent(/(messages 1–4 were summarized \(12,345 tokens before\)|第 1–4 条消息已被总结（总结前 12,345 tokens）)/);
-    // The markdown renderer loads on demand.
-    await waitFor(() => expect(row).toHaveTextContent('AAPL'));
+    // The summary text and what it stands for stay in the transcript the token line opens.
+    expect(row).not.toHaveTextContent('AAPL');
+    expect(row).not.toHaveTextContent('12,345');
     expect(within(row).getByTestId('chat-usage')).toHaveTextContent(/12300/);
+    expect(row.children).toHaveLength(2);
     // The reply after it counts on from the summary's step.
     expect(screen.getByTestId('chat-assistant').firstElementChild?.textContent).toMatch(/^(Step 2|第 2 步)/);
   });
 
-  it('says a manual summary was asked for, and a failed one left the model seeing everything', () => {
-    renderThread({ messages: [user(1, 'hi'), summary(2, { compacted: { trigger: 'manual', first_seq: 1, last_seq: 1, tokens_before: 500 } })] });
-    expect(screen.getByTestId('chat-summary-note')).toHaveTextContent(/^(On your request|应你的要求)/);
-    cleanup();
+  it('says a failed summary left the model seeing everything', () => {
     renderThread({ messages: [user(1, 'hi'), summary(2, { text: null, error: 'quota', usage: null, transcript_chars: 40 })] });
     const row = screen.getByTestId('chat-summary');
     expect(row.firstElementChild?.textContent).toMatch(/^(Step 1: summary failed|第 1 步：总结失败)$/);
     expect(row).toHaveTextContent('quota');
     expect(row).toHaveTextContent(/(still sees every message|仍然看到全部消息)/);
-    expect(screen.queryByTestId('chat-summary-note')).toBeNull();
   });
 });

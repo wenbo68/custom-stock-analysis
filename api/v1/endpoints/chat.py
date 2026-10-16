@@ -15,7 +15,11 @@ as the analysis: with no model set, sending a message is a 400.
 `GET /context` sizes the next request against the model's max, and
 `POST .../compact` summarizes the conversation to free up context
 (2026-10-13, src/chat/context.py and src/chat/compact.py); the loop
-does the latter by itself past 85% of the max.
+does the latter by itself past 85% of the max. `POST .../side_question`
+answers a question from the conversation without adding to it (the
+page's `/btw`, 2026-10-16, src/chat/side_question.py): both rows are
+stored and shown, flagged `side_question`, and no later model call
+carries them.
 """
 from __future__ import annotations
 
@@ -41,6 +45,7 @@ from api.v1.endpoints.tiered import reject_unknown_query_params
 from api.v1.endpoints.tiered_schemas import TranscriptCall
 from src.chat import store
 from src.chat.harness import (
+    STOPPED_LATE_MESSAGE,
     ChatHarness,
     ConfirmationPendingError,
     ConversationBusyError,
@@ -90,6 +95,14 @@ def _message_view(message: Dict[str, Any]) -> Dict[str, Any]:
         })
         return view
     view["text"] = message.get("content")
+    if message.get("side_question"):
+        # A /btw row (2026-10-16): shown where it happened, never sent
+        # to the model again.
+        view["side_question"] = True
+    if role == "stopped":
+        # The server's own word on what the stop cut (2026-10-14): the
+        # page reads this, never the shape of the row before.
+        view["late"] = message.get("content") == STOPPED_LATE_MESSAGE
     if role == "summary":
         view.update({
             "usage": message.get("usage"), "llm": message.get("llm"), "error": message.get("error"),
@@ -222,8 +235,9 @@ def confirm_action(conversation_id: str, request: ConfirmRequest) -> Dict[str, A
 @router.post("/conversations/{conversation_id}/compact", response_model=ConversationView)
 def compact_conversation(conversation_id: str, request: CompactRequest) -> Dict[str, Any]:
     """Summarize the conversation now to free up context (the page's
-    `/compact`): one LLM call, stored as a `summary` row the model sees
-    in place of everything before it. Answers with the whole
+    `/compact`): the command stored as the user's own line, then one
+    LLM call, stored as a `summary` row the model sees in place of
+    everything before the command. Answers with the whole
     conversation; a failed summary is a `summary` row with `error`.
     Errors: 400 `llm_not_configured`; 404 unknown conversation; 409
     `busy` (a turn is running), 409 `confirmation_pending` (answer the
@@ -240,6 +254,29 @@ def compact_conversation(conversation_id: str, request: CompactRequest) -> Dict[
         raise HTTPException(status_code=409, detail={"code": "confirmation_pending"})
     except NothingToCompactError:
         raise HTTPException(status_code=409, detail={"code": "nothing_to_compact"})
+    return _conversation_view(conversation_id)
+
+
+@router.post("/conversations/{conversation_id}/side_question", response_model=ConversationView)
+def ask_side_question(conversation_id: str, request: SendMessageRequest) -> Dict[str, Any]:
+    """Ask a side question (the page's `/btw <question>`): the question
+    stored as the user's line and one LLM call, with no tools, stored
+    as its reply, both flagged `side_question` — the page shows them,
+    and no later LLM call sees them (not the next reply, not `/context`,
+    not a summary). The bot answers in `language`. Answers with the
+    whole conversation; a failed call is an assistant row with `error`.
+    Errors: 400 `llm_not_configured`; 404 unknown conversation; 409
+    `busy` (a turn is running), 409 `confirmation_pending` (answer the
+    held action first)."""
+    _require_llm_configured()
+    try:
+        harness.side_question(conversation_id, request.text, request.language)
+    except UnknownConversationError:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    except ConversationBusyError:
+        raise HTTPException(status_code=409, detail={"code": "busy"})
+    except ConfirmationPendingError:
+        raise HTTPException(status_code=409, detail={"code": "confirmation_pending"})
     return _conversation_view(conversation_id)
 
 
@@ -261,6 +298,9 @@ def get_context(
         usage = harness.context_usage(conversation_id, language)
     except UnknownConversationError:
         raise HTTPException(status_code=404, detail="conversation not found")
+    # What the conversation has cost so far is a different count (every
+    # call sends the whole context again) and is the history panel's,
+    # not this one's (owner request 2026-10-15: dropped from /context).
     return usage.view()
 
 

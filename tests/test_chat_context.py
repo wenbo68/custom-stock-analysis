@@ -108,12 +108,14 @@ class TestMeasure:
         assert usage.tools_tokens > 0
         assert usage.conversation_tokens > 100
         assert usage.chars_per_token == 2.0 and usage.calibrated is True
-        assert usage.percent == round(usage.used_tokens * 100 / 800)
+        assert usage.percent == round(usage.used_tokens * 100 / 800, 1)
 
     def test_needs_compaction_past_the_line(self):
         small = ContextLimit(llm="fake", window=200, output_limit=100, max_tokens=100, source="litellm")
         light = measure(small, [{"role": "system", "content": "s" * 40}], [], ratio=4.0)
         assert light.needs_compaction is False
+        # One decimal, so a nearly empty conversation is not a flat "0%".
+        assert 0 < light.percent < 100 and light.percent == round(light.percent, 1)
         heavy = measure(small, [{"role": "system", "content": "s" * 400}], [], ratio=4.0)
         assert heavy.needs_compaction is True
         assert heavy.view()["compact_at_tokens"] == 85

@@ -40,6 +40,25 @@ Guardrails (owner discussion 2026-09-19):
   view starts at that row. Once per turn at most, never while a held
   call waits. ``compact`` does the same on request (the page's
   ``/compact``); ``context_usage`` is the page's ``/context``.
+- **A command's own model call** (owner request 2026-10-14). The
+  standing instructions (src/chat/prompt.py) are for answering the
+  user; a call made for a command — the summary call today — carries
+  its own short system prompt instead, over the same conversation rows
+  (``Request.conversation``), and no tool menu when the command never
+  calls a tool: the rows' tool calls are then written out as text
+  (``compact.as_text_only``), since a provider may refuse tool calls
+  in a history with no tools defined. A future command with a call of
+  its own takes the same shape: its prompt in its own module, the rows
+  from ``_request``.
+- **Side questions** (owner request 2026-10-16, after Claude Code's
+  ``/btw``; src/chat/side_question.py). ``side_question`` stores the
+  question as the user's line and makes one model call — the standing
+  instructions, the conversation rows as text only with no tool menu,
+  the question last under its instruction — stored as a bot reply. Both
+  rows carry the ``side_question`` flag, and so does a ``stopped`` row
+  that ends the turn: ``_request`` leaves flagged rows out, so no later
+  call, no measure and no summary ever carries them. The page shows
+  them where they happened.
 - **The chosen language.** Each turn carries the language the user chose
   for the app; the prompt names it, and a final reply written in another
   script is stored with the notice ``wrong_language`` and sent back with
@@ -88,14 +107,15 @@ from src.tiered_analysis.server_status import server_status
 
 from . import store
 from .compact import (
-    SUMMARY_ROLE, TRIGGER_AUTO, TRIGGER_MANUAL, after_last_summary, is_boundary, summary_for_model,
-    summary_instruction,
+    COMPACT_COMMAND, SUMMARY_ROLE, TRIGGER_AUTO, TRIGGER_MANUAL, after_last_summary, as_text_only, is_boundary,
+    summary_for_model, summary_instruction, summary_system_prompt,
 )
 from .context import ContextLimit, ContextUsage, chars_per_token, context_limit, measure
 from .language import (
     DEFAULT_LANGUAGE, LANGUAGE_RETRY_LIMIT, correction_message, matches_language, using_turn_language,
 )
 from .model import CHAT_TEMPERATURE, ModelClient, ModelReply
+from .side_question import SIDE_QUESTION_KEY, side_question_line, without_side_questions
 from .transcript import render_prompt, render_reply
 from .prompt import system_prompt
 from .tools import ToolCatalog
@@ -232,13 +252,16 @@ class Request:
     """One model call's input: the system prompt first, then the
     stored rows the model may see (``history``, after the newest
     summary and within ``HISTORY_MESSAGE_LIMIT``) as the provider sees
-    them, then the correction line when there is one. ``base`` is the
-    same without the correction — what a summary request builds on."""
+    them (``conversation``), then the correction line when there is
+    one. ``base`` is the same without the correction. A command's own
+    call (the summary) puts its own system prompt before
+    ``conversation`` instead."""
 
     messages: List[Dict[str, Any]]
     base: List[Dict[str, Any]]
     tools: List[Dict[str, Any]]
     history: List[Dict[str, Any]] = field(default_factory=list)
+    conversation: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def current_limit() -> ContextLimit:
@@ -342,24 +365,54 @@ class ChatHarness:
                        language=language, stop=turn.stop)
 
     def compact(self, conversation_id: str, language: str = DEFAULT_LANGUAGE) -> bool:
-        """Summarize the conversation now (the page's ``/compact``): one
-        model call, stored as a summary row (src/chat/compact.py). True
-        when the summary stands, False when the call failed and the
-        row says so. Refused while a held call waits
+        """Summarize the conversation now (the page's ``/compact``): the
+        command stored as the user's own line, then one model call,
+        stored as a summary row (src/chat/compact.py). The summary
+        stands for the rows before the command — the request is built
+        before the line is stored — so the command line is never shown
+        to the model. True when the summary stands, False when the call
+        failed and the row says so. Refused while a held call waits
         (``ConfirmationPendingError``) and when the model sees nothing
-        to summarize (``NothingToCompactError``)."""
+        to summarize (``NothingToCompactError``); nothing is stored then."""
         with self._turn(conversation_id) as turn, using_turn_language(language):
             if store.get_pending(conversation_id):
                 raise ConfirmationPendingError(conversation_id)
             request = self._request(conversation_id, language)
             if not request.history:
                 raise NothingToCompactError(conversation_id)
+            store.append_message(conversation_id, {"role": "user", "content": COMPACT_COMMAND})
             stood = self._compact(conversation_id, language, TRIGGER_MANUAL, request)
             if turn.stop.is_set():
                 # The summary call was the whole turn and ran to its
                 # end: nothing was cut short, and the row says so.
                 self._store_stopped(conversation_id, late=True)
             return stood
+
+    def side_question(self, conversation_id: str, text: str, language: str = DEFAULT_LANGUAGE) -> bool:
+        """Answer a side question (the page's ``/btw``; see the module
+        notes and src/chat/side_question.py): the question stored as
+        the user's line, then one model call with no tools, stored as a
+        bot reply — both flagged, so the request built here is the last
+        that could have seen them (it is built before the line is
+        stored, and leaves flagged rows out anyway). True when the model
+        answered, False when the call failed and the row says so.
+        Refused while a held call waits (``ConfirmationPendingError``)."""
+        with self._turn(conversation_id) as turn, using_turn_language(language):
+            if store.get_pending(conversation_id):
+                raise ConfirmationPendingError(conversation_id)
+            request = self._request(conversation_id, language)
+            store.append_message(conversation_id, {"role": "user", "content": text, SIDE_QUESTION_KEY: True})
+            messages = (
+                request.messages[:1]
+                + as_text_only(request.conversation)
+                + [{"role": "user", "content": side_question_line(text)}]
+            )
+            reply = self._call(conversation_id, language, messages, tools=[], tool_choice="none",
+                               facts={SIDE_QUESTION_KEY: True})
+            if turn.stop.is_set():
+                # The one call was the whole turn and ran to its end.
+                self._store_stopped(conversation_id, late=True, side_question=True)
+            return reply is not None
 
     def context_usage(self, conversation_id: Optional[str], language: str = DEFAULT_LANGUAGE) -> ContextUsage:
         """How much of the model's context the next request would take
@@ -493,25 +546,33 @@ class ChatHarness:
             )
 
     @staticmethod
-    def _store_stopped(conversation_id: str, late: bool = False) -> None:
+    def _store_stopped(conversation_id: str, late: bool = False, side_question: bool = False) -> None:
         """The row that ends a stopped turn (``STOPPED_ROLE``); ``late``
-        when the stop landed on the final reply and cut nothing."""
-        store.append_message(conversation_id, {
+        when the stop landed on the final reply and cut nothing;
+        ``side_question`` when the turn was one, so the row is left out
+        of the model's view with the rows it ended."""
+        message: Dict[str, Any] = {
             "role": STOPPED_ROLE, "content": STOPPED_LATE_MESSAGE if late else STOPPED_MESSAGE,
-        })
+        }
+        if side_question:
+            message[SIDE_QUESTION_KEY] = True
+        store.append_message(conversation_id, message)
 
     def _request(self, conversation_id: Optional[str], language: str,
                  correction: Optional[str] = None) -> Request:
         """What the next model call would be sent (see ``Request``).
         ``correction`` is the retry's line after a wrong-language reply,
         sent as the last user message and kept only in the transcript.
-        With no conversation, the system prompt and tool menu alone."""
-        stored = store.messages(conversation_id) if conversation_id is not None else []
+        With no conversation, the system prompt and tool menu alone.
+        Side-question rows are no part of the conversation (see the
+        module notes), so they are left out before anything else."""
+        stored = without_side_questions(store.messages(conversation_id)) if conversation_id is not None else []
         history = trim_history(after_last_summary(stored))
-        base = [{"role": "system", "content": system_prompt(server_status(), language)}]
-        base.extend(view for view in (model_view(m) for m in history) if view is not None)
+        conversation = [view for view in (model_view(m) for m in history) if view is not None]
+        base = [{"role": "system", "content": system_prompt(server_status(), language)}] + conversation
         messages = base + ([{"role": "user", "content": correction}] if correction else [])
-        return Request(messages=messages, base=base, tools=self._catalog.specs(), history=history)
+        return Request(messages=messages, base=base, tools=self._catalog.specs(), history=history,
+                       conversation=conversation)
 
     def _measure(self, request: Request) -> ContextUsage:
         """The request against the model's limit, at the ratio the
@@ -520,15 +581,21 @@ class ChatHarness:
         return measure(self._limit(), request.messages, request.tools, ratio, calibrated)
 
     def _compact(self, conversation_id: str, language: str, trigger: str, request: Request) -> bool:
-        """The summary call (src/chat/compact.py): the request's rows
-        plus the summary instruction, tools offered but refused. Stored
+        """The summary call (src/chat/compact.py): its own short system
+        prompt, the request's conversation rows as text only, the
+        summary instruction last; no tools. Stored
         as a summary row either way — with the text, or with the error
         when the call failed or wrote nothing — carrying what it stands
         for under ``compacted``. True when the summary stands. Nothing
         happens, and False, when the model sees no rows at all."""
         if not request.history:
             return False
-        messages = request.base + [{"role": "user", "content": summary_instruction(language)}]
+        messages = (
+            [{"role": "system", "content": summary_system_prompt()}]
+            + as_text_only(request.conversation)
+            + [{"role": "user", "content": summary_instruction(language)}]
+        )
+        tools: List[Dict[str, Any]] = []
         usage = self._measure(request)
         compacted = {
             "trigger": trigger,
@@ -537,11 +604,11 @@ class ChatHarness:
             "tokens_before": usage.used_tokens,
         }
         transcript: Dict[str, Any] = {
-            "input": render_prompt(messages, request.tools), "output": None, "temperature": CHAT_TEMPERATURE,
+            "input": render_prompt(messages, tools), "output": None, "temperature": CHAT_TEMPERATURE,
         }
         started = time.monotonic()
         try:
-            reply = self._model.complete(messages, request.tools, tool_choice="none")
+            reply = self._model.complete(messages, tools, tool_choice="none")
         except Exception as exc:
             logger.warning("chat summary call failed for %s: %s", conversation_id, exc)
             store.append_message(conversation_id, {
@@ -565,31 +632,38 @@ class ChatHarness:
         return bool(summary)
 
     def _ask_model(self, conversation_id: str, language: str, request: Request) -> Optional[ModelReply]:
+        """The loop's model call: the request as built, every tool offered."""
+        return self._call(conversation_id, language, request.messages, request.tools)
+
+    def _call(self, conversation_id: str, language: str, messages: List[Dict[str, Any]],
+              tools: List[Dict[str, Any]], tool_choice: str = "auto",
+              facts: Optional[Dict[str, Any]] = None) -> Optional[ModelReply]:
         """One model call, stored as an assistant message. A failed call
         is stored as an assistant message carrying the error, and None
         is returned so the loop rests; the user can simply write again.
         Either way the message keeps the call's transcript (the exact
         input, the raw output, the time it took) for the page. A final
         reply in the wrong language is stored with the notice
-        ``wrong_language``."""
-        messages, tools = request.messages, request.tools
+        ``wrong_language``. ``facts`` are page keys stored on the row
+        whatever happened (the side-question flag)."""
+        facts = facts or {}
         transcript: Dict[str, Any] = {
             "input": render_prompt(messages, tools), "output": None, "temperature": CHAT_TEMPERATURE,
         }
         started = time.monotonic()
         try:
-            reply = self._model.complete(messages, tools)
+            reply = self._model.complete(messages, tools, tool_choice=tool_choice)
         except Exception as exc:
             logger.warning("chat model call failed for %s: %s", conversation_id, exc)
             store.append_message(conversation_id, {
                 "role": "assistant", "content": f"The model call failed: {exc}", "error": str(exc),
-                "time_ms": int((time.monotonic() - started) * 1000), "transcript": transcript,
+                "time_ms": int((time.monotonic() - started) * 1000), "transcript": transcript, **facts,
             })
             return None
         message: Dict[str, Any] = {
             "role": "assistant", "content": reply.content,
             "time_ms": int((time.monotonic() - started) * 1000),
-            "transcript": {**transcript, "output": render_reply(reply.content, reply.tool_calls)},
+            "transcript": {**transcript, "output": render_reply(reply.content, reply.tool_calls)}, **facts,
         }
         if reply.tool_calls:
             message["tool_calls"] = reply.tool_calls

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { chatApi, type ChatMessage, type ChatPendingCall } from '../../api/chat';
 import type { TieredTranscriptCall } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
@@ -25,8 +25,9 @@ export interface ChatThreadProps {
   className?: string;
   /** Classes on the content inside the scroll box: its cap, centering and insets. */
   contentClassName?: string;
-  /** Shown after the last step: a page-side command's answer (ChatCommandNote). */
-  trailing?: ReactNode;
+  /** Handed the root (the scroll box) when it mounts, null when it goes,
+   *  so the page can measure it — the width its scrollbar takes. */
+  onScrollBox?: (element: HTMLDivElement | null) => void;
 }
 
 // The conversation, oldest first: the user's lines as quiet right-hand
@@ -60,9 +61,17 @@ export interface ChatThreadProps {
 // (owner bug report 2026-09-23).
 //
 // A summary row (2026-10-13) is a bot step too — "LLM summarized the
-// conversation" — with the summary as its text, a note on which
-// messages it stands for, and its token line; a failed one says so in
-// red and leaves the model seeing everything.
+// conversation" — and nothing but its step line and its token line
+// (owner request 2026-10-14): the summary text is in the transcript
+// the token line opens. A failed one says so in red and leaves the
+// model seeing everything. A /compact the user typed shows as the
+// user's own line before it, like any message.
+//
+// A side question (/btw, 2026-10-16) is the user's line with a "/btw"
+// mark in front, and its answer a bot step — "LLM answered the side
+// question" — with a caution line saying the LLM will not see the
+// exchange in later turns (the server leaves both rows out of every
+// later request). Everything else about the step is as for a reply.
 //
 // The root is the scroll box (the page bounds its height): whenever
 // the conversation changes or grows, it scrolls to its own bottom, so
@@ -76,9 +85,16 @@ export const ChatThread = ({
   transcriptLoader = chatApi.getTranscript,
   className,
   contentClassName,
-  trailing,
+  onScrollBox,
 }: ChatThreadProps) => {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const setRoot = useCallback(
+    (element: HTMLDivElement | null) => {
+      rootRef.current = element;
+      onScrollBox?.(element);
+    },
+    [onScrollBox],
+  );
 
   // The answer the user clicked on the held call: while the server is
   // taking it (`working`, same call), the decision line reads
@@ -130,11 +146,11 @@ export const ChatThread = ({
     if (root) {
       root.scrollTop = root.scrollHeight;
     }
-  }, [conversationId, messages.length, pending, working, trailing]);
+  }, [conversationId, messages.length, pending, working]);
 
   return (
     <div
-      ref={rootRef}
+      ref={setRoot}
       className={cn('min-w-0 [overflow-wrap:anywhere]', className)}
       data-testid="chat-thread"
     >
@@ -149,7 +165,7 @@ export const ChatThread = ({
             step={stepNumbers[index]}
             args={argsByCall}
             loadTranscript={() => transcriptLoader(conversationId, message.seq)}
-            stopped={message.role === 'stopped' ? describeStop(messages, message.seq, shown[index - 1]) : null}
+            stopped={message.role === 'stopped' ? describeStop(messages, message) : null}
           />
         ))}
         {pending ? (
@@ -164,15 +180,15 @@ export const ChatThread = ({
           />
         ) : null}
         {working && !pending ? <TypingDots /> : null}
-        {trailing}
       </div>
     </div>
   );
 };
 
-// The bot's reply-to-be: three dots pulsing in turn.
-const TypingDots = () => (
-  <p className="flex items-center gap-1 py-1" data-testid="chat-working" aria-label="…">
+// The bot's reply-to-be: three dots pulsing in turn. (Also the
+// command note's "still measuring" sign, under its own test id.)
+export const TypingDots = ({ testId = 'chat-working' }: { testId?: string }) => (
+  <p className="flex items-center gap-1 py-1" data-testid={testId} aria-label="…">
     {[0, 150, 300].map((delay) => (
       <span
         key={delay}
@@ -228,6 +244,13 @@ const MessageRow = ({
     return (
       <div className="flex justify-end" data-testid="chat-user">
         <p className={cn('min-w-0 max-w-[85%] whitespace-pre-wrap rounded px-4 py-2.5 text-sm leading-relaxed text-ink-1', CHAT_SURFACE_1)}>
+          {message.side_question ? (
+            <>
+              <span className="font-mono text-xs font-semibold text-caution" data-testid="chat-side-question-mark">
+                /btw
+              </span>{' '}
+            </>
+          ) : null}
           {message.text}
         </p>
       </div>
@@ -271,25 +294,26 @@ const isSkippedCall = (message: ChatMessage): boolean =>
 interface StopFacts {
   /** The names of the calls the stop skipped, in the order they would have run. */
   skipped: string[];
-  /** The stop landed on the final reply (one that asked for no tool): nothing was cut. */
+  /** The stop landed after the turn's last step (a final reply, or a requested summary): nothing was cut. */
   last: boolean;
 }
 
-// Read off the rows: the skipped calls are the tool rows right before
-// the stopped row (`seq`); `before` is the last step shown before it.
-// A final reply just before the stopped row means the stop landed on
-// the last step and cut nothing.
-const describeStop = (messages: ChatMessage[], seq: number, before: ChatMessage | undefined): StopFacts => {
+// The skipped calls are read off the rows: the tool rows right before
+// the stopped row. Whether the step was the last is the server's word
+// (the row's `late`), never read off the row before it — the page used
+// to take an assistant reply with no tool calls as the sign, and so
+// called a requested summary "about to let the LLM decide" when the
+// summary was the whole turn (owner bug report 2026-10-14).
+const describeStop = (messages: ChatMessage[], stopped: ChatMessage): StopFacts => {
   const skipped: string[] = [];
-  for (let index = messages.findIndex((message) => message.seq === seq) - 1; index >= 0; index -= 1) {
+  for (let index = messages.indexOf(stopped) - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (!isSkippedCall(message)) {
       break;
     }
     skipped.unshift(message.name ?? '');
   }
-  const last = before?.role === 'assistant' && !before.error && (before.tool_calls ?? []).length === 0;
-  return { skipped, last };
+  return { skipped, last: stopped.late === true };
 };
 
 // The line that ends a turn the user stopped: quiet, centered, in the
@@ -300,7 +324,8 @@ const describeStop = (messages: ChatMessage[], seq: number, before: ChatMessage 
 // the step it would have been — and nothing beyond those (owner
 // decision 2026-10-12: no guessing past what the model asked for); or,
 // when every call had run, the LLM call that always follows a finished
-// batch; or, when the stop landed on the final reply, that it was the
+// batch; or, when the server says the stop landed after the last step
+// (`late`: a final reply, or a requested summary), that it was the
 // last step. The model sees the same row as a user line saying the
 // reply was stopped (or that it had already finished), so it does not
 // pick the old work back up.
@@ -356,9 +381,11 @@ const ReplyRow = ({
     : t('chat.step.noUsage');
   const stepText = message.error
     ? t('chat.step.failed', { n: step })
-    : (message.tool_calls ?? []).length > 0
-      ? t('chat.step.tool', { n: step })
-      : t('chat.step.say', { n: step });
+    : message.side_question
+      ? t('chat.step.sideQuestion', { n: step })
+      : (message.tool_calls ?? []).length > 0
+        ? t('chat.step.tool', { n: step })
+        : t('chat.step.say', { n: step });
   return (
     <section data-testid="chat-assistant" className="flex min-w-0 flex-col gap-2">
       <StepLine text={stepText} />
@@ -369,6 +396,11 @@ const ReplyRow = ({
           <div className="text-sm leading-relaxed text-ink-2">
             <ChatMarkdown text={message.text} />
           </div>
+        ) : null}
+        {message.side_question ? (
+          <p className="text-xs text-caution" data-testid="chat-side-question-note">
+            {t('chat.sideQuestion.note')}
+          </p>
         ) : null}
         {message.notice === 'tool_call_limit' ? (
           <p className="text-xs text-caution">{t('chat.notice.toolCallLimit')}</p>
@@ -392,7 +424,7 @@ const ReplyRow = ({
                   item={{
                     call_number: message.seq,
                     created_at: message.created_at,
-                    stage: 'chat',
+                    stage: message.side_question ? 'side_question' : 'chat',
                     llm: message.llm ?? null,
                     temperature: null,
                     time_ms: message.time_ms ?? null,
@@ -434,12 +466,6 @@ const SummaryRow = ({
   const usage = message.usage;
   const hasUsage = usage != null && (usage.input_tokens != null || usage.output_tokens != null);
   const canOpen = hasUsage || message.transcript_chars != null;
-  const facts = message.compacted;
-  const noteParams = {
-    first: facts?.first_seq ?? '?',
-    last: facts?.last_seq ?? '?',
-    tokens: (facts?.tokens_before ?? 0).toLocaleString('en-US'),
-  };
   return (
     <section data-testid="chat-summary" className="flex min-w-0 flex-col gap-2">
       <StepLine text={message.error ? t('chat.step.summaryFailed', { n: step }) : t('chat.step.summary', { n: step })} />
@@ -449,18 +475,7 @@ const SummaryRow = ({
             <p className="text-sm text-negative">{message.error}</p>
             <p className="text-xs text-caution">{t('chat.summary.failed')}</p>
           </>
-        ) : (
-          <>
-            <p className="text-xs text-caution" data-testid="chat-summary-note">
-              {t(facts?.trigger === 'manual' ? 'chat.summary.manual' : 'chat.summary.auto', noteParams)}
-            </p>
-            {message.text ? (
-              <div className="text-sm leading-relaxed text-ink-2">
-                <ChatMarkdown text={message.text} />
-              </div>
-            ) : null}
-          </>
-        )}
+        ) : null}
         {canOpen ? (
           <UsageLine
             label={hasUsage ? t('chat.usage', { tokens: (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) }) : t('chat.step.noUsage')}

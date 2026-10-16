@@ -34,6 +34,13 @@ from src.chat.model import ModelReply
 from src.chat.tools import TOOLS, NoParams, Tool, ToolCatalog
 from src.tiered_analysis import history
 
+#: How long a test waits for the scripted model to be asked. Generous:
+#: the first turn in a process pays the cold imports behind the system
+#: prompt's server status (the analysis stack, about 4 s) and the
+#: model-table lookup (litellm, about 3 s), which made a 5 s wait fail
+#: now and then (2026-10-14). A broken turn still fails, just later.
+COLD_TURN_WAIT = 30
+
 
 @pytest.fixture()
 def isolated_db(tmp_path):
@@ -598,7 +605,7 @@ class TestStop:
         conversation_id = store.create_conversation()["id"]
         worker, errors = self._start(bot, conversation_id)
         try:
-            assert model.asked.wait(timeout=5)
+            assert model.asked.wait(timeout=COLD_TURN_WAIT)
             assert bot.stop(conversation_id) is True
             # The turn does not end while the model is still "thinking":
             # the step in flight is let finish, so its tokens are known.
@@ -644,7 +651,7 @@ class TestStop:
         conversation_id = store.create_conversation()["id"]
         worker, errors = self._start(bot, conversation_id)
         try:
-            assert model.asked.wait(timeout=5)
+            assert model.asked.wait(timeout=COLD_TURN_WAIT)
             assert bot.stop(conversation_id) is True
         finally:
             model.release.set()
@@ -659,7 +666,7 @@ class TestStop:
         holder: Dict[str, Any] = {}
 
         class StoppingModel(ScriptedModel):
-            def complete(self, messages, tools):
+            def complete(self, messages, tools, tool_choice="auto"):
                 holder["bot"].stop(holder["id"])
                 return super().complete(messages, tools)
 
@@ -739,7 +746,7 @@ class TestCompaction:
                                     max_tokens=max_tokens, source="litellm")
 
     def test_past_the_line_the_loop_summarizes_first_and_the_model_sees_the_summary(self, isolated_db):
-        from src.chat.compact import SUMMARY_PREFACE, SUMMARY_ROLE, TRIGGER_AUTO
+        from src.chat.compact import SUMMARY_PREFACE, SUMMARY_ROLE, SUMMARY_SYSTEM_PROMPT, TRIGGER_AUTO
 
         model = ScriptedModel([text("first answer", prompt=100, completion=5)])
         bot = ChatHarness(model, limit=self.limit(10_000_000))
@@ -764,17 +771,64 @@ class TestCompaction:
         assert summary["compacted"]["tokens_before"] >= 85
         assert summary["usage"] == {"input_tokens": 120, "output_tokens": 10}
         assert summary["transcript"]["output"].startswith("SUMMARY:")
-        # The summary request: the conversation, the instruction last, tools refused.
+        # The summary request: its own one-paragraph system prompt (not
+        # the standing instructions), the conversation, the instruction
+        # last, and no tool menu.
         summary_request = bot._model.requests[0]
+        assert summary_request["messages"][0] == {"role": "system", "content": SUMMARY_SYSTEM_PROMPT}
+        assert "## What the app does" not in summary_request["messages"][0]["content"]
         assert summary_request["messages"][-1]["role"] == "user"
         assert "summarized to free up context" in summary_request["messages"][-1]["content"]
         assert [m["content"] for m in summary_request["messages"][1:-1]] == ["hello", "first answer", "and now?"]
-        assert summary_request["tools"]
+        assert summary_request["tools"] == []
         # The answer's request: the summary as a user line, nothing before it.
         answer_request = bot._model.requests[1]
         assert [m["role"] for m in answer_request["messages"]] == ["system", "user"]
         assert answer_request["messages"][1]["content"] == f"{SUMMARY_PREFACE}\n\nSUMMARY: the user said hello and was answered."
         assert rows[4]["content"] == "second answer"
+
+    def test_the_summary_call_writes_tool_calls_out_as_text(self, isolated_db):
+        """With no tools defined, a provider may refuse a history that
+        holds tool calls (Anthropic's API does), so the summary call
+        gets each call and result as plain lines instead."""
+        from src.chat.compact import SUMMARY_ROLE, as_text_only
+
+        history.create_run("t1", "AAPL", inputs={"tier": 1}, status="queued")
+        model = ScriptedModel([call("list_tickers", {}), text("You have run AAPL.")])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "what have I run?")
+        assert roles(conversation_id) == ["user", "assistant", "tool", "assistant"]
+
+        model = ScriptedModel([text("SUMMARY: AAPL was listed.", prompt=90, completion=8)])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        assert bot.compact(conversation_id, "en") is True
+        assert roles(conversation_id)[-1] == SUMMARY_ROLE
+        sent = model.requests[0]
+        assert sent["tools"] == []
+        rows = sent["messages"][1:-1]
+        assert [m["role"] for m in rows] == ["user", "assistant", "user", "assistant"]
+        assert all("tool_calls" not in m and "tool_call_id" not in m for m in rows)
+        assert rows[1]["content"] == "[Called list_tickers with {}]"
+        assert rows[2]["content"].startswith("[Result of list_tickers]\n") and '"AAPL"' in rows[2]["content"]
+        assert rows[3]["content"] == "You have run AAPL."
+        # The transcript shows the same text-only request, and an empty tool menu.
+        transcript = store.messages(conversation_id)[-1]["transcript"]["input"]
+        assert "[Called list_tickers with {}]" in transcript and transcript.endswith("=== tools offered ===\n(none)")
+
+        # A reply with text beside its calls keeps both; the rest passes through.
+        rows = as_text_only([
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "Looking.", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "get_run", "arguments": '{"run_id": "r1"}'}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "name": "get_run", "content": "{}"},
+        ])
+        assert rows == [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": 'Looking.\n[Called get_run with {"run_id": "r1"}]'},
+            {"role": "user", "content": "[Result of get_run]\n{}"},
+        ]
 
     def test_one_summary_per_turn_and_the_next_message_starts_after_it(self, isolated_db):
         from src.chat.compact import SUMMARY_ROLE
@@ -825,7 +879,7 @@ class TestCompaction:
         assert failed["role"] == SUMMARY_ROLE and failed["error"] == "the model wrote no summary"
 
     def test_compact_on_request_and_its_refusals(self, isolated_db):
-        from src.chat.compact import SUMMARY_ROLE, TRIGGER_MANUAL
+        from src.chat.compact import COMPACT_COMMAND, SUMMARY_ROLE, TRIGGER_MANUAL
 
         model = ScriptedModel([text("answer", prompt=1, completion=1), text("S", prompt=1, completion=1)])
         bot = ChatHarness(model, limit=self.limit(10_000_000))
@@ -838,12 +892,20 @@ class TestCompaction:
         bot.send(conversation_id, "hi")
         assert bot.compact(conversation_id, language="zh") is True
         rows = store.messages(conversation_id)
-        assert roles(conversation_id) == ["user", "assistant", SUMMARY_ROLE]
-        assert rows[2]["compacted"] == {"trigger": TRIGGER_MANUAL, "first_seq": 1, "last_seq": 2,
-                                        "tokens_before": rows[2]["compacted"]["tokens_before"]}
+        # The command is the user's own line; the summary follows it and
+        # stands for the rows before it, never for the command.
+        assert roles(conversation_id) == ["user", "assistant", "user", SUMMARY_ROLE]
+        assert rows[2]["content"] == COMPACT_COMMAND
+        assert rows[3]["compacted"] == {"trigger": TRIGGER_MANUAL, "first_seq": 1, "last_seq": 2,
+                                        "tokens_before": rows[3]["compacted"]["tokens_before"]}
+        summary_request = model.requests[1]["messages"]
+        assert not any(COMPACT_COMMAND in str(m.get("content")) for m in summary_request)
         # The instruction names the chosen language.
-        assert "Simplified Chinese" in model.requests[1]["messages"][-1]["content"]
+        assert "Simplified Chinese" in summary_request[-1]["content"]
         assert store.get_conversation(conversation_id)["total_tokens"] == 4
+        assert store.get_conversation(conversation_id)["user_input_count"] == 2
+        # The model's view starts at the summary: the command line is behind it.
+        assert [m["role"] for m in bot._request(conversation_id, "en").conversation] == ["user"]
 
         # Nothing new since the summary: the model sees the summary row only, which is something.
         bot = ChatHarness(ScriptedModel([text("S2", prompt=1, completion=1)]), limit=self.limit(10_000_000))
@@ -983,3 +1045,154 @@ class TestCompaction:
         failed = {"role": SUMMARY_ROLE, "content": None, "error": "x", "seq": 6}
         assert after_last_summary(messages + [failed]) == messages[2:] + [failed]
         assert model_view(failed) is None
+
+
+class TestSideQuestion:
+    """/btw (src/chat/side_question.py): the question and its answer are
+    stored and flagged, the one call sees the conversation but no
+    tools, and no later request, measure or summary carries the rows."""
+
+    @staticmethod
+    def limit(max_tokens):
+        return TestCompaction.limit(max_tokens)
+
+    def test_the_rows_are_stored_flagged_and_left_out_of_later_requests(self, isolated_db):
+        from src.chat.side_question import SIDE_QUESTION_INSTRUCTION, SIDE_QUESTION_KEY
+
+        model = ScriptedModel([
+            text("first answer", prompt=10, completion=2),
+            text("Tier 2 is the deep analysis.", prompt=20, completion=3),
+            text("second answer", prompt=10, completion=2),
+        ])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "hello")
+        before = bot.context_usage(conversation_id).used_tokens
+
+        assert bot.side_question(conversation_id, "btw what is tier 2?", language="en") is True
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", "user", "assistant"]
+        assert rows[2]["content"] == "btw what is tier 2?" and rows[2][SIDE_QUESTION_KEY] is True
+        assert rows[3]["content"] == "Tier 2 is the deep analysis." and rows[3][SIDE_QUESTION_KEY] is True
+        assert rows[3]["usage"] == {"input_tokens": 20, "output_tokens": 3}
+        assert rows[3]["transcript"]["output"] == "Tier 2 is the deep analysis."
+        # The side call: the standing instructions, the conversation so
+        # far, the question last under its instruction, and no tools.
+        side_request = model.requests[1]
+        assert "## What the app does" in side_request["messages"][0]["content"]
+        assert [m["content"] for m in side_request["messages"][1:-1]] == ["hello", "first answer"]
+        assert side_request["messages"][-1] == {
+            "role": "user", "content": f"{SIDE_QUESTION_INSTRUCTION}\n\nbtw what is tier 2?",
+        }
+        assert side_request["tools"] == []
+        # The exchange counts toward what the conversation cost, and as
+        # one of the user's inputs, but takes no context.
+        facts = store.get_conversation(conversation_id)
+        assert facts["total_tokens"] == 35 and facts["user_input_count"] == 2
+        assert bot.context_usage(conversation_id).used_tokens == before
+
+        # The next message's request has no trace of it.
+        bot.send(conversation_id, "and now?")
+        answer_request = model.requests[2]["messages"]
+        assert [m["content"] for m in answer_request[1:]] == ["hello", "first answer", "and now?"]
+        assert not any("what is tier 2" in str(m.get("content")).lower() for m in answer_request)
+        assert [m["role"] for m in bot._request(conversation_id, "en").history] == ["user", "assistant", "user", "assistant"]
+
+    def test_the_side_call_sees_tool_calls_as_text_and_works_on_an_empty_conversation(self, isolated_db):
+        model = ScriptedModel([
+            call("list_tickers", {}), text("You have AAPL.", prompt=1, completion=1),
+            text("A ticker is a stock's symbol.", prompt=1, completion=1),
+        ])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "what do I have?")
+        bot.side_question(conversation_id, "what is a ticker?")
+        side_request = model.requests[2]["messages"]
+        assert all(m["role"] != "tool" for m in side_request)
+        assert not any(m.get("tool_calls") for m in side_request)
+        assert any("[Called list_tickers" in str(m["content"]) for m in side_request)
+        assert any("[Result of list_tickers]" in str(m["content"]) for m in side_request)
+
+        # With nothing said yet, the instructions and the question alone;
+        # the question names the conversation like any first line.
+        fresh = store.create_conversation()["id"]
+        bot = ChatHarness(ScriptedModel([text("Hi!", prompt=1, completion=1)]), limit=self.limit(10_000_000))
+        assert bot.side_question(fresh, "anyone there?") is True
+        assert [m["role"] for m in bot._model.requests[0]["messages"]] == ["system", "user"]
+        assert store.get_conversation(fresh)["title"] == "anyone there?"
+        assert bot._request(fresh, "en").history == []
+
+    def test_refusals_and_a_failed_call(self, isolated_db):
+        from src.chat.side_question import SIDE_QUESTION_KEY
+
+        bot = ChatHarness(ScriptedModel([]), limit=self.limit(10_000_000))
+        with pytest.raises(UnknownConversationError):
+            bot.side_question("nope", "hi")
+
+        model = ScriptedModel([call("delete_run", {"run_id": "q1"})])
+        history.create_run("q1", "AAPL", inputs={"tier": 1}, status="queued")
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "cancel q1")
+        assert store.get_pending(conversation_id)
+        with pytest.raises(ConfirmationPendingError):
+            bot.side_question(conversation_id, "which run is that?")
+        assert roles(conversation_id) == ["user", "assistant"]
+
+        # A failed call is a flagged reply carrying the error; the
+        # question stays stored, and neither row reaches the model.
+        failing = ScriptedModel([RuntimeError("quota")])
+        bot = ChatHarness(failing, limit=self.limit(10_000_000))
+        fresh = store.create_conversation()["id"]
+        assert bot.side_question(fresh, "hm?") is False
+        rows = store.messages(fresh)
+        assert roles(fresh) == ["user", "assistant"]
+        assert rows[1]["error"] == "quota" and rows[1][SIDE_QUESTION_KEY] is True
+        assert rows[1]["content"].startswith("The model call failed")
+        assert bot._request(fresh, "en").history == []
+
+    def test_a_summary_never_covers_a_side_question(self, isolated_db):
+        from src.chat.compact import SUMMARY_ROLE
+
+        model = ScriptedModel([text("first answer", prompt=100, completion=5), text("An aside.", prompt=1, completion=1)])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "hello")
+        bot.side_question(conversation_id, "secret aside")
+
+        # A max the standing instructions alone pass: the next turn
+        # summarizes first, and the summary skips the aside.
+        model = ScriptedModel([
+            text("SUMMARY: hello was answered.", prompt=120, completion=10),
+            text("second answer", prompt=50, completion=5),
+        ])
+        bot = ChatHarness(model, limit=self.limit(100))
+        bot.send(conversation_id, "and now?")
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", "user", "assistant", "user", SUMMARY_ROLE, "assistant"]
+        summary_request = model.requests[0]["messages"]
+        assert not any("secret aside" in str(m["content"]) or "An aside" in str(m["content"]) for m in summary_request)
+        assert [m["content"] for m in summary_request[1:-1]] == ["hello", "first answer", "and now?"]
+        assert rows[5]["compacted"]["first_seq"] == 1 and rows[5]["compacted"]["last_seq"] == 5
+
+    def test_a_stop_during_a_side_question_is_late_and_hidden_from_the_model(self, isolated_db):
+        from src.chat.side_question import SIDE_QUESTION_KEY
+
+        holder: Dict[str, Any] = {}
+
+        class StopDuringCall(ScriptedModel):
+            def complete(self, messages, tools, tool_choice="auto"):
+                reply = super().complete(messages, tools, tool_choice)
+                holder["bot"].stop(holder["id"])
+                return reply
+
+        model = StopDuringCall([text("An aside.", prompt=1, completion=1), text("answer", prompt=1, completion=1)])
+        bot = ChatHarness(model, limit=self.limit(10_000_000))
+        conversation_id = store.create_conversation()["id"]
+        holder.update(bot=bot, id=conversation_id)
+        assert bot.side_question(conversation_id, "psst") is True
+        rows = store.messages(conversation_id)
+        assert roles(conversation_id) == ["user", "assistant", STOPPED_ROLE]
+        assert rows[2]["content"] == STOPPED_LATE_MESSAGE and rows[2][SIDE_QUESTION_KEY] is True
+        # The stopped row went with the aside: the model sees none of the three.
+        assert bot._request(conversation_id, "en").history == []

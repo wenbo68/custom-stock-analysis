@@ -86,8 +86,11 @@ class ContextUsage:
         return self.system_prompt_tokens + self.tools_tokens + self.conversation_tokens
 
     @property
-    def percent(self) -> int:
-        return round(self.used_tokens * 100 / self.limit.max_tokens) if self.limit.max_tokens else 0
+    def percent(self) -> float:
+        """``used_tokens`` as a share of the max, to one decimal (owner
+        request 2026-10-13: a fresh conversation sits well under 1%,
+        and a whole-number "0%" said nothing)."""
+        return round(self.used_tokens * 100 / self.limit.max_tokens, 1) if self.limit.max_tokens else 0.0
 
     @property
     def needs_compaction(self) -> bool:

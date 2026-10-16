@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import axios from 'axios';
+import { useNavigate, useParams } from 'react-router-dom';
 import { chatApi, type ChatConversation, type ChatConversationSummary } from '../api/chat';
 import { ChatCommandNote, type ChatNote } from '../components/chat/ChatCommandNote';
 import { ChatComposer } from '../components/chat/ChatComposer';
@@ -9,6 +10,7 @@ import { parseInput, type ChatCommand } from '../components/chat/commands';
 import { HeaderControls } from '../components/common/HeaderControls';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import { useElementHeight } from '../hooks/useElementHeight';
+import { useScrollbarWidth } from '../hooks/useScrollbarWidth';
 import { cn } from '../utils/cn';
 
 // The chat page, laid out like a chat app: the left panel — the
@@ -46,11 +48,38 @@ import { cn } from '../utils/cn';
 //
 // A line that starts with "/" is a command, not a message (owner
 // request 2026-10-13, after Claude Code's slash commands; commands.ts
-// is the table). /help and /context answer on the page, as a panel at
-// the end of the thread that the next message or command replaces;
+// is the table). /help and /context answer on the page, as a panel
+// under the message box — part of the box, not of the thread (owner
+// request 2026-10-15) — that the next message or command replaces;
 // /compact is a turn against the server like a message is, and its
 // answer — the conversation with its new summary step — lands the same
 // way. An unknown command is an error line, and nothing is sent.
+// /btw <question> (owner request 2026-10-16) is a turn too: the
+// question goes into the thread as the user's line, marked, and the
+// server's answer is a bot step flagged the same way — stored and
+// shown, but left out of every later request, so the LLM never
+// remembers the exchange. Without a question the line is refused,
+// and so is one while a held call waits for the user's answer.
+//
+// A turn belongs to its conversation, not to the page (owner bug
+// report 2026-10-15: one conversation's wait locked every other). The
+// turns in flight are kept by conversation id; the box is blocked, the
+// dots show and the stop button stands only when the open conversation
+// is one of them, and another conversation can be opened and written
+// to meanwhile. A turn's answer replaces the shown conversation only
+// if it is still the one shown; otherwise it is simply dropped (the
+// history list refreshes, and opening the conversation fetches it).
+// While a reply is awaited the box still takes typing but sends no
+// message (owner request 2026-10-15). A command typed then runs at
+// once or is refused with an error line over the box, as its table
+// entry says (commands.ts); nothing is queued.
+//
+// The open conversation's id rides in the URL, /chat/<id> (owner
+// request 2026-10-13): a refresh or a shared link lands on it instead
+// of on an empty page. The URL is the one source of which conversation
+// is open — picking one from the history, starting a new one, the
+// first message of a new conversation and deleting the open one all
+// change the URL, and one effect opens whatever the URL names.
 const TURN_POLL_MS = 800;
 
 // The text's cap: the analysis page's 1280px column less its 32px side
@@ -63,6 +92,48 @@ const CHAT_FRAME = cn('mx-auto w-full px-4', CHAT_MAX_WIDTH);
 // beneath is dimmed there and only there (owner request 2026-09-27: no
 // strip across the whole width).
 const FLOAT_SHADE = 'rounded-2xl bg-background/85 shadow-[0_0_40px_28px_hsl(var(--background)/0.85)]';
+/** A float's right edge: the column's, less the thread's scrollbar (0 until one shows). */
+const SCROLLBAR_INSET = 'right-[var(--chat-scrollbar-width,0px)]';
+
+/** A turn in flight: running, or stopping once the stop button was clicked. */
+type TurnPhase = 'running' | 'stopping';
+
+/** `record` without `key` (a new object; nothing is mutated). */
+const withoutKey = <T,>(record: Record<string, T>, key: string): Record<string, T> =>
+  Object.fromEntries(Object.entries(record).filter(([k]) => k !== key));
+
+/** The history's entry for a conversation the user just wrote in, as the
+ *  server will list it: at the top, one more input, written just now
+ *  (owner request 2026-10-15: the history orders by the user's last
+ *  line, so the move happens on send, not when the reply lands). */
+const bumped = (list: ChatConversationSummary[], target: ChatConversation): ChatConversationSummary[] => {
+  const entry: ChatConversationSummary = {
+    id: target.id,
+    title: target.title,
+    created_at: target.created_at,
+    updated_at: target.updated_at,
+    total_tokens: target.total_tokens,
+    message_count: target.messages.length + 1,
+    user_input_count: target.user_input_count + 1,
+    ended_at: new Date().toISOString(),
+  };
+  return [entry, ...list.filter((item) => item.id !== target.id)];
+};
+
+/** The conversation with the user's line added as the server will store it: in view before the server has seen it. */
+const withUserLine = (base: ChatConversation, text: string, sideQuestion = false): ChatConversation => ({
+  ...base,
+  messages: [
+    ...base.messages,
+    {
+      seq: (base.messages.at(-1)?.seq ?? 0) + 1,
+      role: 'user',
+      created_at: null,
+      text,
+      ...(sideQuestion ? { side_question: true } : {}),
+    },
+  ],
+});
 
 // Peek at the conversation on a timer until stopped, handing each longer
 // version to `apply`. Returns the stop function; a peek in flight when
@@ -94,23 +165,39 @@ const peekWhileWorking = (id: string, apply: (fresh: ChatConversation) => void):
 
 const ChatPage = () => {
   const { language, t } = useUiLanguage();
+  const { conversationId = null } = useParams<{ conversationId: string }>();
+  const navigate = useNavigate();
   const [conversations, setConversations] = useState<ChatConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ChatConversation | null>(null);
-  const [working, setWorking] = useState(false);
-  // The conversation whose turn is in flight — what the stop button
-  // stops, whichever conversation is open by then — and whether the
-  // stop was clicked and the turn has not come back yet.
-  const [turnId, setTurnId] = useState<string | null>(null);
-  const [stopping, setStopping] = useState(false);
+  // The shown conversation as the URL effect reads it, so the effect
+  // runs on a change of URL only, never on every peek.
+  const shownRef = useRef<ChatConversation | null>(null);
+  shownRef.current = conversation;
+  // The turns in flight, by conversation id: running, or stopping once
+  // the stop button was clicked and the turn has not come back yet.
+  const [turns, setTurns] = useState<Record<string, TurnPhase>>({});
+  // The first message of a new conversation: the conversation is being
+  // created, so there is no id to key a turn by yet.
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A page-side command's answer, shown at the end of the thread.
+  // A page-side command's answer, shown under the message box.
   const [note, setNote] = useState<ChatNote | null>(null);
+  const shownTurn = conversation ? turns[conversation.id] : undefined;
+  const pending = conversation?.pending?.calls[0] ?? null;
+  const working = creating || shownTurn !== undefined;
+  const stopping = shownTurn === 'stopping';
   // The band the menus float in and the dock the message box floats
   // in; their heights are the text's top and bottom insets.
   const [band, setBand] = useState<HTMLDivElement | null>(null);
   const bandHeight = useElementHeight(band);
   const [dock, setDock] = useState<HTMLDivElement | null>(null);
   const dockHeight = useElementHeight(dock);
+  // The thread's scroll box, for the width its scrollbar takes: the band
+  // and the dock float over the whole column, the text scrolls in the
+  // column less its scrollbar, so without this the box sat a half
+  // scrollbar right of the text, over the bar (owner bug report 2026-10-14).
+  const [scrollBox, setScrollBox] = useState<HTMLDivElement | null>(null);
+  const scrollbarWidth = useScrollbarWidth(scrollBox);
 
   const refreshList = useCallback(async () => {
     try {
@@ -137,18 +224,48 @@ const ChatPage = () => {
     [t],
   );
 
-  const startNew = () => {
-    setConversation(null);
-    setError(null);
-    setNote(null);
+  // The URL names the open conversation: open what it names when that
+  // is not what is shown; show the empty page when it names none. The
+  // effect runs on a change of URL and nothing else — `open` is read
+  // through a ref, since a new `open` (a change of UI language) must
+  // not clear the page.
+  const openRef = useRef(open);
+  openRef.current = open;
+  useEffect(() => {
+    if (!conversationId) {
+      setConversation(null);
+      setNote(null);
+      return;
+    }
+    if (shownRef.current?.id !== conversationId) {
+      void openRef.current(conversationId);
+    }
+  }, [conversationId]);
+
+  // Picking a conversation from the history: the URL changes and the
+  // effect opens it; picking the open one again simply reloads it.
+  const select = (id: string) => {
+    if (id === conversationId) {
+      void open(id);
+      return;
+    }
+    navigate(`/chat/${id}`);
   };
 
+  const startNew = () => {
+    setError(null);
+    navigate('/chat');
+  };
+
+  /** A fresh copy of a conversation, shown only if it is the one open. */
+  const showIfOpen = (fresh: ChatConversation) => setConversation((shown) => (shown?.id === fresh.id ? fresh : shown));
+
   // One turn against `target`: the server's answer replaces the shown
-  // conversation. On failure, the server may have stored part of the
-  // turn (the user's line, a tool's result); show what it has.
+  // conversation (if `target` is still the one shown). On failure, the
+  // server may have stored part of the turn (the user's line, a tool's
+  // result); show what it has.
   const applyTurn = async (target: ChatConversation, turn: () => Promise<ChatConversation>) => {
-    setWorking(true);
-    setTurnId(target.id);
+    setTurns((prev) => ({ ...prev, [target.id]: 'running' }));
     setError(null);
     // Only a longer conversation is news; the same length is what the
     // page already shows (the user's own line, added before sending).
@@ -156,98 +273,145 @@ const ChatPage = () => {
       setConversation((shown) => (shown?.id === fresh.id && fresh.messages.length > shown.messages.length ? fresh : shown)),
     );
     try {
-      setConversation(await turn().finally(stopPeeking));
+      showIfOpen(await turn().finally(stopPeeking));
       await refreshList();
     } catch (turnError) {
-      setError(describe(turnError, t));
+      if (shownRef.current?.id === target.id) {
+        setError(describe(turnError, t));
+      }
       try {
-        setConversation(await chatApi.getConversation(target.id));
+        showIfOpen(await chatApi.getConversation(target.id));
       } catch {
         // keep what we had
       }
     } finally {
-      setWorking(false);
-      setTurnId(null);
-      setStopping(false);
+      setTurns((prev) => withoutKey(prev, target.id));
     }
   };
 
-  // The stop button: ask the server to stop the turn in flight. The
-  // server lets the step that is running finish (so the tokens shown
-  // match the bill, whichever model), then the turn's own request comes
-  // back with the stopped conversation — its last row is the stopped
-  // line, which names the step the stop landed on and what would have
-  // followed — and `applyTurn` shows it as it would any answer.
-  // Until then an unclickable "…" takes the button's place.
+  // The stop button: ask the server to stop the open conversation's
+  // turn. The server lets the step that is running finish (so the
+  // tokens shown match the bill, whichever model), then the turn's own
+  // request comes back with the stopped conversation — its last row is
+  // the stopped line, which names the step the stop landed on and what
+  // would have followed — and `applyTurn` shows it as it would any
+  // answer. Until then an unclickable "…" takes the button's place.
   const stopTurn = () => {
-    if (!turnId || stopping) {
+    const id = conversation?.id;
+    if (!id || turns[id] !== 'running') {
       return;
     }
-    setStopping(true);
-    void chatApi.stopTurn(turnId).catch((stopError) => {
+    setTurns((prev) => ({ ...prev, [id]: 'stopping' }));
+    void chatApi.stopTurn(id).catch((stopError) => {
       setError(describe(stopError, t, 'chat.error.stop'));
-      setStopping(false);
+      setTurns((prev) => (prev[id] === 'stopping' ? { ...prev, [id]: 'running' } : prev));
     });
   };
 
-  // A command typed into the box: answered on the page, or run against
-  // the server (see the notes above).
-  const runCommand = async (command: ChatCommand) => {
+  // A command typed into the box: answered on the page, or a turn
+  // against the server (see the notes above). /context is the dots
+  // alone until the server has measured (owner request 2026-10-15).
+  const runCommand = async (command: ChatCommand, argument: string) => {
+    const shown = conversation;
     if (command.name === 'help') {
       setNote({ kind: 'help' });
       return;
     }
+    if (command.name === 'btw') {
+      await startTurn(argument, true, (id) => chatApi.sideQuestion(id, argument, language));
+      return;
+    }
     if (command.name === 'context') {
+      setNote({ kind: 'context', usage: null });
       try {
-        setNote({ kind: 'context', usage: await chatApi.getContext(conversation?.id ?? null, language) });
+        const usage = await chatApi.getContext(shown?.id ?? null, language);
+        setNote((current) => (current?.kind === 'context' ? { kind: 'context', usage } : current));
       } catch (contextError) {
+        setNote((current) => (current?.kind === 'context' && current.usage === null ? null : current));
         setError(describe(contextError, t));
       }
       return;
     }
-    if (!conversation || conversation.messages.length === 0) {
+    if (!shown || shown.messages.length === 0) {
       setError(t('chat.error.nothingToCompact'));
       return;
     }
-    const target = conversation;
-    await applyTurn(target, () => chatApi.compact(target.id, language));
+    // The command is the user's own line (owner request 2026-10-14), as
+    // the server stores it; the summary step follows as its reply.
+    setConversation(withUserLine(shown, '/compact'));
+    setConversations((list) => bumped(list, shown));
+    await applyTurn(shown, () => chatApi.compact(shown.id, language));
   };
 
-  const send = (input: string) =>
-    void (async () => {
-      setNote(null);
-      setError(null);
-      const parsed = parseInput(input);
-      if (parsed.kind === 'unknown') {
-        setError(t('chat.command.unknown', { command: parsed.name }));
+  // A line from the box: true when it was taken (and the box may
+  // clear), false when it was refused and stays in the box — an unknown
+  // command, a command that cannot run while the reply is awaited, or
+  // a message while a reply or an answer is awaited (owner request
+  // 2026-10-15: nothing typed is lost). The verdict is given at once;
+  // the work goes on after.
+  const send = (input: string): boolean => {
+    setNote(null);
+    setError(null);
+    const parsed = parseInput(input);
+    if (parsed.kind === 'unknown') {
+      setError(t('chat.command.unknown', { command: parsed.name }));
+      return false;
+    }
+    if (parsed.kind === 'command') {
+      if (parsed.command.argumentKey && !parsed.argument) {
+        setError(t('chat.command.needsArgument', { command: parsed.command.name, hint: t(parsed.command.argumentKey) }));
+        return false;
+      }
+      if (parsed.command.blockedWhileWaiting && working) {
+        setError(t('chat.command.waitTurn', { command: parsed.command.name }));
+        return false;
+      }
+      if (parsed.command.name === 'btw' && pending) {
+        // The server would refuse it too (409); refusing here keeps the
+        // line in the box.
+        setError(t('chat.composer.waitConfirm'));
+        return false;
+      }
+      void runCommand(parsed.command, parsed.argument);
+      return true;
+    }
+    if (working || pending) {
+      // The box sends no message meanwhile; a line that slips through
+      // (a race) stays in the box, as the server would refuse it.
+      return false;
+    }
+    void sendMessage(parsed.text);
+    return true;
+  };
+
+  const sendMessage = (text: string) => startTurn(text, false, (id) => chatApi.sendMessage(id, text, language));
+
+  // The user's line into view at once — the conversation created first
+  // when there is none yet — then one turn against the server: a
+  // message, or a side question (/btw) with its flag on the line.
+  const startTurn = async (text: string, sideQuestion: boolean, turn: (id: string) => Promise<ChatConversation>) => {
+    let target = conversation;
+    if (!target) {
+      setCreating(true);
+      try {
+        target = await chatApi.createConversation();
+      } catch (createError) {
+        setError(describe(createError, t));
         return;
+      } finally {
+        setCreating(false);
       }
-      if (parsed.kind === 'command') {
-        await runCommand(parsed.command);
-        return;
-      }
-      const text = parsed.text;
-      let target = conversation;
-      if (!target) {
-        setWorking(true);
-        setError(null);
-        try {
-          target = await chatApi.createConversation();
-        } catch (createError) {
-          setError(describe(createError, t));
-          setWorking(false);
-          return;
-        }
-      }
-      const base = target;
-      const lastSeq = base.messages.at(-1)?.seq ?? 0;
-      // The user's line, in view before the server has seen it.
-      setConversation({
-        ...base,
-        messages: [...base.messages, { seq: lastSeq + 1, role: 'user', created_at: null, text }],
-      });
-      await applyTurn(base, () => chatApi.sendMessage(base.id, text, language));
-    })();
+    }
+    const base = target;
+    setConversation(withUserLine(base, text, sideQuestion));
+    setConversations((list) => bumped(list, base));
+    if (base.id !== conversationId) {
+      // A conversation just created: into the URL, after the line
+      // above so the effect finds it already shown and fetches nothing.
+      navigate(`/chat/${base.id}`, { replace: true });
+    }
+    await applyTurn(base, () => turn(base.id));
+  };
 
   const confirm = (approved: boolean) => {
     if (!conversation) {
@@ -264,14 +428,11 @@ const ChatPage = () => {
       setError(describe(deleteError, t));
       return;
     }
-    if (conversation?.id === id) {
-      setConversation(null);
+    if (id === conversationId) {
+      navigate('/chat', { replace: true });
     }
     await refreshList();
   };
-
-  const pending = conversation?.pending?.calls[0] ?? null;
-  const trailing = note ? <ChatCommandNote note={note} /> : null;
 
   return (
     <main className="grid min-h-0 w-full flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[16rem_minmax(0,1fr)] md:grid-rows-1">
@@ -280,7 +441,7 @@ const ChatPage = () => {
         <ChatSidebar
           conversations={conversations}
           activeId={conversation?.id ?? null}
-          onSelect={(id) => void open(id)}
+          onSelect={select}
           onNew={startNew}
           onDelete={(id) => void remove(id)}
         />
@@ -292,6 +453,7 @@ const ChatPage = () => {
           {
             ...(bandHeight > 0 ? { '--chat-band-height': `${bandHeight}px` } : {}),
             ...(dockHeight > 0 ? { '--chat-dock-height': `${dockHeight}px` } : {}),
+            ...(scrollbarWidth > 0 ? { '--chat-scrollbar-width': `${scrollbarWidth}px` } : {}),
           } as CSSProperties
         }
         data-testid="chat-column"
@@ -305,27 +467,28 @@ const ChatPage = () => {
             onConfirm={confirm}
             className="h-full overflow-y-auto"
             contentClassName={cn('pt-[var(--chat-band-height,4rem)] pb-[var(--chat-dock-height,8rem)]', CHAT_FRAME)}
-            trailing={trailing}
+            onScrollBox={setScrollBox}
           />
         ) : (
           // What the agent is, centered in the empty thread (owner
-          // request 2026-09-26) — not a heading in the corner; a
-          // command's answer, when there is one, under it.
+          // request 2026-09-26) — not a heading in the corner.
           <div className="flex h-full flex-col items-center justify-center gap-6 px-6 py-6" data-testid="chat-empty">
             <p className="max-w-prose text-center text-sm leading-relaxed text-ink-3">
               {t('chat.empty.hint')}
             </p>
-            {trailing ? <div className={cn('w-full', CHAT_MAX_WIDTH)}>{trailing}</div> : null}
           </div>
         )}
-        {/* The band: the menus in the top right corner, each cluster on its own shade; only the buttons take clicks. */}
-        <div ref={setBand} className="pointer-events-none absolute right-0 top-0 px-4 pb-6 pt-4" data-testid="chat-band">
+        {/* The band: the menus in the top right corner, each cluster on its own shade; only the buttons take clicks.
+            Both floats stop short of the thread's scrollbar (SCROLLBAR_INSET), so they line up with the text, not the column. */}
+        <div ref={setBand} className={cn('pointer-events-none absolute top-0 px-4 pb-6 pt-4', SCROLLBAR_INSET)} data-testid="chat-band">
           <div className={cn('pointer-events-auto p-1', FLOAT_SHADE)} data-testid="chat-band-content">
             <HeaderControls />
           </div>
         </div>
-        {/* The dock: the wheel passes through outside the box's shade; only the box itself takes clicks. */}
-        <div ref={setDock} className="pointer-events-none absolute inset-x-0 bottom-0 pb-4 pt-10" data-testid="chat-dock">
+        {/* The dock: the wheel passes through outside the box's shade; only the box itself takes clicks.
+            A command's answer, when there is one, sits under the box, inside the same shade (its
+            height counts toward the dock's, so the thread's bottom inset grows with it). */}
+        <div ref={setDock} className={cn('pointer-events-none absolute bottom-0 left-0 pb-4 pt-10', SCROLLBAR_INSET)} data-testid="chat-dock">
           <div className={CHAT_FRAME}>
             <div className={cn('pointer-events-auto flex flex-col gap-3', FLOAT_SHADE)} data-testid="chat-dock-content">
               {error ? (
@@ -334,14 +497,15 @@ const ChatPage = () => {
                 </p>
               ) : null}
               <ChatComposer
-                disabled={working || pending !== null}
-                disabledHint={pending ? t('chat.composer.waitConfirm') : null}
+                blocked={working || pending !== null}
+                blockedHint={working ? t('chat.composer.waitTurn') : pending ? t('chat.composer.waitConfirm') : null}
                 working={working}
                 stopping={stopping}
                 onSend={send}
                 // Nothing to stop yet while the conversation itself is being created.
-                onStop={turnId ? stopTurn : undefined}
+                onStop={shownTurn ? stopTurn : undefined}
               />
+              {note ? <ChatCommandNote note={note} /> : null}
             </div>
           </div>
         </div>

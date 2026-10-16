@@ -17,6 +17,13 @@ from src.chat.harness import ChatHarness
 from src.chat.model import ModelReply
 from src.tiered_analysis import history
 
+#: How long a test waits for the scripted model to be asked. Generous:
+#: the first turn in a process pays the cold imports behind the system
+#: prompt's server status (the analysis stack, about 4 s) and the
+#: model-table lookup (litellm, about 3 s), which made a 5 s wait fail
+#: now and then (2026-10-14). A broken turn still fails, just later.
+COLD_TURN_WAIT = 30
+
 
 @pytest.fixture()
 def isolated_db(tmp_path):
@@ -56,10 +63,13 @@ class ScriptedModel:
         self.release = threading.Event()
         self.release.set()
         self.asked = threading.Event()
+        #: Every request's messages, in order.
+        self.requests: List[list] = []
 
     def complete(self, messages, tools, tool_choice="auto"):
         self.asked.set()
         self.release.wait(timeout=5)
+        self.requests.append(messages)
         return self.replies.pop(0)
 
 
@@ -126,7 +136,7 @@ class TestConversations:
         worker = threading.Thread(target=send)
         worker.start()
         try:
-            assert model.asked.wait(timeout=5)
+            assert model.asked.wait(timeout=COLD_TURN_WAIT)
             refused = client.delete(f"/chat/conversations/{conversation_id}")
             assert refused.status_code == 409
             assert refused.json()["detail"]["code"] == "busy"
@@ -198,7 +208,7 @@ class TestMessages:
         model.requests = []
         original = model.complete
 
-        def complete(messages, tools):
+        def complete(messages, tools, tool_choice="auto"):
             model.requests.append(messages)
             return original(messages, tools)
 
@@ -279,7 +289,7 @@ class TestStop:
         worker = threading.Thread(target=send)
         worker.start()
         try:
-            assert model.asked.wait(timeout=5)
+            assert model.asked.wait(timeout=COLD_TURN_WAIT)
             stopped = client.post(f"/chat/conversations/{conversation_id}/stop")
             assert stopped.status_code == 200
             assert stopped.json() == {"id": conversation_id, "stopped": True}
@@ -295,6 +305,8 @@ class TestStop:
         assert [m["role"] for m in messages] == ["user", "assistant", "tool", "stopped"]
         assert messages[2]["output"]["error"] == "stopped"
         assert messages[3]["text"].startswith("[The user stopped this reply")
+        # The page takes the server's word on whether a step would have followed.
+        assert messages[3]["late"] is False
         assert client.get(f"/chat/conversations/{conversation_id}").json()["user_input_count"] == 1
 
     def test_stop_with_nothing_running_is_false_and_unknown_is_404(self, client, scripted):
@@ -316,6 +328,7 @@ class TestContextAndCompact:
         assert (body["llm"], body["source"], body["window"], body["max_tokens"]) == ("gemini/test-model", "env", 50_000, 25_000)
         assert body["conversation_tokens"] == 0 and body["used_tokens"] > 0
         assert body["compact_at_tokens"] == 25_000 * 85 // 100
+        assert "spent_tokens" not in body and isinstance(body["percent"], float)
 
         conversation_id = client.post("/chat/conversations").json()["id"]
         client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "hi"})
@@ -335,17 +348,27 @@ class TestContextAndCompact:
         compacted = client.post(f"/chat/conversations/{conversation_id}/compact", json={"language": "en"})
         assert compacted.status_code == 200
         rows = compacted.json()["messages"]
-        assert [m["role"] for m in rows] == ["user", "assistant", "summary"]
-        summary = rows[2]
+        assert [m["role"] for m in rows] == ["user", "assistant", "user", "summary"]
+        assert rows[2]["text"] == "/compact"
+        summary = rows[3]
         assert summary["text"] == "the summary"
         assert summary["compacted"] == {"trigger": "manual", "first_seq": 1, "last_seq": 2, "tokens_before": summary["compacted"]["tokens_before"]}
         assert summary["usage"] == {"input_tokens": 20, "output_tokens": 4}
         assert summary["llm"] == "fake" and summary["error"] is None and summary["transcript_chars"] > 0
-        transcript = client.get(f"/chat/conversations/{conversation_id}/messages/3/transcript").json()
+        transcript = client.get(f"/chat/conversations/{conversation_id}/messages/4/transcript").json()
         assert transcript["stage"] == "summary" and transcript["output"] == "the summary"
         assert compacted.json()["total_tokens"] == 48
         assert client.post("/chat/conversations/nope/compact", json={}).status_code == 404
         assert client.post(f"/chat/conversations/{conversation_id}/compact", json={"language": "xx"}).status_code == 422
+
+    def test_a_stopped_row_carries_the_servers_late_flag(self):
+        from api.v1.endpoints.chat import _message_view
+        from src.chat.harness import STOPPED_LATE_MESSAGE, STOPPED_MESSAGE, STOPPED_ROLE
+
+        late = _message_view({"seq": 4, "role": STOPPED_ROLE, "content": STOPPED_LATE_MESSAGE})
+        cut = _message_view({"seq": 4, "role": STOPPED_ROLE, "content": STOPPED_MESSAGE})
+        assert late["late"] is True and cut["late"] is False
+        assert "late" not in _message_view({"seq": 1, "role": "user", "content": "hi"})
 
     def test_compact_while_a_call_waits_is_refused(self, client, scripted):
         scripted([call("delete_run", {"run_id": "q1"})])
@@ -354,3 +377,40 @@ class TestContextAndCompact:
         assert client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "cancel q1"}).json()["pending"]
         refused = client.post(f"/chat/conversations/{conversation_id}/compact", json={})
         assert refused.status_code == 409 and refused.json()["detail"]["code"] == "confirmation_pending"
+
+
+class TestSideQuestion:
+    def test_side_question_rows_are_flagged_and_the_next_reply_never_sees_them(self, client, scripted):
+        model = scripted([text("hello"), text("the aside"), text("again")])
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "hi"})
+        asked = client.post(f"/chat/conversations/{conversation_id}/side_question", json={"text": "btw?", "language": "en"})
+        assert asked.status_code == 200
+        rows = asked.json()["messages"]
+        assert [(m["role"], m.get("side_question")) for m in rows] == [
+            ("user", None), ("assistant", None), ("user", True), ("assistant", True),
+        ]
+        assert rows[2]["text"] == "btw?" and rows[3]["text"] == "the aside"
+        assert rows[3]["usage"] == {"input_tokens": 20, "output_tokens": 4} and rows[3]["transcript_chars"] > 0
+        assert asked.json()["total_tokens"] == 48 and asked.json()["user_input_count"] == 2
+        transcript = client.get(f"/chat/conversations/{conversation_id}/messages/4/transcript").json()
+        assert transcript["stage"] == "side_question" and transcript["output"] == "the aside"
+        assert "btw?" in transcript["input"]
+
+        # /context does not count it, and the next reply is not shown it.
+        with_aside = client.get("/chat/context", params={"conversation_id": conversation_id}).json()["used_tokens"]
+        client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "more"})
+        assert not any("btw?" in str(m.get("content")) or "the aside" in str(m.get("content")) for m in model.requests[-1])
+        assert with_aside < client.get("/chat/context", params={"conversation_id": conversation_id}).json()["used_tokens"]
+
+    def test_side_question_refusals(self, client, scripted, monkeypatch):
+        scripted([call("delete_run", {"run_id": "q1"})])
+        history.create_run("q1", "AAPL", inputs={"tier": 1}, status="queued")
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        assert client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "cancel q1"}).json()["pending"]
+        refused = client.post(f"/chat/conversations/{conversation_id}/side_question", json={"text": "which?"})
+        assert refused.status_code == 409 and refused.json()["detail"]["code"] == "confirmation_pending"
+        assert client.post("/chat/conversations/nope/side_question", json={"text": "hi"}).status_code == 404
+        assert client.post(f"/chat/conversations/{conversation_id}/side_question", json={"text": "  "}).status_code == 422
+        monkeypatch.delenv("MAIN_LLM")
+        assert client.post(f"/chat/conversations/{conversation_id}/side_question", json={"text": "hi"}).status_code == 400

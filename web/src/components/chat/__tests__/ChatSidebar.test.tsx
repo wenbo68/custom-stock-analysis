@@ -62,8 +62,8 @@ describe('ChatSidebar', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).not.toHaveTextContent('show my NVDA runs');
     expect(factLines(rows[0])).toEqual([
-      expect.stringMatching(/^(user inputs|用户输入): 2$/),
-      expect.stringMatching(/^(total tokens|总 tokens): 3000$/),
+      expect.stringMatching(/^(convo turns|对话轮次): 2$/),
+      expect.stringMatching(/^(tokens spent|消耗 tokens): 3000$/),
       expect.stringMatching(new RegExp(`^(start date|开始日期): ${formatDateTime('2026-09-21T10:00:00')}$`)),
       expect.stringMatching(new RegExp(`^(end date|结束日期): ${formatDateTime('2026-09-21T10:04:00')}$`)),
     ]);

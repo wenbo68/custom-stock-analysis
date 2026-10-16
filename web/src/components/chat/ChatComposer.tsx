@@ -7,17 +7,22 @@ import { CHAT_SURFACE_1 } from './chatSurfaces';
 import { matchingCommands } from './commands';
 
 export interface ChatComposerProps {
-  /** Nothing can be sent right now: a turn is running or a question waits. */
-  disabled: boolean;
-  /** Why, shown under the box when disabled. */
-  disabledHint?: string | null;
+  /** No message can be sent right now — a reply is awaited or a question
+   *  waits — though typing goes on and a command line still sends
+   *  (owner request 2026-10-15). */
+  blocked: boolean;
+  /** Why, shown inside the box in place of the key hint while blocked
+   *  (owner request 2026-10-13: not a line under the box). */
+  blockedHint?: string | null;
   /** A turn is in flight: the send arrow becomes a stop button. */
   working?: boolean;
   /** The stop was asked and the turn has not yet come back: the server
    *  lets the step in flight finish first, so this can take a while, and
    *  the stop button gives way to an unclickable "…" meanwhile. */
   stopping?: boolean;
-  onSend: (text: string) => void;
+  /** Returns true when the line was taken; false leaves it in the box
+   *  (a refused command, an unknown one), so nothing typed is lost. */
+  onSend: (text: string) => boolean;
   onStop?: () => void;
 }
 
@@ -79,23 +84,31 @@ const measureDraft = (box: HTMLTextAreaElement, draft: string): Measured => {
 // grows upward with the text up to MAX_ROWS lines, then scrolls. The send
 // arrow sits beside a one-line draft; once the text needs a second line
 // (typed or wrapped) the arrow drops to its own row so text never runs
-// into it. The draft stays when a send fails so nothing typed is lost.
-// While a turn runs the arrow is a stop button in its place (owner
-// request 2026-10-12, after Claude Code's Esc): one click asks the
-// server to stop, and the button stays, disabled, until the turn comes
-// back stopped.
+// into it. The draft stays when the page refuses the line — a command
+// that cannot run yet, an unknown one — so nothing typed is lost.
+// While a reply is awaited or a question waits for the user's answer
+// the box still takes typing (owner request 2026-10-15, after Claude
+// Code: the next message can be drafted meanwhile) but sends no
+// message: Enter on a message does nothing, and the reason stands in
+// the empty box in place of the key hint (owner request 2026-10-13). A
+// command line is the exception — it sends as ever, and the page
+// decides whether it runs now or after the reply. While a turn runs
+// the arrow is a stop button in its place (owner request 2026-10-12,
+// after Claude Code's Esc): one click asks the server to stop, and the
+// button stays, disabled, until the turn comes back stopped.
 //
 // A draft that starts with "/" is a command (commands.ts, 2026-10-13):
 // while the word is being typed a menu over the box lists the commands
 // it could be, one line each; a click fills the word in and Tab fills
 // in the first. Enter sends the line as typed, and the page runs it.
-export const ChatComposer = ({ disabled, disabledHint, working = false, stopping = false, onSend, onStop }: ChatComposerProps) => {
+export const ChatComposer = ({ blocked, blockedHint, working = false, stopping = false, onSend, onStop }: ChatComposerProps) => {
   const { t } = useUiLanguage();
   const [draft, setDraft] = useState('');
   const [isMultiline, setMultiline] = useState(false);
   const boxRef = useRef<HTMLTextAreaElement>(null);
-  const canSend = !disabled && draft.trim().length > 0;
-  const commands = disabled ? [] : matchingCommands(draft);
+  const isCommandLine = draft.trimStart().startsWith('/');
+  const canSend = draft.trim().length > 0 && (!blocked || isCommandLine);
+  const commands = matchingCommands(draft);
 
   const pick = (name: string) => {
     setDraft(`/${name}`);
@@ -112,8 +125,9 @@ export const ChatComposer = ({ disabled, disabledHint, working = false, stopping
     if (!canSend) {
       return;
     }
-    onSend(draft.trim());
-    setDraft('');
+    if (onSend(draft.trim())) {
+      setDraft('');
+    }
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -147,7 +161,10 @@ export const ChatComposer = ({ disabled, disabledHint, working = false, stopping
                 onClick={() => pick(command.name)}
                 className="flex w-full cursor-pointer gap-3 rounded px-2 py-1 text-left hover:bg-surface-2"
               >
-                <span className="font-mono font-semibold text-ink-1">/{command.name}</span>
+                <span className="font-mono font-semibold text-ink-1">
+                  /{command.name}
+                  {command.argumentKey ? <span className="font-normal text-ink-4"> &lt;{t(command.argumentKey)}&gt;</span> : null}
+                </span>
                 <span className="text-ink-4">{t(command.descriptionKey)}</span>
               </button>
             </li>
@@ -164,8 +181,7 @@ export const ChatComposer = ({ disabled, disabledHint, working = false, stopping
           data-testid="chat-input"
           value={draft}
           rows={rows}
-          disabled={disabled}
-          placeholder={t('chat.composer.placeholder')}
+          placeholder={blocked && blockedHint ? blockedHint : t('chat.composer.placeholder')}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={onKeyDown}
           className={cn(
@@ -174,7 +190,6 @@ export const ChatComposer = ({ disabled, disabledHint, working = false, stopping
             // row it must not be a growing flex item, or the browser sizes
             // it from `rows` and ignores the measured height.
             !isMultiline && 'flex-1',
-            disabled && 'opacity-60',
           )}
         />
         {working && stopping ? (
@@ -214,7 +229,6 @@ export const ChatComposer = ({ disabled, disabledHint, working = false, stopping
           </button>
         )}
       </div>
-      {disabled && disabledHint ? <p className="text-xs text-ink-4">{disabledHint}</p> : null}
     </div>
   );
 };

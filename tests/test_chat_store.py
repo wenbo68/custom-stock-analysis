@@ -150,11 +150,17 @@ class TestMessages:
         assert len(title) == store.TITLE_MAX_CHARS
         assert title.endswith("…")
 
-    def test_conversations_list_most_recently_touched_first(self, isolated_db):
+    def test_conversations_list_the_one_the_user_last_wrote_in_first(self, isolated_db):
         first = store.create_conversation()["id"]
         second = store.create_conversation()["id"]
         store.append_message(first, {"role": "user", "content": "later"})
         assert [c["id"] for c in store.list_conversations()] == [first, second]
+        store.append_message(second, {"role": "user", "content": "latest"})
+        assert [c["id"] for c in store.list_conversations()] == [second, first]
+        # A reply landing in the first does not lift it: only the user's
+        # own lines order the list (owner request 2026-10-15).
+        store.append_message(first, {"role": "assistant", "content": "answer"})
+        assert [c["id"] for c in store.list_conversations()] == [second, first]
 
 
 class TestPending:

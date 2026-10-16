@@ -124,19 +124,24 @@ def create_conversation() -> Dict[str, Any]:
 
 
 def list_conversations() -> List[Dict[str, Any]]:
-    """Every conversation, most recently touched first, each with the
-    facts the history rows show (``_stats_by_conversation``)."""
+    """Every conversation, the one the user most recently wrote in
+    first (owner request 2026-10-15: not the one whose reply most
+    recently landed — ``ended_at`` orders, and a conversation with no
+    message yet sits by when it was created), each with the facts the
+    history rows show (``_stats_by_conversation``)."""
     from src.storage import ChatConversationRecord
 
     with _session() as session:
         stats = _stats_by_conversation(session)
-        rows = (
-            session.query(ChatConversationRecord)
-            .order_by(ChatConversationRecord.updated_at.desc(),
-                      ChatConversationRecord.created_at.desc())
-            .all()
-        )
-        return [_conversation_view(row, stats.get(row.id)) for row in rows]
+        rows = session.query(ChatConversationRecord).all()
+        views = [_conversation_view(row, stats.get(row.id)) for row in rows]
+    return sorted(views, key=_last_written, reverse=True)
+
+
+def _last_written(view: Dict[str, Any]) -> datetime:
+    """When the user last wrote in the conversation, else when it was
+    created (both ISO strings from ``_iso``)."""
+    return datetime.fromisoformat(view["ended_at"] or view["created_at"])
 
 
 def get_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:

@@ -32,7 +32,7 @@ class ConversationSummary(BaseModel):
 
 
 class ConversationList(BaseModel):
-    items: List[ConversationSummary] = Field(description="Most recently touched first.")
+    items: List[ConversationSummary] = Field(description="The conversation the user most recently wrote in first.")
 
 
 class ToolCall(BaseModel):
@@ -81,6 +81,14 @@ class ChatMessage(BaseModel):
     ))
     notice: Optional[str] = Field(default=None, description="Assistant rows only: `tool_call_limit` when the turn hit the tool-call limit.")
     compacted: Optional[CompactedFacts] = Field(default=None, description="Summary rows only: what the summary stands for.")
+    late: Optional[bool] = Field(default=None, description=(
+        "Stopped rows only: true when the stop landed after the turn's last step had already finished "
+        "(a final reply, or a requested summary), so nothing was cut short; false when a step would have followed."
+    ))
+    side_question: Optional[bool] = Field(default=None, description=(
+        "User, assistant and stopped rows: true when the row belongs to a side question (the page's `/btw`). "
+        "The page shows it where it happened; no later LLM call, measure or summary carries it."
+    ))
     tool_call_id: Optional[str] = None
     name: Optional[str] = Field(default=None, description="Tool rows: the tool's name.")
     output: Optional[Any] = Field(default=None, description="Tool rows: what the tool answered (an `error` key on a refusal or miss).")
@@ -168,7 +176,7 @@ class ContextUsageView(BaseModel):
     output_limit: Optional[int] = Field(default=None, description="The model's output limit, when the table gives one.")
     max_tokens: int = Field(description="How much a request may hold.")
     used_tokens: int = Field(description="The estimated size of the next request.")
-    percent: int = Field(description="used_tokens as a share of max_tokens, rounded.")
+    percent: float = Field(description="used_tokens as a share of max_tokens, to one decimal.")
     compact_at_tokens: int = Field(description="Past this the bot summarizes the conversation by itself.")
     compact_at_percent: int
     chars_per_token: float = Field(description="The ratio the estimate used.")

@@ -40,6 +40,15 @@ export type ChatMessage = {
   /** Summary rows: what the summary stands for. With `error` set the
    *  summary failed and the model still sees the full history. */
   compacted?: ChatCompactedFacts | null;
+  /** Stopped rows: the stop landed after the turn's last step had
+   *  already finished (a final reply, or a requested summary), so
+   *  nothing was cut short. The server's own word (2026-10-14); the
+   *  page never works it out from the row before. */
+  late?: boolean | null;
+  /** User, assistant and stopped rows: the row belongs to a side
+   *  question (the /btw command, 2026-10-16). The page shows it where
+   *  it happened; no later LLM call, measure or summary carries it. */
+  side_question?: boolean | null;
   /** Assistant rows: the tools the model asked for. */
   tool_calls?: ChatToolCall[];
   usage?: ChatUsage | null;
@@ -111,6 +120,7 @@ export type ChatContextUsage = {
   output_limit: number | null;
   max_tokens: number;
   used_tokens: number;
+  /** used_tokens as a share of max_tokens, to one decimal. */
   percent: number;
   /** Past this the bot summarizes the conversation by itself. */
   compact_at_tokens: number;
@@ -192,6 +202,18 @@ export const chatApi = {
     const response = await apiClient.post<ChatConversation>(
       `/api/v1/chat/conversations/${id}/compact`,
       { language },
+      { timeout: TURN_TIMEOUT_MS },
+    );
+    return response.data;
+  },
+
+  // Ask a side question (the /btw command): the question as the user's
+  // line and one LLM call with no tools as its reply, both flagged so
+  // no later call sees them; the answer is the whole conversation.
+  sideQuestion: async (id: string, text: string, language: UiLanguage): Promise<ChatConversation> => {
+    const response = await apiClient.post<ChatConversation>(
+      `/api/v1/chat/conversations/${id}/side_question`,
+      { text, language },
       { timeout: TURN_TIMEOUT_MS },
     );
     return response.data;

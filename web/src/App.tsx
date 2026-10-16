@@ -30,7 +30,9 @@ function App() {
             <Route element={<HeaderLayout />}>
               <Route path="/" element={<AnalysisPage />} />
             </Route>
-            <Route path="/chat" element={<ChatPage />} />
+            {/* The open conversation's id rides in the URL, so a refresh
+                or a shared link lands on it (owner request 2026-10-13). */}
+            <Route path="/chat/:conversationId?" element={<ChatPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

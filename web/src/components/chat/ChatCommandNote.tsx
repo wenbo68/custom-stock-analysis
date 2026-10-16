@@ -3,15 +3,19 @@ import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { cn } from '../../utils/cn';
 import { CHAT_COMMANDS } from './commands';
 import { CHAT_SURFACE_1 } from './chatSurfaces';
+import { TypingDots } from './ChatThread';
 
 // What a page-side command answers with (owner request 2026-10-13):
 // /help lists the commands, /context sizes the next request against
-// the model's max. The answer is a quiet panel at the end of the
-// thread, in the fact-line styling of a tool step — quiet label, bright
-// value — and it is the page's, not the conversation's: nothing is
-// stored, the model never sees it, and the next message or command
-// replaces it.
-export type ChatNote = { kind: 'help' } | { kind: 'context'; usage: ChatContextUsage };
+// the model's max. The answer is a quiet panel under the message box
+// (owner request 2026-10-15: part of the box, not of the thread), in
+// the fact-line styling of a tool step — quiet label, bright value —
+// and it is the page's, not the conversation's: nothing is stored, the
+// model never sees it, and the next message or command replaces it.
+// A /context still being measured is the pulsing dots alone, the same
+// sign as a reply still being written (owner request 2026-10-15: the
+// server takes a moment, unlike /help).
+export type ChatNote = { kind: 'help' } | { kind: 'context'; usage: ChatContextUsage | null };
 
 const FACT_LABEL = 'text-ink-4';
 const FACT_VALUE = 'font-semibold text-ink-1';
@@ -34,7 +38,10 @@ const HelpLines = () => {
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
         {CHAT_COMMANDS.map((command) => (
           <div key={command.name} className="contents">
-            <dt className={cn('font-mono', FACT_VALUE)}>/{command.name}</dt>
+            <dt className={cn('font-mono', FACT_VALUE)}>
+              /{command.name}
+              {command.argumentKey ? <span className={cn('font-normal', FACT_LABEL)}> &lt;{t(command.argumentKey)}&gt;</span> : null}
+            </dt>
             <dd className={FACT_LABEL}>{t(command.descriptionKey)}</dd>
           </div>
         ))}
@@ -43,34 +50,38 @@ const HelpLines = () => {
   );
 };
 
-// Used against the max first, then where the max came from — the
-// litellm table's window minus the reply's reserve, or half a window
-// when the table gives no usable output limit, or half the window the
-// CHAT_CONTEXT_WINDOW variable names for a model litellm does not
-// know — then the three parts, the ratio the estimate used, and the
-// line past which the bot summarizes by itself.
-const ContextLines = ({ usage }: { usage: ChatContextUsage }) => {
+// Three lines, as sums (owner request 2026-10-15): the model; the
+// window as "window - reserved = max", where the reserve is whatever
+// the max leaves of the window — the table's output limit, or half the
+// window when no usable output limit is known (src/chat/context.py);
+// and the usage as "used (percent) = instructions + tools +
+// conversation". The bar under the title fills to the used share and
+// marks the line past which the bot summarizes by itself.
+const ContextLines = ({ usage }: { usage: ChatContextUsage | null }) => {
   const { t } = useUiLanguage();
-  const max =
-    usage.source === 'env'
-      ? t('chat.context.maxEnv', { window: tokens(usage.window) })
-      : usage.output_limit != null && usage.output_limit < usage.window
-        ? t('chat.context.maxKnown', { window: tokens(usage.window), output: tokens(usage.output_limit) })
-        : t('chat.context.maxKnownHalf', { window: tokens(usage.window) });
+  if (!usage) {
+    return <TypingDots testId="chat-note-waiting" />;
+  }
   const lines: [string, string][] = [
     [t('chat.context.llm'), usage.llm ?? t('chat.context.noLlm')],
-    [t('chat.context.used'), t('chat.context.usedValue', { used: tokens(usage.used_tokens), max: tokens(usage.max_tokens), percent: usage.percent })],
-    [t('chat.context.max'), max],
     [
-      t('chat.context.parts'),
-      t('chat.context.partsValue', {
+      t('chat.context.window'),
+      t('chat.context.windowValue', {
+        window: tokens(usage.window),
+        reserved: tokens(usage.window - usage.max_tokens),
+        max: tokens(usage.max_tokens),
+      }),
+    ],
+    [
+      t('chat.context.usage'),
+      t('chat.context.usageValue', {
+        used: tokens(usage.used_tokens),
+        percent: usage.percent.toFixed(1),
         system: tokens(usage.system_prompt_tokens),
         tools: tokens(usage.tools_tokens),
         conversation: tokens(usage.conversation_tokens),
       }),
     ],
-    [t('chat.context.estimate'), t(usage.calibrated ? 'chat.context.estimateMeasured' : 'chat.context.estimateAssumed', { cpt: usage.chars_per_token })],
-    [t('chat.context.compactAt'), t('chat.context.compactAtValue', { percent: usage.compact_at_percent, tokens: tokens(usage.compact_at_tokens) })],
   ];
   return (
     <>

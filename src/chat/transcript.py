@@ -62,7 +62,11 @@ def transcript_view(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {
         "call_number": message.get("seq"),
         "created_at": message.get("created_at"),
-        "stage": "summary" if message.get("role") == "summary" else "chat",
+        "stage": (
+            "summary" if message.get("role") == "summary"
+            else "side_question" if message.get("side_question")
+            else "chat"
+        ),
         "llm": message.get("llm"),
         "temperature": transcript.get("temperature"),
         "time_ms": message.get("time_ms"),
