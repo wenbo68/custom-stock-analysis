@@ -7,29 +7,33 @@ central-bank language, policy moves, geopolitics, data surprises —
 before it is fully reflected in the series. It complements, never
 replaces, the numeric macro report.
 
-Sources (owner decision 2026-08-17): AlphaVantage's NEWS_SENTIMENT
-endpoint when ``ALPHAVANTAGE_API_KEY`` is configured — it takes a real
-time range, so one run fetches the full ``WORLD_WINDOW_DAYS``
-calendar-day window directly, one request per macro topic in
-``WORLD_TOPICS`` (the API ANDs a multi-topic list, so a union needs
-separate calls; four calls/day fits the free tier's 25/day because the
-screened result is day-cached). Key absent, or AlphaVantage down: the
-keyless backup is Yahoo's ^GSPC (S&P 500) news tab via yfinance — no
-date control, but its newest ``NEWS_FETCH_COUNT`` articles reach ~3-4
-days back, comfortably covering the short window. Every fetch merges
-into the rolling on-disk article pool (``world_articles_*.json``,
-merge-by-URL, pruned past ``ARTICLE_RETENTION_DAYS``) whose depth
-serves the fetch-failure fallback. The screen judges EVERYTHING in the
-window — no sampling; ``MAX_SCREEN_ARTICLES`` is a pure fuse that,
-when tripped, spreads across the window's days so no single flood-day
-swallows the budget (warned). The payload publishes the ACTUAL date
-span screened
+Sources: Google News' RSS search feed (keyless; owner decision
+2026-10-18, after AlphaVantage moved its NEWS_SENTIMENT endpoint behind
+its paid plans). The feed takes a date operator (``after:``), so one
+run covers the full ``WORLD_WINDOW_DAYS`` calendar-day window directly,
+one request per macro query in ``WORLD_QUERIES`` (the queries overlap
+on purpose; the merge is by URL). An item carries a headline, a link,
+a publisher and a date — no abstract (the feed's description is the
+headline again), so the screen judges headlines. Google News down: the
+keyless backup is Yahoo Finance's news search via yfinance
+(``yf.Search``; the per-ticker ``get_news`` has returned nothing since
+2026-10-02 on every yfinance 1.x) — no date control, but its newest
+``NEWS_FETCH_COUNT`` articles reach ~2-3 days back, covering the short
+window. Every fetch merges into the rolling on-disk article pool
+(``world_articles_*.json``, merge-by-URL, pruned past
+``ARTICLE_RETENTION_DAYS``) whose depth serves the fetch-failure
+fallback. The screen judges EVERYTHING in the window — no sampling;
+``MAX_SCREEN_ARTICLES`` is a pure fuse that, when tripped, spreads
+across the window's days so no single flood-day swallows the budget
+(warned). The payload publishes the ACTUAL date span screened
 (``oldest``/``newest``); ``window_days`` stays absent on purpose. A
 failed fetch falls back to the pool (warned, never day-cached) — only
-an empty pool reads UNAVAILABLE. History: the first build (2026-08-16)
-used Finnhub's general feed, dropped because it has no date range at
-all (newest ~100 only, verified live 2026-08-17 — ``minId`` merely
-filters that same set).
+an empty pool reads UNAVAILABLE; a fetch that answers with zero
+articles is warned and never day-cached either. History: the first
+build (2026-08-16) used Finnhub's general feed, dropped because it has
+no date range at all (newest ~100 only, verified live 2026-08-17 —
+``minId`` merely filters that same set); AlphaVantage's NEWS_SENTIMENT
+served from 2026-08-17 until it went premium (first seen 2026-10-13).
 
 The screen is the company-news pipeline with the world lens
 (``news_screen.WORLD_PROMPTS``): judge each article (about the macro
@@ -70,10 +74,12 @@ TEXTUAL kind: never actionable, never feeds numeric consumers.
 """
 from __future__ import annotations
 
+import email.utils
 import re
 import threading
 import time
-from datetime import date, timedelta
+import xml.etree.ElementTree as ET
+from datetime import date, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from src.languages import DEFAULT_LANGUAGE
@@ -95,19 +101,31 @@ from .company_news import (
     normalize_news_entry,
 )
 from ..cache_store import CacheStore, default_cache_store
-from ..run_context import data_key
 
-ALPHAVANTAGE_NEWS_URL = "https://www.alphavantage.co/query"
-_ALPHAVANTAGE_TIMEOUT_SECONDS = 30
+GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
+_GOOGLE_NEWS_TIMEOUT_SECONDS = 30
+#: Politeness pause between the lens requests — the feed publishes no
+#: rate limit, and one fetch a day is all the day cache ever needs.
+_GOOGLE_NEWS_PAUSE_SECONDS = 1.0
+#: The English (US) edition of the feed: the screen prompts and the
+#: spam blacklist are written against English headlines; the card's
+#: own sentences are written in the run's language by the summary call.
+GOOGLE_NEWS_EDITION = {"hl": "en-US", "gl": "US", "ceid": "US:en"}
+#: Honest identification; the feed answers python-requests' default
+#: too (verified live 2026-10-18).
+_USER_AGENT = "custom-stock-analysis (world news fetch)"
 
-#: The macro lenses fetched from AlphaVantage, one request each — the
-#: API ANDs a comma-joined topics list ("simultaneously cover", per
-#: the docs), so a union of topics means separate calls.
-WORLD_TOPICS = (
-    "economy_macro",
-    "economy_monetary",
-    "economy_fiscal",
-    "financial_markets",
+#: The macro lenses, one feed query each (Google's search syntax:
+#: quoted phrases, OR). They overlap on purpose — the merge is by URL,
+#: so a story matching two lenses is fetched once. Measured 2026-10-18:
+#: 100 items per query (the feed's cap), ~390 unique across four,
+#: spread over the window's days.
+WORLD_QUERIES = (
+    '"federal reserve" OR "interest rates" OR inflation OR "central bank"',
+    'tariffs OR "trade war" OR sanctions OR geopolitics',
+    '"stock market" OR "wall street" OR "treasury yields" OR "bond market"',
+    'economy OR GDP OR "jobs report" OR unemployment OR recession',
+    '"oil prices" OR OPEC OR "dollar index" OR "exchange rate"',
 )
 
 #: Lookback in CALENDAR days, today inclusive (owner decision
@@ -122,10 +140,10 @@ WORLD_TOPICS = (
 #: 2 (owner decision 2026-09-26).
 WORLD_WINDOW_DAYS = 2
 
-#: The index whose Yahoo news tab serves as the keyless backup feed —
-#: S&P 500 coverage is the closest thing Yahoo has to a general
-#: market-news stream.
-YAHOO_WORLD_SYMBOL = "^GSPC"
+#: The Yahoo Finance news-search query that serves as the backup feed
+#: — "S&P 500" coverage is the closest thing Yahoo has to a general
+#: market-news stream (measured 2026-10-18: ~50 articles, 2 days deep).
+YAHOO_WORLD_QUERY = "S&P 500"
 
 #: PURE safety fuse: judging everything in the window is the design —
 #: no sampling (measured 2026-08-17: the 2-day window runs ~1.3-1.9k
@@ -189,102 +207,113 @@ def is_world_spam(entry: Mapping[str, Any]) -> bool:
     return bool(SPAM_TITLE_RE.search(str(entry.get("title") or "")))
 
 
-def normalize_alphavantage_entry(
-    entry: Mapping[str, Any]
+def parse_google_news_rss(xml_text: str) -> List[Dict[str, Optional[str]]]:
+    """The items of one Google News RSS document, each as the raw
+    {title, link, pubDate, source} mapping (verified live 2026-10-18:
+    ``title`` is "Headline - Publisher", ``link`` a news.google.com
+    redirect unique per story, ``pubDate`` RFC 2822, ``source`` the
+    publisher's name). Anything that is not an RSS document — a block
+    page, an error page — is a ValueError: a failure for the backup
+    feed to take over, never an empty news day."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise ValueError(f"not an RSS document: {exc}") from exc
+    if root.find("channel") is None:
+        raise ValueError("not an RSS document: no channel element")
+    items: List[Dict[str, Optional[str]]] = []
+    for item in root.iter("item"):
+        source = item.find("source")
+        items.append(
+            {
+                "title": item.findtext("title"),
+                "link": item.findtext("link"),
+                "pubDate": item.findtext("pubDate"),
+                "source": source.text if source is not None else None,
+            }
+        )
+    return items
+
+
+def normalize_google_news_item(
+    item: Mapping[str, Any]
 ) -> Dict[str, Optional[str]]:
-    """One AlphaVantage NEWS_SENTIMENT feed item -> the shared
-    five-field entry shape. Fields (verified live 2026-08-17): title,
-    url, source, summary, and ``time_published`` as "20260817T085901" —
-    only its date part matters here. Anything missing stays None (the
-    caller decides what is fatal)."""
-    stamp = str(entry.get("time_published") or "")
-    pub_date = (
-        f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}"
-        if len(stamp) >= 8 and stamp[:8].isdigit()
-        else None
-    )
+    """One Google News RSS item -> the shared five-field entry shape.
+    The headline loses its " - Publisher" suffix (the publisher is its
+    own field); the date is the UTC day of ``pubDate``; ``summary`` is
+    None because the feed carries no abstract. Anything missing stays
+    None (the caller decides what is fatal)."""
+    publisher = str(item.get("source") or "").strip() or None
+    title = str(item.get("title") or "").strip()
+    if publisher:
+        suffix = f" - {publisher}"
+        if title.endswith(suffix):
+            title = title[: -len(suffix)].rstrip()
+    stamp = str(item.get("pubDate") or "").strip()
+    pub_date: Optional[str] = None
+    if stamp:
+        try:
+            published = email.utils.parsedate_to_datetime(stamp)
+        except (TypeError, ValueError):
+            published = None
+        if published is not None:
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=timezone.utc)
+            pub_date = published.astimezone(timezone.utc).date().isoformat()
     return {
-        "title": entry.get("title") or None,
-        "publisher": entry.get("source") or None,
-        "url": entry.get("url") or None,
+        "title": title or None,
+        "publisher": publisher,
+        "url": item.get("link") or None,
         "date": pub_date,
-        "summary": entry.get("summary") or None,
+        "summary": None,
     }
 
 
-def _alphavantage_world_news_loader() -> List[Dict[str, Optional[str]]]:
-    """Macro/market news from AlphaVantage's NEWS_SENTIMENT endpoint —
-    the primary feed. It takes a real time range (``time_from``,
-    YYYYMMDDTHHMM), so one run covers the full window directly: one
-    request per WORLD_TOPICS lens, merged and deduped by URL. The
-    2-day window sits well inside the endpoint's complete zone (its
-    per-topic newest-1000 cap only truncates ~4+ days back)."""
+def _google_news_world_loader() -> List[Dict[str, Optional[str]]]:
+    """Macro/market news from Google News' RSS search feed — the
+    primary feed. Its ``after:`` operator takes a date, so one run
+    covers the full window directly: one request per WORLD_QUERIES
+    lens, merged and deduped by URL. The operator is asked one day
+    wider than the window (its day boundary is the edition's, not
+    UTC); the collect step cuts the pool to the window anyway."""
     import requests
 
-    api_key = data_key("alphavantage")
-    if not api_key:
-        raise RuntimeError("ALPHAVANTAGE_API_KEY is not set")
-    since = date.today() - timedelta(days=WORLD_WINDOW_DAYS - 1)
+    since = date.today() - timedelta(days=WORLD_WINDOW_DAYS)
     merged: Dict[str, Dict[str, Optional[str]]] = {}
-    for index, topic in enumerate(WORLD_TOPICS):
+    for index, query in enumerate(WORLD_QUERIES):
         if index:
-            # The free tier throttles at 1 request/second (observed
-            # live 2026-08-17: back-to-back topic requests tripped it);
-            # pace the walk so the primary feed never trips itself.
-            time.sleep(1.2)
+            time.sleep(_GOOGLE_NEWS_PAUSE_SECONDS)
         response = requests.get(
-            ALPHAVANTAGE_NEWS_URL,
-            params={
-                "function": "NEWS_SENTIMENT",
-                "topics": topic,
-                "time_from": f"{since.strftime('%Y%m%d')}T0000",
-                "sort": "LATEST",
-                "limit": "1000",
-                "apikey": api_key,
-            },
-            timeout=_ALPHAVANTAGE_TIMEOUT_SECONDS,
+            GOOGLE_NEWS_RSS_URL,
+            params={"q": f"{query} after:{since.isoformat()}", **GOOGLE_NEWS_EDITION},
+            timeout=_GOOGLE_NEWS_TIMEOUT_SECONDS,
+            headers={"User-Agent": _USER_AGENT},
         )
         response.raise_for_status()
-        raw = response.json()
-        feed = raw.get("feed") if isinstance(raw, Mapping) else None
-        if not isinstance(feed, list):
-            # Rate-limit and error responses come back HTTP 200 with an
-            # explanatory note instead of a feed — a failure (the backup
-            # feed takes over), never an empty news day.
-            note = ""
-            if isinstance(raw, Mapping):
-                note = str(
-                    raw.get("Information")
-                    or raw.get("Note")
-                    or raw.get("Error Message")
-                    or ""
-                )[:200]
+        try:
+            items = parse_google_news_rss(response.text)
+        except ValueError as exc:
             raise ValueError(
-                f"AlphaVantage returned no feed for topic {topic}:"
-                f" {note or 'unexpected response shape'}"
-            )
-        for item in feed:
-            if not isinstance(item, Mapping):
-                continue
-            entry = normalize_alphavantage_entry(item)
+                f"Google News returned no feed for query {query!r}: {exc}"
+            ) from exc
+        for item in items:
+            entry = normalize_google_news_item(item)
             if entry["url"]:
                 merged.setdefault(entry["url"], entry)
     return list(merged.values())
 
 
 def _yahoo_world_news_loader() -> List[Dict[str, Optional[str]]]:
-    """Market news from Yahoo's ^GSPC news tab via yfinance — the
+    """Market news from Yahoo Finance's news SEARCH via yfinance — the
     keyless backup. No date control: just the newest NEWS_FETCH_COUNT
-    articles, which reach ~3-4 days back — enough for the 2-day
-    window; the rolling pool adds failure-fallback depth."""
+    articles (Yahoo answers ~50), which reach ~2-3 days back — enough
+    for the 2-day window; the rolling pool adds failure-fallback depth.
+    The per-ticker news tab (``Ticker.get_news``) is not used: it has
+    returned an empty list for every symbol since 2026-10-02, on every
+    yfinance 1.x release through 1.7.0."""
     import yfinance as yf
 
-    ticker = yf.Ticker(YAHOO_WORLD_SYMBOL)
-    try:
-        raw = ticker.get_news(count=NEWS_FETCH_COUNT)
-    except TypeError:  # older yfinance without the count parameter
-        raw = ticker.news
-    raw = raw or []
+    raw = yf.Search(YAHOO_WORLD_QUERY, news_count=NEWS_FETCH_COUNT).news or []
     return [
         normalize_news_entry(entry) for entry in raw if isinstance(entry, Mapping)
     ]
@@ -293,33 +322,30 @@ def _yahoo_world_news_loader() -> List[Dict[str, Optional[str]]]:
 def _default_world_news_loader() -> Tuple[
     List[Dict[str, Optional[str]]], List[str]
 ]:
-    """AlphaVantage when a key is configured, Yahoo otherwise —
-    unconfigured keeps working, configured enhances (config house
-    rule). Returns (entries, warnings): an AlphaVantage failure falls
+    """Google News first, Yahoo's news search when it fails — both
+    keyless. Returns (entries, warnings): a Google News failure falls
     back to Yahoo WITH a warning, which also keeps the degraded result
     out of the day cache so the next run retries the primary feed."""
-    if data_key("alphavantage"):
+    try:
+        return _google_news_world_loader(), []
+    except Exception as exc:
         try:
-            return _alphavantage_world_news_loader(), []
-        except Exception as exc:
-            try:
-                return (
-                    _yahoo_world_news_loader(),
-                    [
-                        "world news: AlphaVantage failed"
-                        f" ({exc}); used the Yahoo backup feed"
-                    ],
-                )
-            except Exception as backup_exc:
-                raise RuntimeError(
-                    f"AlphaVantage failed ({exc}) and the Yahoo backup"
-                    f" failed ({backup_exc})"
-                ) from backup_exc
-    return _yahoo_world_news_loader(), []
+            return (
+                _yahoo_world_news_loader(),
+                [
+                    "world news: Google News failed"
+                    f" ({exc}); used the Yahoo backup feed"
+                ],
+            )
+        except Exception as backup_exc:
+            raise RuntimeError(
+                f"Google News failed ({exc}) and the Yahoo backup"
+                f" failed ({backup_exc})"
+            ) from backup_exc
 
 
 class WorldNewsProvider(DataReportProvider):
-    """World/macro news: AlphaVantage (Yahoo backup), screened, cited."""
+    """World/macro news: Google News RSS (Yahoo backup), screened, cited."""
 
     name = "world_news"
     kind = SourceKind.TEXTUAL
@@ -329,8 +355,9 @@ class WorldNewsProvider(DataReportProvider):
     #: v3: AlphaVantage/Yahoo sources + the business-day window;
     #: v4: the 2-calendar-day window, sampling off; v5: the
     #: deterministic spam prefilter + its filtered_out counter; v6: the
-    #: window back from 3 to 2 calendar days).
-    cache_version = "v6"
+    #: window back from 3 to 2 calendar days; v7: Google News RSS
+    #: primary + Yahoo news-search backup, headline-only entries).
+    cache_version = "v7"
 
     def __init__(
         self,
@@ -411,6 +438,13 @@ class WorldNewsProvider(DataReportProvider):
             if loader_warnings:
                 degraded_fetch = True
                 warnings.extend(loader_warnings)
+            if not entries:
+                # A feed that answers with nothing is not a news-free
+                # day (both feeds went silently empty in October 2026):
+                # warn, and never day-cache the blank — the same day's
+                # next run fetches again.
+                degraded_fetch = True
+                warnings.append("world news: the feed returned no articles")
 
         # Same evidence hygiene as company news: an unverifiable item
         # (no link) or an undatable one must not masquerade as evidence;
@@ -435,7 +469,7 @@ class WorldNewsProvider(DataReportProvider):
 
         # The rolling pool: the Yahoo backup only ever serves its
         # newest articles, so successive fetches accumulate on disk
-        # until the pool covers the window; the AlphaVantage primary
+        # until the pool covers the window; the Google News primary
         # covers the window in one fetch and the pool then just adds
         # resilience. Merge by URL (a refetch refreshes its entry),
         # prune past retention, persist.

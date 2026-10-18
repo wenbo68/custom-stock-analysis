@@ -18,6 +18,53 @@ describe('friendlyWarning — a failed company-news fetch', () => {
   });
 });
 
+describe('friendlyWarning — the world-news feed stack (2026-10-18)', () => {
+  it('a Google News failure that fell back to Yahoo quotes the error, under the fetch-failed keyword', () => {
+    const note = friendlyWarning(
+      'world news: Google News failed (503 Server Error: Service Unavailable for url: https://news.google.com/rss/search?q=x); used the Yahoo backup feed',
+      t,
+    );
+    expect(note.keyword).toBe(t('tiered.warning.key.fetchFailed'));
+    expect(note.text).toBe(
+      'World news came from the Yahoo Finance backup feed because Google News could not be fetched (503 Server Error: Service Unavailable for url: https://news.google.com/rss/search?q=x). The backup reaches fewer stories, so this report may be thinner than usual.',
+    );
+  });
+
+  it('an empty feed is missing data, not a quiet news day', () => {
+    const note = friendlyWarning('world news: the feed returned no articles', t);
+    expect(note.keyword).toBe(t('tiered.warning.key.missingData'));
+    expect(note.text).toBe(
+      'The world news feed returned no articles today, so this report shows only what earlier runs had fetched, if anything.',
+    );
+  });
+
+  it('a whole-fetch failure with an empty pool, and a pool fallback with a count', () => {
+    expect(friendlyWarning('world news fetch failed: boom', t).text).toBe(
+      'World news could not be fetched. The news source said: boom',
+    );
+    expect(friendlyWarning('world news unavailable: no pooled articles', t).keyword).toBe(
+      t('tiered.warning.key.missingData'),
+    );
+    expect(friendlyWarning('showing 12 previously fetched article(s) instead', t).text).toBe(
+      'Showing 12 article(s) fetched by earlier runs instead of today’s feed.',
+    );
+    expect(
+      friendlyWarning('3 world news item(s) skipped (missing headline, link, or date)', t).text,
+    ).toBe('3 world news item(s) were skipped because they lacked a headline, a link, or a date.');
+  });
+
+  it('the screen cap names both counts under the trimmed-news keyword', () => {
+    const note = friendlyWarning(
+      "busy world window: screening 3000 of 4120 article(s), spread evenly across the window's days",
+      t,
+    );
+    expect(note.keyword).toBe(t('tiered.warning.key.newsCap'));
+    expect(note.text).toBe(
+      'A busy news window: 3000 of 4120 articles were screened, spread evenly across the window’s days.',
+    );
+  });
+});
+
 describe('friendlyWarning — review 2026-10-10 warning shapes', () => {
   it('a wrong-language reply kept after one retry that did not parse', () => {
     const note = friendlyWarning(

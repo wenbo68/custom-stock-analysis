@@ -93,6 +93,18 @@ export const ko: Record<UiTextKey, string> = {
     '시장 지수의 가격 이력은 {index}까지, 이 종목은 {stock}까지 있어 시장 추세와 시장 대비 비교는 둘이 공유하는 마지막 날({through})까지로 계산했습니다.',
   'tiered.warning.newsHeadlinesFailed':
     '기업 뉴스를 가져오지 못해 이 리포트에는 헤드라인이 없습니다. 뉴스 소스 응답: {detail}',
+  'tiered.warning.worldNewsBackupFeed':
+    'Google News를 가져오지 못해({detail}) 세계 뉴스는 Yahoo Finance 예비 소스에서 가져왔습니다. 예비 소스는 다루는 기사가 적어 이 리포트는 평소보다 빈약할 수 있습니다.',
+  'tiered.warning.worldNewsEmptyFeed':
+    '세계 뉴스 소스가 오늘 아무 기사도 돌려주지 않아, 이 리포트는 이전 실행에서 가져온 내용만(있다면) 보여줍니다.',
+  'tiered.warning.worldNewsFetchFailed': '세계 뉴스를 가져오지 못했습니다. 뉴스 소스 응답: {detail}',
+  'tiered.warning.worldNewsUnavailable':
+    '세계 뉴스를 사용할 수 없습니다: 가져오기에 실패했고 디스크에 보관된 이전 기사도 없어 이 리포트는 비어 있습니다.',
+  'tiered.warning.worldNewsFromPool': '오늘의 소스 대신 이전 실행에서 가져온 기사 {count}건을 보여줍니다.',
+  'tiered.warning.worldNewsItemsSkipped':
+    '헤드라인, 링크 또는 날짜가 없어 세계 뉴스 {count}건을 건너뛰었습니다.',
+  'tiered.warning.worldNewsScreenCap':
+    '뉴스가 많은 기간입니다: 기사 {total}건 중 {screened}건을 기간 내 날짜별로 고르게 나눠 선별했습니다.',
   'tiered.warning.sectorBarsFailed':
     '섹터 펀드({ticker})의 가격 이력을 불러오지 못해 섹터 비교 행이 비어 있습니다.',
   'tiered.warning.providerCrashed':

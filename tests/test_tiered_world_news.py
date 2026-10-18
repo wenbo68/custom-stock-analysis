@@ -10,7 +10,7 @@ screen's own behavior is covered by test_tiered_news_screen.py.
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from unittest import mock
 
 from src.tiered_analysis.cache_store import MemoryCacheStore
@@ -29,7 +29,8 @@ from src.tiered_analysis.providers.base import (
 from src.tiered_analysis.providers import world_news
 from src.tiered_analysis.providers.world_news import (
     WorldNewsProvider,
-    normalize_alphavantage_entry,
+    normalize_google_news_item,
+    parse_google_news_rss,
 )
 
 TODAY = date(2026, 8, 16)
@@ -321,7 +322,7 @@ class TestWorldNewsProvider(unittest.TestCase):
             degraded_loader.calls += 1
             return (
                 news_fixture(),
-                ["world news: AlphaVantage failed (boom); used the Yahoo"
+                ["world news: Google News failed (boom); used the Yahoo"
                  " backup feed"],
             )
 
@@ -330,10 +331,29 @@ class TestWorldNewsProvider(unittest.TestCase):
         result = provider.collect("AAPL")
         self.assertEqual(len(result.payload["news_coverage"]["items"]), 2)
         self.assertTrue(
-            any("AlphaVantage failed" in warning for warning in result.warnings)
+            any("Google News failed" in warning for warning in result.warnings)
         )
         provider.collect("MSFT")
         self.assertEqual(degraded_loader.calls, 2)
+
+    def test_empty_feed_is_warned_and_not_day_cached(self):
+        # A feed that answers with zero articles is not a news-free day
+        # (observed 2026-10-18: both feeds silently empty): the card is
+        # warned, and the blank is never day-cached — the same day's
+        # next run fetches again.
+        def empty_loader():
+            empty_loader.calls += 1
+            return []
+
+        empty_loader.calls = 0
+        provider, _ = self.make_provider(loader=empty_loader)
+        result = provider.collect("AAPL")
+        self.assertEqual(result.payload["news_coverage"]["items"], [])
+        self.assertIn(
+            "world news: the feed returned no articles", result.warnings
+        )
+        provider.collect("MSFT")
+        self.assertEqual(empty_loader.calls, 2)
 
     def test_day_cache_shares_one_screen_across_symbols(self):
         provider, calls = self.make_provider()
@@ -454,29 +474,107 @@ class TestSpamPrefilter(unittest.TestCase):
         self.assertEqual(len(news["items"]), 2)
 
 
+SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>"federal reserve" - Google News</title>
+<item>
+<title>Fed holds rates, signals cut - Reuters</title>
+<link>https://news.google.com/rss/articles/AAA?oc=5</link>
+<guid isPermaLink="false">AAA</guid>
+<pubDate>Sun, 18 Oct 2026 11:33:03 GMT</pubDate>
+<description>&lt;a href="https://news.google.com/rss/articles/AAA?oc=5"&gt;Fed holds rates, signals cut&lt;/a&gt;&amp;nbsp;&lt;font color="#6f6f6f"&gt;Reuters&lt;/font&gt;</description>
+<source url="https://www.reuters.com">Reuters</source>
+</item>
+<item>
+<title>Oil jumps on supply fears - Bloomberg</title>
+<link>https://news.google.com/rss/articles/BBB?oc=5</link>
+<pubDate>Sat, 17 Oct 2026 23:58:03 GMT</pubDate>
+<source url="https://www.bloomberg.com">Bloomberg</source>
+</item>
+</channel></rss>
+"""
+
+
+class FakeResponse:
+    def __init__(self, text, status=200):
+        self.text = text
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
 class TestLoaderStack(unittest.TestCase):
-    def test_normalize_alphavantage_entry_maps_fields_and_stamp_date(self):
-        entry = {
-            "title": "Fed holds rates",
-            "url": "https://example.com/fed",
-            "source": "MarketBeat",
-            "time_published": "20260817T085901",
-            "summary": "Held steady.",
-        }
+    def test_parse_google_news_rss_reads_the_items(self):
+        items = parse_google_news_rss(SAMPLE_RSS)
         self.assertEqual(
-            normalize_alphavantage_entry(entry),
-            {
-                "title": "Fed holds rates",
-                "publisher": "MarketBeat",
-                "url": "https://example.com/fed",
-                "date": "2026-08-17",
-                "summary": "Held steady.",
-            },
+            items,
+            [
+                {
+                    "title": "Fed holds rates, signals cut - Reuters",
+                    "link": "https://news.google.com/rss/articles/AAA?oc=5",
+                    "pubDate": "Sun, 18 Oct 2026 11:33:03 GMT",
+                    "source": "Reuters",
+                },
+                {
+                    "title": "Oil jumps on supply fears - Bloomberg",
+                    "link": "https://news.google.com/rss/articles/BBB?oc=5",
+                    "pubDate": "Sat, 17 Oct 2026 23:58:03 GMT",
+                    "source": "Bloomberg",
+                },
+            ],
         )
 
-    def test_normalize_alphavantage_entry_missing_fields_stay_none(self):
+    def test_parse_google_news_rss_rejects_non_rss_replies(self):
+        # A block page or an error page is a failure (the backup feed
+        # takes over), never an empty news day.
+        with self.assertRaises(ValueError):
+            parse_google_news_rss("<html><body>Sorry, blocked</body></html>")
+        with self.assertRaises(ValueError):
+            parse_google_news_rss("not xml at all <<<")
+
+    def test_normalize_google_news_item_strips_the_publisher_suffix(self):
+        # Google appends " - Publisher" to every headline; the entry's
+        # title is the headline alone, the publisher its own field. The
+        # feed carries no abstract, so summary stays None (the screen
+        # judges the headline).
+        entry = normalize_google_news_item(
+            {
+                "title": "Fed holds rates, signals cut - Reuters",
+                "link": "https://news.google.com/rss/articles/AAA?oc=5",
+                "pubDate": "Sun, 18 Oct 2026 11:33:03 GMT",
+                "source": "Reuters",
+            }
+        )
         self.assertEqual(
-            normalize_alphavantage_entry({}),
+            entry,
+            {
+                "title": "Fed holds rates, signals cut",
+                "publisher": "Reuters",
+                "url": "https://news.google.com/rss/articles/AAA?oc=5",
+                "date": "2026-10-18",
+                "summary": None,
+            },
+        )
+        # A headline that does not end in its own publisher is kept whole.
+        self.assertEqual(
+            normalize_google_news_item(
+                {"title": "Oil jumps - on supply fears", "source": "Bloomberg"}
+            )["title"],
+            "Oil jumps - on supply fears",
+        )
+
+    def test_normalize_google_news_item_dates_in_utc(self):
+        # 23:58 in New York on the 17th is already the 18th in UTC: the
+        # date is the UTC day, the same convention as the Yahoo entries.
+        entry = normalize_google_news_item(
+            {"title": "x", "pubDate": "Sat, 17 Oct 2026 23:58:03 -0400"}
+        )
+        self.assertEqual(entry["date"], "2026-10-18")
+
+    def test_normalize_google_news_item_missing_fields_stay_none(self):
+        self.assertEqual(
+            normalize_google_news_item({}),
             {
                 "title": None,
                 "publisher": None,
@@ -486,57 +584,119 @@ class TestLoaderStack(unittest.TestCase):
             },
         )
         self.assertIsNone(
-            normalize_alphavantage_entry({"time_published": "garbage"})["date"]
+            normalize_google_news_item({"pubDate": "garbage"})["date"]
         )
 
-    def test_default_loader_prefers_alphavantage_when_key_set(self):
+    def test_google_loader_queries_every_lens_with_the_date_operator(self):
+        calls = []
+
+        def fake_get(url, params=None, timeout=None, headers=None):
+            calls.append((url, dict(params or {})))
+            return FakeResponse(SAMPLE_RSS)
+
+        with mock.patch("requests.get", fake_get), mock.patch.object(
+            world_news.time, "sleep"
+        ) as sleep:
+            entries = world_news._google_news_world_loader()
+        # One request per lens, all against the English (US) edition.
+        self.assertEqual(len(calls), len(world_news.WORLD_QUERIES))
+        self.assertTrue(all(url == world_news.GOOGLE_NEWS_RSS_URL for url, _ in calls))
+        since = date.today() - timedelta(days=world_news.WORLD_WINDOW_DAYS)
+        for (_, params), query in zip(calls, world_news.WORLD_QUERIES):
+            self.assertEqual(params["q"], f"{query} after:{since.isoformat()}")
+            for key, value in world_news.GOOGLE_NEWS_EDITION.items():
+                self.assertEqual(params[key], value)
+        # Paced between requests, not before the first.
+        self.assertEqual(sleep.call_count, len(world_news.WORLD_QUERIES) - 1)
+        # The same two stories came back from every lens: merged by URL.
+        self.assertEqual(
+            sorted(entry["url"] for entry in entries),
+            [
+                "https://news.google.com/rss/articles/AAA?oc=5",
+                "https://news.google.com/rss/articles/BBB?oc=5",
+            ],
+        )
+        self.assertEqual(entries[0]["publisher"], "Reuters")
+
+    def test_google_loader_fails_on_a_non_rss_reply(self):
+        with mock.patch(
+            "requests.get",
+            return_value=FakeResponse("<html><body>blocked</body></html>"),
+        ), mock.patch.object(world_news.time, "sleep"):
+            with self.assertRaises(ValueError) as ctx:
+                world_news._google_news_world_loader()
+        self.assertIn("Google News", str(ctx.exception))
+
+    def test_yahoo_loader_uses_the_news_search(self):
+        # Yahoo's per-ticker news tab has returned nothing since
+        # 2026-10-02 (every yfinance 1.x); the news SEARCH still answers.
+        fake_search = mock.Mock()
+        fake_search.return_value.news = [
+            {
+                "title": "Stocks slip as yields climb",
+                "publisher": "Reuters",
+                "link": "https://example.com/yields",
+                "providerPublishTime": 1792324800,  # 2026-10-18 UTC
+                "relatedTickers": ["^GSPC"],
+            },
+            "not a mapping",
+        ]
+        with mock.patch("yfinance.Search", fake_search):
+            entries = world_news._yahoo_world_news_loader()
+        fake_search.assert_called_once_with(
+            world_news.YAHOO_WORLD_QUERY, news_count=world_news.NEWS_FETCH_COUNT
+        )
+        self.assertEqual(
+            entries,
+            [
+                {
+                    "title": "Stocks slip as yields climb",
+                    "publisher": "Reuters",
+                    "url": "https://example.com/yields",
+                    "date": "2026-10-18",
+                    "summary": None,
+                }
+            ],
+        )
+
+    def test_default_loader_prefers_google_news(self):
         with mock.patch.object(
-            world_news,
-            "_alphavantage_world_news_loader",
-            return_value=["av"],
+            world_news, "_google_news_world_loader", return_value=["google"]
         ), mock.patch.object(
             world_news, "_yahoo_world_news_loader", return_value=["yahoo"]
         ):
-            with mock.patch.dict("os.environ", {"ALPHAVANTAGE_API_KEY": "k"}):
-                self.assertEqual(
-                    world_news._default_world_news_loader(), (["av"], [])
-                )
-            # Key absent: Yahoo is the design source, silently — no
-            # degradation warning for the keyless setup.
-            with mock.patch.dict("os.environ", {"ALPHAVANTAGE_API_KEY": ""}):
-                self.assertEqual(
-                    world_news._default_world_news_loader(), (["yahoo"], [])
-                )
+            self.assertEqual(
+                world_news._default_world_news_loader(), (["google"], [])
+            )
 
     def test_default_loader_falls_back_to_yahoo_with_warning(self):
         with mock.patch.object(
             world_news,
-            "_alphavantage_world_news_loader",
-            side_effect=RuntimeError("rate limited"),
+            "_google_news_world_loader",
+            side_effect=RuntimeError("HTTP 503"),
         ), mock.patch.object(
             world_news, "_yahoo_world_news_loader", return_value=["yahoo"]
         ):
-            with mock.patch.dict("os.environ", {"ALPHAVANTAGE_API_KEY": "k"}):
-                entries, warnings = world_news._default_world_news_loader()
+            entries, warnings = world_news._default_world_news_loader()
         self.assertEqual(entries, ["yahoo"])
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("AlphaVantage failed", warnings[0])
-        self.assertIn("rate limited", warnings[0])
+        self.assertEqual(
+            warnings,
+            ["world news: Google News failed (HTTP 503); used the Yahoo backup feed"],
+        )
 
     def test_default_loader_raises_when_both_feeds_fail(self):
         with mock.patch.object(
             world_news,
-            "_alphavantage_world_news_loader",
-            side_effect=RuntimeError("rate limited"),
+            "_google_news_world_loader",
+            side_effect=RuntimeError("HTTP 503"),
         ), mock.patch.object(
             world_news,
             "_yahoo_world_news_loader",
             side_effect=RuntimeError("yahoo down"),
         ):
-            with mock.patch.dict("os.environ", {"ALPHAVANTAGE_API_KEY": "k"}):
-                with self.assertRaises(RuntimeError) as ctx:
-                    world_news._default_world_news_loader()
-        self.assertIn("rate limited", str(ctx.exception))
+            with self.assertRaises(RuntimeError) as ctx:
+                world_news._default_world_news_loader()
+        self.assertIn("HTTP 503", str(ctx.exception))
         self.assertIn("yahoo down", str(ctx.exception))
 
 

@@ -221,7 +221,7 @@ class DataSourceStatus(BaseModel):
     """Which data sources are configured; an unconfigured one leaves its report blank with a warning."""
 
     finnhub: bool = Field(description="Company news.")
-    alphavantage: bool = Field(description="World news.")
+    alphavantage: bool = Field(description="Top-up of the newest US price bars (world news needs no key).")
     fred: bool = Field(description="Macro economy.")
     sec_edgar: bool = Field(description="US fundamentals (a contact string, not a key).")
 

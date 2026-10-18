@@ -76,7 +76,7 @@ Everything is read from `.env` (or real environment variables). Only the first t
 | `SEC_EDGAR_USER_AGENT` | no | `Your Name (you@example.com)`. The SEC asks every caller of its filings API to identify itself this way; without it a generic name is sent, which the SEC may throttle. |
 | `FRED_API_KEY` | no | [FRED](https://fred.stlouisfed.org/docs/api/api_key.html) key for the macro economy report. Without it, that report is blank. |
 | `FINNHUB_API_KEY` | no | [Finnhub](https://finnhub.io/) key for the company news report, which gives a real date range per ticker. Without it, company news comes from Yahoo Finance instead. |
-| `ALPHAVANTAGE_API_KEY` | no | [Alpha Vantage](https://www.alphavantage.co/support/#api-key) key for the world news report, and to top up the newest US price bars. Without it, world news is blank. |
+| `ALPHAVANTAGE_API_KEY` | no | [Alpha Vantage](https://www.alphavantage.co/support/#api-key) key to top up the newest US price bars when Yahoo's lag behind. World news needs no key: it comes from Google News, with Yahoo Finance as the backup. |
 | `MAX_CONCURRENT_RUNS` | no | How many analyses run at once (default 4). The rest queue and start by themselves. |
 | `CHAT_CONTEXT_WINDOW` | no | The context window, in tokens, of a chat model litellm's table does not know (default 128000); the chat then fills at most half of it. Ignored for a model the table knows. |
 | `DATABASE_URL` | no | A Postgres address. Blank uses a sqlite file at `./data/stock_analysis.db` (`DATABASE_PATH` to move it). |

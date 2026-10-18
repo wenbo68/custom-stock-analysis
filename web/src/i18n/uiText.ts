@@ -79,6 +79,14 @@ const zh = {
   'tiered.warning.benchmarkDateMismatch':
     '大盘指数行情截至 {index}，本股行情截至 {stock}；大盘趋势与相对强弱按两者共有的最后一天（{through}）计算。',
   'tiered.warning.newsHeadlinesFailed': '公司新闻抓取失败，本报告没有新闻标题。新闻源返回：{detail}',
+  'tiered.warning.worldNewsBackupFeed':
+    'Google News 抓取失败（{detail}），世界新闻改用 Yahoo Finance 备用源。备用源覆盖的报道更少，本报告可能比平时单薄。',
+  'tiered.warning.worldNewsEmptyFeed': '世界新闻源今天没有返回任何文章，本报告只显示此前运行抓取到的内容（如有）。',
+  'tiered.warning.worldNewsFetchFailed': '世界新闻抓取失败。新闻源返回：{detail}',
+  'tiered.warning.worldNewsUnavailable': '世界新闻不可用：抓取失败，且本地没有保留此前的文章，本报告为空。',
+  'tiered.warning.worldNewsFromPool': '显示此前运行抓取的 {count} 篇文章，而非今天的新闻源。',
+  'tiered.warning.worldNewsItemsSkipped': '{count} 条世界新闻因缺少标题、链接或日期而被跳过。',
+  'tiered.warning.worldNewsScreenCap': '新闻窗口繁忙：{total} 篇文章中筛选了 {screened} 篇，按窗口内各天均匀分配。',
   'tiered.warning.sectorBarsFailed': '行业基金（{ticker}）行情加载失败，行业对比各行为空。',
   'tiered.warning.providerCrashed': '{dataReport} 数据采集出现异常，本次运行缺少整个板块。',
   'tiered.warning.deepAnalysisCallFailed': '深度分析的 LLM 调用失败，本次运行没有展望。',
@@ -663,6 +671,20 @@ const en: Record<UiTextKey, string> = {
     'The market index’s price history ends on {index} and this stock’s on {stock}, so the market trend and the stock-versus-market comparison are measured through the last day both share ({through}).',
   'tiered.warning.newsHeadlinesFailed':
     'Company news could not be fetched, so this report has no headlines. The news source said: {detail}',
+  'tiered.warning.worldNewsBackupFeed':
+    'World news came from the Yahoo Finance backup feed because Google News could not be fetched ({detail}). The backup reaches fewer stories, so this report may be thinner than usual.',
+  'tiered.warning.worldNewsEmptyFeed':
+    'The world news feed returned no articles today, so this report shows only what earlier runs had fetched, if anything.',
+  'tiered.warning.worldNewsFetchFailed':
+    'World news could not be fetched. The news source said: {detail}',
+  'tiered.warning.worldNewsUnavailable':
+    'World news is unavailable: the fetch failed and no earlier articles were kept on disk, so this report is empty.',
+  'tiered.warning.worldNewsFromPool':
+    'Showing {count} article(s) fetched by earlier runs instead of today’s feed.',
+  'tiered.warning.worldNewsItemsSkipped':
+    '{count} world news item(s) were skipped because they lacked a headline, a link, or a date.',
+  'tiered.warning.worldNewsScreenCap':
+    'A busy news window: {screened} of {total} articles were screened, spread evenly across the window’s days.',
   'tiered.warning.sectorBarsFailed':
     'The price history for the sector fund ({ticker}) failed to load, so the sector-comparison rows are blank.',
   'tiered.warning.providerCrashed':

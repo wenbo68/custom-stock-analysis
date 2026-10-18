@@ -442,6 +442,43 @@ const NOTE_RULES: NoteRule[] = [
     keywordKey: KEY.fetchFailed,
     toText: (m, t) => t('tiered.warning.newsHeadlinesFailed', { detail: m[1] }),
   },
+  // world_news.py: the feed stack (Google News RSS, the Yahoo news-search
+  // backup, the on-disk pool of earlier fetches) and the screen's fuse.
+  {
+    pattern: /^world news: Google News failed \(([\s\S]*)\); used the Yahoo backup feed$/,
+    keywordKey: KEY.fetchFailed,
+    toText: (m, t) => t('tiered.warning.worldNewsBackupFeed', { detail: m[1] }),
+  },
+  {
+    pattern: /^world news: the feed returned no articles$/,
+    keywordKey: KEY.missingData,
+    toText: (_m, t) => t('tiered.warning.worldNewsEmptyFeed'),
+  },
+  {
+    pattern: /^world news fetch failed: ([\s\S]+)$/,
+    keywordKey: KEY.fetchFailed,
+    toText: (m, t) => t('tiered.warning.worldNewsFetchFailed', { detail: m[1] }),
+  },
+  {
+    pattern: /^world news unavailable: no pooled articles$/,
+    keywordKey: KEY.missingData,
+    toText: (_m, t) => t('tiered.warning.worldNewsUnavailable'),
+  },
+  {
+    pattern: /^showing (\d+) previously fetched article\(s\) instead$/,
+    keywordKey: KEY.missingData,
+    toText: (m, t) => t('tiered.warning.worldNewsFromPool', { count: m[1] }),
+  },
+  {
+    pattern: /^(\d+) world news item\(s\) skipped \(missing headline, link, or date\)$/,
+    keywordKey: KEY.missingData,
+    toText: (m, t) => t('tiered.warning.worldNewsItemsSkipped', { count: m[1] }),
+  },
+  {
+    pattern: /^busy world window: screening (\d+) of (\d+) article\(s\), spread evenly across the window's days$/,
+    keywordKey: KEY.newsCap,
+    toText: (m, t) => t('tiered.warning.worldNewsScreenCap', { screened: m[1], total: m[2] }),
+  },
   {
     pattern: /^(\w+) provider crashed/,
     keywordKey: KEY.fetchFailed,
