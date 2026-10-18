@@ -38,6 +38,9 @@ function renderHistory(overrides: Partial<RunHistoryProps> = {}) {
     onDelete: vi.fn(),
     deletingTaskId: null,
     deleteError: null,
+    onStop: vi.fn(),
+    stoppingTaskIds: [],
+    stopError: null,
     ...overrides,
   };
   render(
@@ -412,6 +415,80 @@ describe('RunHistory', () => {
   it('says "start a run" when the history is empty and unfiltered', () => {
     renderHistory({ runs: [] });
     expect(screen.getByText(/输入股票代码|Enter a ticker/)).toBeInTheDocument();
+  });
+
+  // Stop button (2026-10-19): a running run shows a stop where the trash
+  // would sit; once stopped, the row is history with the trash as usual.
+  it('ends a running row in a stop button that stops after a confirmation, without opening the row', () => {
+    const props = renderHistory({
+      runs: [makeRun('r1', { status: 'running', outlook: null, shares: null })],
+    });
+    expect(screen.queryByTestId('run-delete')).not.toBeInTheDocument();
+    const stop = screen.getByTestId('run-stop');
+    expect(stop.getAttribute('aria-label')).toMatch(/Stop this run|停止本次运行/);
+
+    fireEvent.click(stop);
+    expect(props.onToggle).not.toHaveBeenCalled();
+    expect(props.onStop).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toHaveTextContent(/finished|已完成/);
+    fireEvent.click(screen.getByText(/^Keep$|^保留$/));
+    expect(props.onStop).not.toHaveBeenCalled();
+
+    fireEvent.click(stop);
+    fireEvent.click(screen.getByTestId('run-stop-confirm'));
+    expect(props.onStop).toHaveBeenCalledWith('r1');
+    expect(props.onToggle).not.toHaveBeenCalled();
+  });
+
+  it('shows the stop in flight, its refusal under the row, and a stopped row with the trash', () => {
+    renderHistory({
+      runs: [makeRun('r1', { status: 'running', outlook: null, shares: null })],
+      stoppingTaskIds: ['r1'],
+      expandedTaskId: 'r1',
+    });
+    const stop = screen.getByTestId('run-stop');
+    expect(stop).toBeDisabled();
+    expect(stop.getAttribute('aria-label')).toMatch(/Stopping…|停止中…/);
+    // The expanded running row says the stop is on its way.
+    expect(screen.getByText(/Stopping…|停止中…/, { selector: 'p' })).toBeInTheDocument();
+
+    cleanup();
+    renderHistory({
+      runs: [
+        makeRun('r1', { status: 'running', outlook: null, shares: null }),
+        makeRun('r2', { status: 'running', outlook: null, shares: null }),
+      ],
+      stopError: 'Could not stop: network down',
+    });
+    // The refusal belongs to the row whose stop was confirmed.
+    expect(screen.queryByTestId('run-stop-error')).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByTestId('run-stop')[1]);
+    fireEvent.click(screen.getByTestId('run-stop-confirm'));
+    const error = screen.getByTestId('run-stop-error');
+    expect(error).toHaveTextContent(/network down/);
+    const rows = Array.from(document.querySelectorAll('[role="button"][aria-expanded]'));
+    expect(rows[1].compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    cleanup();
+    const props = renderHistory({
+      runs: [makeRun('s1', { status: 'stopped', outlook: null, shares: null })],
+    });
+    expect(screen.queryByTestId('run-stop')).not.toBeInTheDocument();
+    expect(screen.getByText(/^Stopped$|^已停止$/)).toBeInTheDocument();
+    // No outlook, whatever the stopped run's analysis found: the dash.
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+    const remove = screen.getByTestId('run-delete');
+    expect(remove.getAttribute('aria-label')).toMatch(/Delete this run|删除这次分析/);
+    fireEvent.click(remove);
+    fireEvent.click(screen.getByTestId('run-delete-confirm'));
+    expect(props.onDelete).toHaveBeenCalledWith('s1');
+  });
+
+  it('offers stopped in the status filter', () => {
+    const props = renderHistory({ runs: [makeRun('t1')] });
+    fireEvent.focus(screen.getByPlaceholderText(/输入状态|Enter status/));
+    fireEvent.click(screen.getAllByText(/^Stopped$|^已停止$/).find((el) => el.closest('button'))!);
+    expect(props.onFilters).toHaveBeenCalledWith({ statuses: ['stopped'] });
   });
 
   it('clicking a row asks to expand it; a failed expanded row shows its error', () => {

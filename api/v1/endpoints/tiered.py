@@ -11,7 +11,9 @@ A run's LLM transcript is served as an index (GET .../transcript) plus
 one call at a time (GET .../transcript/{call_number}), since the text of
 every call together runs to half a megabyte; the deep-analysis vote
 items are paged the same way (GET .../vote_items). DELETE /runs/{run_id}
-removes a run — a queued one is thereby cancelled — and GET /status says
+removes a run — a queued one is thereby cancelled — POST
+/runs/{run_id}/stop stops a running one part-way (2026-10-19; the report
+keeps the sections that finished), and GET /status says
 what the server can do right now (2026-09-21, for the chat bot: the
 model, the data sources, the run slots, the defaults, each market's
 clock), so a client can explain a refusal before it happens.
@@ -48,6 +50,7 @@ from api.v1.endpoints.tiered_schemas import (
     RunDetail,
     RunPage,
     RunStatus,
+    RunStopRequested,
     Section,
     ServerStatus,
     TickerList,
@@ -237,11 +240,12 @@ def delete_tiered_run(run_id: str) -> Dict[str, Any]:
     """Delete a run and its transcript.
 
     A queued run is taken out of the line — this is how a run is
-    cancelled. A finished or failed run is removed from the history.
+    cancelled. A finished, failed or stopped run is removed from the
+    history.
 
     - 404: unknown run id.
-    - 409 `run_in_progress`: the run is executing and cannot be stopped;
-      wait for it to finish or fail, then delete it.
+    - 409 `run_in_progress`: the run is executing; stop it first
+      (`POST /runs/{run_id}/stop`), then delete the stopped run.
     """
     try:
         deleted = run_service.run_queue.remove(run_id)
@@ -258,6 +262,36 @@ def delete_tiered_run(run_id: str) -> Dict[str, Any]:
         "ticker": deleted["ticker"],
         "status": deleted["status"],
     }
+
+
+@router.post("/runs/{run_id}/stop", response_model=RunStopRequested)
+def stop_tiered_run(run_id: str) -> Dict[str, Any]:
+    """Stop a running run part-way.
+
+    The run's stop flag goes up; the run ends at its next checkpoint —
+    the start of its next step, or its next model call — and lands as
+    `stopped`. A model call already in flight finishes and is counted,
+    so the token totals match the bill. The stored report then holds
+    the sections that finished (`GET /runs/{run_id}`: `data_reports`, and
+    the analysis when it finished), `stopped_stage` (the step that was
+    running when stop was pressed) and `stopped_stage_finished` (whether
+    it still finished — a quick card or a one-call analysis may); the
+    plan is never there. A step cut short is discarded whole, never
+    shown half-built.
+
+    - 404: unknown run id.
+    - 409 `run_not_running`: the run is not executing (the body says its
+      `status`). A queued run is cancelled with `DELETE /runs/{run_id}`.
+    """
+    run = history.get_run_summary(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not run_service.run_queue.stop(run_id):
+        raise HTTPException(status_code=409, detail={
+            "code": "run_not_running", "run_id": run_id, "status": run["status"],
+        })
+    logger.info("tiered run %s (%s) asked to stop", run_id, run["ticker"])
+    return {"run_id": run_id, "ticker": run["ticker"]}
 
 
 @router.get("/runs/{run_id}/vote_items", response_model=VoteItemPage, dependencies=[Depends(reject_unknown_query_params)])

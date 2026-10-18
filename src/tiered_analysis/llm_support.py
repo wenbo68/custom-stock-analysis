@@ -32,6 +32,7 @@ from src.languages import (
 )
 
 from .providers.base import DataReport
+from .run_control import RunStopped
 
 logger = logging.getLogger(__name__)
 
@@ -192,17 +193,29 @@ class LlmUsageTracker:
     rides here for the same reason: every prompt builder, down to the
     news screens inside the providers, reads it with ``run_language()``
     instead of taking one more argument.
+
+    The run's ``stop`` flag (run_control.py, 2026-10-19) rides here too:
+    ``stage`` checks it on entry and ``_summarize`` at the top of every
+    LLM call, so a stop reaches the news screens and the vote's worker
+    threads through the same activation. None means the run cannot be
+    stopped (CLI runs, tests).
     """
 
     def __init__(
         self,
         transcript: Optional[LlmTranscript] = None,
         language: str = DEFAULT_LANGUAGE,
+        stop: Optional[threading.Event] = None,
     ) -> None:
         self._stages: Dict[str, _StageUsage] = {}
         self._current: Optional[str] = None
         self.transcript = transcript
         self.language = language
+        self.stop = stop
+        # A StopFlag learns which stage it was raised in from here.
+        attach = getattr(stop, "attach", None)
+        if attach is not None:
+            attach(self.current_stage)
         # Deep analysis stages run two LLM calls in parallel threads; both report
         # into the same tracker.
         self._lock = threading.Lock()
@@ -218,12 +231,22 @@ class LlmUsageTracker:
 
     @contextmanager
     def stage(self, name: str):
+        """Label the LLM calls made inside as ``name``'s. A stage never
+        begins once the run's stop flag is up (``RunStopped``)."""
+        self.checkpoint(name)
         previous = self._current
         self._current = name
         try:
             yield
         finally:
             self._current = previous
+
+    def checkpoint(self, stage: Optional[str] = None) -> None:
+        """Raise ``RunStopped`` if the run was asked to stop; a no-op
+        for a run without a stop flag. ``stage`` names the step the stop
+        lands in — the current stage when not given."""
+        if self.stop is not None and self.stop.is_set():
+            raise RunStopped(stage or self.current_stage())
 
     def record(
         self, input_tokens: Optional[int], output_tokens: Optional[int]
@@ -404,6 +427,12 @@ def _summarize(
 ) -> str:
     from .run_context import llm_api_key, llm_model
 
+    # A stopped run makes no further call: refused here, before the
+    # model is even resolved, so nothing is billed or transcribed.
+    tracker = active_tracker()
+    if tracker is not None:
+        tracker.checkpoint()
+
     resolved = (model or llm_model() or "").strip()
     if not resolved:
         raise LlmConfigError("no LLM model configured: MAIN_LLM is not set")
@@ -422,7 +451,6 @@ def _summarize(
             "schema" if isinstance(response_format, type) else "json"
         )
 
-    tracker = active_tracker()
     started = time.monotonic()
 
     def _call(fmt: Optional[Any]) -> Any:

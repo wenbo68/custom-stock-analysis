@@ -85,7 +85,7 @@ def _call(name, **args):
 class TestSchemas:
     def test_every_tool_has_a_provider_safe_schema(self):
         specs = ToolCatalog().specs()
-        assert len(specs) == 10
+        assert len(specs) == 11
         text = json.dumps(specs)
         assert '"title"' not in text
         assert "anyOf" not in text
@@ -95,7 +95,7 @@ class TestSchemas:
         assert names == {
             "get_server_status", "list_runs", "list_tickers", "get_run",
             "get_data_report", "list_vote_items", "get_transcript",
-            "get_transcript_call", "start_run", "delete_run",
+            "get_transcript_call", "start_run", "stop_run", "delete_run",
         }
 
     def test_clean_schema_merges_optional_and_keeps_real_defaults(self):
@@ -115,7 +115,7 @@ class TestSchemas:
     def test_only_the_gated_tools_confirm(self):
         catalog = ToolCatalog()
         gated = {name for name in catalog.names() if catalog.get(name).needs_confirmation}
-        assert gated == {"get_data_report", "get_transcript_call", "start_run", "delete_run"}
+        assert gated == {"get_data_report", "get_transcript_call", "start_run", "stop_run", "delete_run"}
 
 
 class TestParse:
@@ -301,6 +301,50 @@ class TestWrites:
         tool, params = _call("delete_run", run_id="r")
         assert tool.confirm(params)["error"] == "run_in_progress"
         assert tool.run(params)["error"] == "run_in_progress"
+
+    def test_stop_run_raises_the_flag_of_a_running_run(self, isolated_db, monkeypatch):
+        from src.tiered_analysis import run_service
+
+        history.create_run("r", "AAPL", inputs={"tier": 1}, status="queued")
+        history.mark_running("r")
+        stopped = []
+        monkeypatch.setattr(run_service.run_queue, "stop", lambda run_id: stopped.append(run_id) or True)
+        tool, params = _call("stop_run", run_id="r")
+        assert tool.confirm(params)["run"]["status"] == "running"
+        assert tool.run(params) == {"stop_requested": True, "run_id": "r",
+                                    "ticker": "AAPL", "status": "running"}
+        assert stopped == ["r"]
+
+    def test_stop_run_refuses_a_run_that_is_not_executing(self, isolated_db, monkeypatch):
+        from src.tiered_analysis import run_service
+
+        history.create_run("q", "AAPL", inputs={"tier": 1}, status="queued")
+        monkeypatch.setattr(run_service.run_queue, "stop", lambda run_id: False)
+        tool, params = _call("stop_run", run_id="q")
+        assert tool.confirm(params)["error"] == "run_not_running"
+        assert tool.confirm(params)["status"] == "queued"
+        assert "delete_run" in tool.confirm(params)["message"]
+        assert tool.run(params)["error"] == "run_not_running"
+        # A run that is over by the time the user says yes: the same refusal.
+        history.create_run("r", "MSFT", inputs={"tier": 1}, status="queued")
+        history.mark_running("r")
+        tool, params = _call("stop_run", run_id="r")
+        assert tool.confirm(params)["run"]["status"] == "running"
+        history.mark_failed("r", "boom")
+        result = tool.run(params)
+        assert result["error"] == "run_not_running"
+        assert result["run_id"] == "r"
+
+    def test_stop_run_misses_an_unknown_run(self, isolated_db):
+        tool, params = _call("stop_run", run_id="ghost")
+        assert tool.confirm(params)["error"] == "not_found"
+        assert tool.run(params)["error"] == "not_found"
+
+    def test_delete_run_points_a_running_run_at_stop_run(self, isolated_db):
+        history.create_run("r", "AAPL", inputs={"tier": 1}, status="queued")
+        history.mark_running("r")
+        tool, params = _call("delete_run", run_id="r")
+        assert "stop_run" in tool.confirm(params)["message"]
 
 
 def test_token_estimate_rounds_up():

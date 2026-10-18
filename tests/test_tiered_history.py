@@ -27,6 +27,7 @@ from src.tiered_analysis.history import (
     list_transcript,
     mark_succeeded,
     mark_failed,
+    mark_stopped,
     run_exists,
     status_counts,
 )
@@ -462,16 +463,33 @@ class TestDeleteRun:
         assert caught.value.run_id == "running"
         assert run_exists("running")
 
+    def test_a_stopped_run_is_history_and_can_go(self, isolated_db):
+        create_run("stopped", "AAPL")
+        mark_stopped("stopped", {"ticker": "AAPL", "stopped_stage": "positioning",
+                                 "data_reports": [{"name": "technicals"}]})
+        row = get_run("stopped")
+        assert row["status"] == "stopped"
+        assert row["error"] is None
+        assert row["result"]["stopped_stage"] == "positioning"
+        assert row["result"]["data_report_index"] == [
+            {"name": "technicals", "kind": None, "counted": False, "warnings": []},
+        ]
+        # No outlook column: the list shows a dash, like a failed run.
+        assert row["outlook"] is None
+        assert _rows(filters=RunFilters(statuses=("stopped",))).keys() == {"stopped"}
+        assert delete_run("stopped")["status"] == "stopped"
+        assert not run_exists("stopped")
+
 
 class TestStatusCounts:
     def test_every_status_is_present(self, isolated_db):
-        assert status_counts() == {"queued": 0, "running": 0, "succeeded": 0, "failed": 0}
+        assert status_counts() == {"queued": 0, "running": 0, "succeeded": 0, "failed": 0, "stopped": 0}
         create_run("a", "AAPL", status="queued")
         create_run("b", "AAPL", status="queued")
         create_run("c", "AAPL")
         create_run("d", "AAPL")
         mark_succeeded("d", RESULT)
-        assert status_counts() == {"queued": 2, "running": 1, "succeeded": 1, "failed": 0}
+        assert status_counts() == {"queued": 2, "running": 1, "succeeded": 1, "failed": 0, "stopped": 0}
 
 
 class TestTranscript:

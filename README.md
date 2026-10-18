@@ -26,7 +26,8 @@ Enter a ticker, pick a tier and a maximum hold time, and the app runs a pipeline
 - **An outlook** (bullish, bearish or neutral) with a score and the reasons, each reason citing the exact number in the report it rests on. Citations are checked by code, not trusted.
 - **A trade plan**: entry, stop loss, target and share count sized from your capital and risk percent, then reviewed by the model with every adjustment explained.
 - **Two tiers.** Tier 1 is a single preliminary analysis. Tier 2 is a deep analysis: several model roles list and grade the evidence, vote, and a deciding round settles it, with the whole vote tree open to inspection.
-- **A chat page** whose bot reads and acts on your run history through the app's own API: list runs, open a report, start or delete a run. Every action asks you first and every model call is on the record.
+- **A stop button** on every running run. The step in flight finishes (so the token totals match the bill), the rest is skipped, and the report keeps the sections that had finished.
+- **A chat page** whose bot reads and acts on your run history through the app's own API: list runs, open a report, start, stop or delete a run. Every action asks you first and every model call is on the record.
 - **A full transcript** of every model call behind a report: the prompt, the raw reply, the tokens.
 
 | Markets | United States, mainland China (A-shares), Hong Kong, Japan, Korea, Taiwan |
@@ -87,11 +88,13 @@ A missing optional key never fails a run: the matching data report is left empty
 ## How a run works
 
 1. **Market check.** A run is refused while that stock's market is open, because intraday numbers would be judged against a daily report. The form says when runs are accepted again; **Run anyway** overrides it.
-2. **Data reports.** The six reports are fetched in parallel. Each number carries a plain-language definition and, where useful, how a trader reads it.
+2. **Data reports.** The six reports are fetched one after another. Each number carries a plain-language definition and, where useful, how a trader reads it.
 3. **News screen.** Articles are judged for relevance, grouped, ranked and summarised by the model; the report shows the kept ones with their sentences.
 4. **Analysis.** Tier 1 writes one preliminary analysis. Tier 2 runs the deep analysis: two listers each write a grade sheet, a check round challenges them, and a deciding round votes. Every claim must cite a report value; citations that do not match the report are rejected and the model is asked again.
 5. **Plan.** Entry, stop loss, target and shares are computed from the report and your inputs, then the plan review may adjust them, with each adjustment explained and shown next to the original.
 6. **Report.** Summary, outlook, plan, the vote tree (tier 2), the six reports, the warnings, and the model transcript.
+
+A run can be stopped at any point. The stop takes effect at the next step boundary or the next model call, so a call already in flight finishes and is counted. The stopped run stays in the history with the sections that had finished: the reports fetched so far, the analysis if it was done, never a half-built section and never the plan.
 
 Every model reply that must be JSON is asked for in a schema-enforced mode and then checked against a typed form, with one retry that shows the model what was wrong. Every reply a reader sees is checked for being in the chosen language, with up to two retries. The report warns whenever a retry was needed; nothing is silently patched.
 
@@ -101,7 +104,7 @@ Every model reply that must be JSON is asked for in a schema-enforced mode and t
 
 `/chat` is a chat page whose bot can read and act on the run history through the app's own API, and nothing else. It uses the same model and key as the analysis.
 
-- **Tools, not SQL.** The model picks from a menu of named actions (`src/chat/tools.py`) that call the same functions the API routes call: list and read runs, read one data report or one model call, page the vote items, check the server status, start a run, delete or cancel a run. It never sees the database, the source code, or the key.
+- **Tools, not SQL.** The model picks from a menu of named actions (`src/chat/tools.py`) that call the same functions the API routes call: list and read runs, read one data report or one model call, page the vote items, check the server status, start a run, stop a running run, delete or cancel a run. It never sees the database, the source code, or the key.
 - **You confirm every action and every large read.** Starting or deleting a run, and reading a full data report or a model call's text into the context, pause the bot and ask you first, showing the exact inputs or the size and a rough token count.
 - **Everything is on the record.** Each tool call and its result is a line in the conversation you can open. Every reply ends with its token line; click it to see the exact prompt and raw reply. Conversations are stored in the database and survive a restart.
 - **Guardrails.** At most 8 tool-calling steps per message, refusals come back to the model as readable results, oversized results are cut before the model sees them, and only the last 40 messages are sent each turn.
@@ -132,7 +135,8 @@ The web app talks to a JSON API under `/api/v1/tiered` and `/api/v1/chat`. The s
 | `GET /runs` | One page of the history, newest first, filtered in the database by ticker, status, outlook, the form inputs and dates. |
 | `GET /runs/tickers` | Every ticker ever run. |
 | `GET /runs/{run_id}` | One run with its report, whole or only the named sections (`core`, `data_reports`, `deep_analysis`, `plan`), optionally one data report. |
-| `DELETE /runs/{run_id}` | Delete a run and its transcript. A queued run is thereby cancelled; a running one is refused (409) until it finishes. |
+| `DELETE /runs/{run_id}` | Delete a run and its transcript. A queued run is thereby cancelled; a running one is refused (409) until it finishes or is stopped. |
+| `POST /runs/{run_id}/stop` | Stop a running run part-way. It ends at its next step boundary or model call and lands as `stopped`, its report holding the sections that finished, the step the user stopped during, and whether that step still finished. 409 when the run is not running. |
 | `GET /runs/{run_id}/vote_items` | One page of a tier 2 run's vote items, filtered by data report and status. |
 | `GET /runs/{run_id}/transcript` | The run's model calls without their text (stage, model, time, tokens, sizes). |
 | `GET /runs/{run_id}/transcript/{call_number}` | One model call with its full prompt and raw reply. |

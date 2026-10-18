@@ -409,6 +409,97 @@ class TestDeleteEndpoint:
         assert [item["run_id"] for item in items] == [first["run_id"]]
 
 
+class TestStopEndpoint:
+    """``POST /runs/{run_id}/stop`` raises the run's stop flag; the run
+    ends at its next checkpoint, keeping the sections that finished."""
+
+    @staticmethod
+    def _stoppable_runner():
+        """A runner that works until released or stopped — like a stage
+        that checks the flag between its steps — and, stopped, hands
+        back the one card it had finished."""
+        from src.tiered_analysis.run_control import RunStopped, StoppedRun
+
+        release = threading.Event()
+
+        def runner(code, stop=None, **kwargs):
+            while not release.wait(timeout=0.02):
+                if stop is not None and stop.is_set():
+                    raise RunStopped("positioning", partial=StoppedRun(
+                        stage="positioning", ticker=code, market=Market.US,
+                        tier=1, max_hold_weeks=2,
+                        data_reports=[DataReport(
+                            name="technicals", kind=SourceKind.NUMERIC,
+                            payload={"close": 1},
+                        )],
+                        llm_usage={"stages": {}, "total": {
+                            "calls": 0, "input_tokens": 0, "output_tokens": 0}},
+                    ))
+            return _outcome(code)
+
+        return runner, release
+
+    def test_a_running_run_is_stopped_and_keeps_its_finished_cards(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_CONCURRENT_RUNS", "1")
+        runner, release = self._stoppable_runner()
+        with patch.object(run_service, "_run_analysis", runner):
+            first = client.post("/tiered/analyze", json={"ticker": "AAPL"}).json()
+            second = client.post("/tiered/analyze", json={"ticker": "MSFT"}).json()
+            assert first["status"] == "running"
+            assert second["status"] == "queued"
+
+            # A queued run has nothing to stop: cancel it with DELETE.
+            refused = client.post(f"/tiered/runs/{second['run_id']}/stop")
+            assert refused.status_code == 409
+            assert refused.json()["detail"] == {
+                "code": "run_not_running", "run_id": second["run_id"], "status": "queued",
+            }
+            assert client.post("/tiered/runs/nope/stop").status_code == 404
+
+            accepted = client.post(f"/tiered/runs/{first['run_id']}/stop")
+            assert accepted.status_code == 200
+            assert accepted.json() == {"run_id": first["run_id"], "ticker": "AAPL"}
+
+            body = _poll_until_done(client, first["run_id"])
+            assert body["status"] == "stopped"
+            assert body["error"] is None
+            result = body["result"]
+            assert result["stopped_stage"] == "positioning"
+            assert result["stopped_stage_finished"] is False
+            assert [d["name"] for d in result["data_reports"]] == ["technicals"]
+            assert result["data_report_index"][0]["name"] == "technicals"
+            assert "outlook" not in result
+
+            # Stopping it again: it is no longer running.
+            again = client.post(f"/tiered/runs/{first['run_id']}/stop")
+            assert again.status_code == 409
+            assert again.json()["detail"]["status"] == "stopped"
+
+            # The slot freed, so the queued run started; let it finish.
+            release.set()
+            assert _poll_until_done(client, second["run_id"])["status"] == "succeeded"
+
+        # A stopped run is history: it lists, filters and deletes like a
+        # finished one, with the trash, not the stop.
+        items = client.get("/tiered/runs", params={"status": "stopped"}).json()["items"]
+        assert [item["run_id"] for item in items] == [first["run_id"]]
+        assert items[0]["outlook"] is None
+        deleted = client.delete(f"/tiered/runs/{first['run_id']}")
+        assert deleted.status_code == 200
+        assert deleted.json()["status"] == "stopped"
+
+    def test_a_finished_run_cannot_be_stopped(self, client):
+        with patch.object(run_service, "_run_analysis",
+                          lambda code, **kwargs: _outcome(code)):
+            run_id = client.post("/tiered/analyze", json={"ticker": "AAPL"}).json()["run_id"]
+            _poll_until_done(client, run_id)
+        refused = client.post(f"/tiered/runs/{run_id}/stop")
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == {
+            "code": "run_not_running", "run_id": run_id, "status": "succeeded",
+        }
+
+
 class TestStatusEndpoint:
     def test_status_document(self, client, monkeypatch):
         monkeypatch.setenv("MAX_CONCURRENT_RUNS", "3")

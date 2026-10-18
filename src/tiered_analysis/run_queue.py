@@ -8,7 +8,9 @@ them can exhaust the machine and take every run down with it. The cap
 is ``MAX_CONCURRENT_RUNS`` (default ``DEFAULT_MAX_CONCURRENT_RUNS``),
 read on every dispatch so a changed setting applies without a restart.
 ``remove`` takes a run out of the line (or out of the history) under the
-same lock, so a cancel and a dispatch can never cross.
+same lock, so a cancel and a dispatch can never cross. ``stop`` raises
+the stop flag of an executing run (run_control.py, 2026-10-19): the run
+ends at its next checkpoint, keeping the sections that finished.
 
 How: the line itself lives in the database — a run is created ``queued``
 (src/tiered_analysis/history.py) and ``dispatch`` promotes the oldest
@@ -26,8 +28,10 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Set
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
+
+from .run_control import StopFlag
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,9 @@ class QueuedRun:
     #: The stored creation-time inputs (capital, risk_pct, reward_ratio,
     #: max_hold_weeks, tier).
     inputs: Dict[str, Any]
+    #: The run's stop flag: ``RunQueue.stop`` raises it, the runner hands
+    #: it to the engine, which ends the run at its next checkpoint.
+    stop: StopFlag = field(default_factory=StopFlag, compare=False)
 
 
 Runner = Callable[[QueuedRun], None]
@@ -75,7 +82,8 @@ class RunQueue:
     def __init__(self, runner: Runner) -> None:
         self._runner = runner
         self._lock = threading.Lock()
-        self._active: Set[str] = set()
+        #: The executing runs' stop flags, by run id.
+        self._active: Dict[str, StopFlag] = {}
 
     @property
     def active_count(self) -> int:
@@ -121,7 +129,7 @@ class RunQueue:
                     inputs=dict(row["inputs"] or {}),
                 )
                 history.mark_running(run.run_id)
-                self._active.add(run.run_id)
+                self._active[run.run_id] = run.stop
                 thread = threading.Thread(
                     target=self._work,
                     args=(run,),
@@ -135,7 +143,7 @@ class RunQueue:
                     # undo both, or the run shows running forever and the
                     # slot stays lost until a restart (2026-10-10). The
                     # line then moves on to the next waiting run.
-                    self._active.discard(run.run_id)
+                    self._active.pop(run.run_id, None)
                     reason = f"the run's worker thread could not be started: {exc}"
                     logger.exception("run %s failed to start: %s", run.run_id, reason)
                     history.mark_failed(run.run_id, reason)
@@ -150,13 +158,26 @@ class RunQueue:
         cannot be promoted to running between the check and the delete.
         Returns the deleted row's summary, None for an unknown run id;
         raises ``history.RunInProgressError`` when the run is executing
-        (its thread cannot be stopped)."""
+        (``stop`` it first, then delete the stopped run)."""
         from . import history
 
         with self._lock:
             if run_id in self._active:
                 raise history.RunInProgressError(run_id)
             return history.delete_run(run_id)
+
+    def stop(self, run_id: str) -> bool:
+        """Ask an executing run to stop: its flag goes up and the run
+        ends at its next checkpoint (the entry of a stage or the top of
+        an LLM call), keeping the sections that finished. True when the
+        run was executing; False when it was not — queued (cancel it
+        with ``remove``), already over, or unknown."""
+        with self._lock:
+            flag = self._active.get(run_id)
+            if flag is None:
+                return False
+            flag.set()
+            return True
 
     def _work(self, run: QueuedRun) -> None:
         try:
@@ -165,7 +186,7 @@ class RunQueue:
             logger.exception("run %s escaped its runner", run.run_id)
         finally:
             with self._lock:
-                self._active.discard(run.run_id)
+                self._active.pop(run.run_id, None)
             try:
                 self.dispatch()
             except Exception as exc:

@@ -4,8 +4,10 @@
 The web tiered page shows these as a clickable run list: a run starts as
 ``queued`` (waiting for a free slot in the global run queue,
 src/tiered_analysis/run_queue.py), becomes ``running``, then flips to
-``succeeded`` (with the full serialized report) or ``failed`` (with the
-error), and stays in the list as history across page navigation and
+``succeeded`` (with the full serialized report), ``failed`` (with the
+error) or ``stopped`` (the user stopped it part-way, 2026-10-19: the
+report holds the sections that finished and names the step it stopped
+in), and stays in the list as history across page navigation and
 server restarts. Queued rows outlive the process: the queue resumes them
 at startup, whereas running rows die with their thread and are failed.
 
@@ -49,13 +51,17 @@ MAX_PAGE_SIZE = 200
 STALE_RUN_ERROR = "server restarted while this run was in progress"
 
 #: Run statuses. A run is "active" (queued or running) until it settles
-#: as succeeded or failed — the duplicate check only looks at active runs.
+#: as succeeded, failed or stopped — the duplicate check only looks at
+#: active runs, so a stopped run can be started again at once.
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
+STATUS_STOPPED = "stopped"
 ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
-ALL_STATUSES = (STATUS_QUEUED, STATUS_RUNNING, STATUS_SUCCEEDED, STATUS_FAILED)
+ALL_STATUSES = (
+    STATUS_QUEUED, STATUS_RUNNING, STATUS_SUCCEEDED, STATUS_FAILED, STATUS_STOPPED,
+)
 
 #: The outlooks that count as an opinion. A finished run whose analysis
 #: produced nothing stores "no_outlook" (the page's "No outlook"), which
@@ -70,8 +76,8 @@ FILTERABLE_OUTLOOKS = OUTLOOK_WORDS + (NO_OUTLOOK,)
 
 
 class RunInProgressError(RuntimeError):
-    """The run is executing. Its thread cannot be stopped from outside,
-    so the row stays until the run finishes or fails."""
+    """The run is executing, so the row stays: stop it first
+    (``RunQueue.stop``), then delete the stopped run."""
 
     def __init__(self, run_id: str) -> None:
         super().__init__(f"run {run_id} is in progress")
@@ -147,6 +153,15 @@ def mark_failed(run_id: str, error: str) -> None:
     _update_run(run_id, status=STATUS_FAILED, error=str(error))
 
 
+def mark_stopped(run_id: str, result: Dict[str, Any]) -> None:
+    """The user stopped the run part-way: store what finished (the
+    report shape with only the finished sections, plus ``stopped_stage``).
+    The list columns keep their creation-time values — a stopped run has
+    no outlook or shares to show, whatever its analysis found, since the
+    plan it would size never finished."""
+    _update_run(run_id, status=STATUS_STOPPED, result_json=json.dumps(result))
+
+
 def mark_running(run_id: str) -> None:
     """A queued run took a slot (the queue calls this as it starts the
     thread)."""
@@ -155,10 +170,10 @@ def mark_running(run_id: str) -> None:
 
 def delete_run(run_id: str) -> Optional[Dict[str, Any]]:
     """Delete a run and its transcript rows. A queued run is simply taken
-    out of the line (that is how one is cancelled); a finished or failed
-    run is removed from the history. Returns the deleted row's summary,
-    or None for an unknown run id. Raises ``RunInProgressError`` for a
-    running row. Go through ``RunQueue.remove`` rather than calling this
+    out of the line (that is how one is cancelled); a finished, failed or
+    stopped run is removed from the history. Returns the deleted row's
+    summary, or None for an unknown run id. Raises ``RunInProgressError``
+    for a running row. Go through ``RunQueue.remove`` rather than calling this
     directly, so a queued row cannot be promoted to running between the
     check and the delete."""
     from src.storage import TieredRunRecord, TieredRunTranscriptRecord
@@ -472,8 +487,9 @@ def get_run(
 ) -> Optional[Dict[str, Any]]:
     """One run: its summary row plus ``result``, the stored report cut
     down to ``sections`` (see report_sections.py; None while the run is
-    unfinished or failed), and ``sections`` naming what ``result`` holds.
-    None for an unknown run id."""
+    unfinished or failed; on a stopped run, the sections that finished),
+    and ``sections`` naming what ``result`` holds. None for an unknown
+    run id."""
     from src.storage import TieredRunRecord
 
     with _session() as session:

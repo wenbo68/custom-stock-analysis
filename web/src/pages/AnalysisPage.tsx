@@ -103,6 +103,17 @@ function runInProgressRejection(error: unknown): boolean {
   return detail?.code === 'run_in_progress';
 }
 
+// Whether the backend refused a stop because the run is not executing
+// any more (409 with the run_not_running code): it finished, failed or
+// stopped on its own in the meantime.
+function runNotRunningRejection(error: unknown): boolean {
+  if (!axios.isAxiosError(error) || error.response?.status !== 409) {
+    return false;
+  }
+  const detail = (error.response.data as { detail?: { code?: string } } | undefined)?.detail;
+  return detail?.code === 'run_not_running';
+}
+
 function readStoredNumber(key: string): string | null {
   return readStoredValue(getLocalStorage(), key, LEGACY_STORAGE_KEYS[key]);
 }
@@ -161,6 +172,11 @@ const AnalysisPage = () => {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // The runs asked to stop whose row the server still shows as running
+  // (the step in flight finishes first); a row leaves the list the
+  // moment the server shows it as anything else.
+  const [stoppingTaskIds, setStoppingTaskIds] = useState<string[]>([]);
+  const [stopError, setStopError] = useState<string | null>(null);
   const loadingDetailRef = useRef<string | null>(null);
   // A poll and a filter change can be in flight together; only the
   // latest request may write the list, whatever order they return in.
@@ -214,6 +230,13 @@ const AnalysisPage = () => {
     return () => window.clearInterval(timer);
   }, [anyRunning, refreshRuns]);
 
+  // A stop is "on its way" only while the server still says running.
+  useEffect(() => {
+    setStoppingTaskIds((prev) =>
+      prev.filter((id) => runs.some((run) => run.run_id === id && run.status === 'running')),
+    );
+  }, [runs]);
+
   // A page past the end (the last row of a page was filtered away, or
   // the server has fewer pages than before) falls back to the last one.
   useEffect(() => {
@@ -233,10 +256,12 @@ const AnalysisPage = () => {
   );
 
   // Fetch the full report the first time a finished run is expanded (a run
-  // started as Running loads here too, the moment polling flips it to done).
+  // started as Running loads here too, the moment polling flips it to
+  // done). A stopped run has a report too: the sections that finished.
   useEffect(() => {
     const runId = expandedTaskId;
-    if (!runId || expandedRun?.status !== 'succeeded' || details[runId]) {
+    const status = expandedRun?.status;
+    if (!runId || (status !== 'succeeded' && status !== 'stopped') || details[runId]) {
       return;
     }
     if (loadingDetailRef.current === runId) {
@@ -264,8 +289,37 @@ const AnalysisPage = () => {
   const handleToggle = useCallback((runId: string) => {
     setDetailError(null);
     setDeleteError(null);
+    setStopError(null);
     setExpandedTaskId((prev) => (prev === runId ? null : runId));
   }, []);
+
+  // Stop a running run part-way (2026-10-19). The server only raises
+  // the run's flag; the row stays running until the step in flight
+  // ends, so the row is marked as stopping here until polling shows
+  // the server's own verdict.
+  const handleStop = useCallback(
+    async (runId: string) => {
+      setStopError(null);
+      setStoppingTaskIds((prev) => (prev.includes(runId) ? prev : [...prev, runId]));
+      try {
+        await tieredApi.stopRun(runId);
+        await refreshRuns();
+      } catch (error) {
+        setStoppingTaskIds((prev) => prev.filter((id) => id !== runId));
+        setStopError(
+          runNotRunningRejection(error)
+            ? t('tiered.history.stopNotRunning')
+            : t('tiered.history.stopError', {
+                error: error instanceof Error ? error.message : String(error),
+              }),
+        );
+        if (runNotRunningRejection(error)) {
+          await refreshRuns();
+        }
+      }
+    },
+    [refreshRuns, t],
+  );
 
   // Remove a run (a queued one is thereby cancelled), then re-ask the
   // server for the page and the tickers so the row and, if it was the
@@ -438,6 +492,9 @@ const AnalysisPage = () => {
             onDelete={(runId) => void handleDelete(runId)}
             deletingTaskId={deletingTaskId}
             deleteError={deleteError}
+            onStop={(runId) => void handleStop(runId)}
+            stoppingTaskIds={stoppingTaskIds}
+            stopError={stopError}
           />
         </div>
       </section>

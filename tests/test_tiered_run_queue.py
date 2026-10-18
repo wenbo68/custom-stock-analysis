@@ -231,3 +231,27 @@ class TestActiveDuplicate:
                            inputs={**self.INPUTS, "tier": 2})
         history.create_run("other", "MSFT", inputs=self.INPUTS)
         assert history.find_active_duplicate("AAPL", self.INPUTS) is None
+
+
+class TestStop:
+    def test_stop_raises_the_flag_of_an_executing_run_only(self, isolated_db, monkeypatch):
+        monkeypatch.setenv(MAX_CONCURRENT_RUNS_ENV, "1")
+        runner = _GatedRunner()
+        queue = RunQueue(runner)
+        history.create_run("first", "AAPL", status=history.STATUS_QUEUED)
+        history.create_run("second", "MSFT", status=history.STATUS_QUEUED)
+        queue.dispatch()
+        _wait_until(lambda: len(runner.started) == 1)
+
+        # A queued run has no flag to raise (cancel it with remove);
+        # an unknown id has nothing either.
+        assert queue.stop("second") is False
+        assert queue.stop("nope") is False
+        # The executing run's flag is the one its runner was handed.
+        assert queue.stop("first") is True
+        assert runner.started[0].stop.is_set()
+
+        runner.release.set()
+        _wait_until(lambda: queue.active_count == 0)
+        # Once the run is over there is nothing to stop.
+        assert queue.stop("first") is False

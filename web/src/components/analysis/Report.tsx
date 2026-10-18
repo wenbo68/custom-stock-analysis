@@ -159,7 +159,9 @@ const analysisNotes = (result: TieredResult): string[] =>
 // the personal action, plus the run-level notes mark. (The old earnings
 // warning is gone — the date lives on the fundamentals card; the
 // previous-day note moved to the history row's date, 2026-09-18.)
-const Preliminary = ({ result }: { result: TieredResult }) => {
+// `showAction` is off on a stopped run: the action depends on the plan
+// review, which never finished there.
+const Preliminary = ({ result, showAction = true }: { result: TieredResult; showAction?: boolean }) => {
   const { t } = useUiLanguage();
   const outlook = result.outlook ?? 'no_outlook';
   return (
@@ -170,7 +172,7 @@ const Preliminary = ({ result }: { result: TieredResult }) => {
             {t(`tiered.outlook.${outlook}` as UiTextKey)}
           </span>
         </Fact>
-        <ActionFact result={result} />
+        {showAction ? <ActionFact result={result} /> : null}
         <span className="ml-auto">
           <WarningsButton notes={analysisNotes(result)} />
         </span>
@@ -238,13 +240,15 @@ interface DebateProps {
   /** The run's task id — the vote tree fetches its items by it. */
   runId?: string;
   loadItems: VoteItemsLoader;
+  /** Off on a stopped run: the action depends on the plan review. */
+  showAction?: boolean;
 }
 
 // The deep-analysis card: the outlook, the clickable pool score, the
 // action, the fixed-outline report, and the evidence vote tree. Its
 // notes mark carries the card's own warnings plus the run-level ones
 // (owner decision 2026-09-18: the conclusion card that held them is gone).
-const Debate = ({ result, section, runId, loadItems }: DebateProps) => {
+const Debate = ({ result, section, runId, loadItems, showAction = true }: DebateProps) => {
   const { t } = useUiLanguage();
   const [scoreOpen, setScoreOpen] = useState(false);
   const detail = section.detail ?? null;
@@ -271,7 +275,7 @@ const Debate = ({ result, section, runId, loadItems }: DebateProps) => {
                 </button>
               </Fact>
             ) : null}
-            <ActionFact result={result} />
+            {showAction ? <ActionFact result={result} /> : null}
           </>
         }
       />
@@ -310,10 +314,34 @@ interface ResultProps {
   debateItemsLoader?: VoteItemsLoader;
 }
 
+// The stage names a stopped run's banner can carry, as the page already
+// words them: the data reports' titles, then the three analysis steps.
+const STAGE_KEYS: Record<string, UiTextKey> = {
+  technicals: 'tiered.dataReport.technicals',
+  fundamentals: 'tiered.dataReport.fundamentals',
+  macro_economy: 'tiered.dataReport.macro_economy',
+  positioning: 'tiered.dataReport.positioning',
+  company_news: 'tiered.dataReport.company_news',
+  world_news: 'tiered.dataReport.world_news',
+  preliminary_analysis: 'tiered.preliminaryAnalysis.title',
+  deep_analysis: 'tiered.deepAnalysis.title',
+  trade_plan: 'tiered.tradePlan.title',
+};
+
+const stageName = (stage: string, t: (key: UiTextKey) => string): string =>
+  STAGE_KEYS[stage] ? t(STAGE_KEYS[stage]) : stage;
+
 // The fixed skeleton (owner order 2026-09-18): the dataReport reports →
 // one analysis card (preliminary at tier-1, deep at tier-2; both carry
 // the outlook and the action) → the trade plan (levels + shares +
 // warnings). The separate conclusion card is gone.
+//
+// A stopped run (2026-10-19) shows the same skeleton with the sections
+// that never finished left out, under a banner naming the step the user
+// stopped during and whether it still finished: the data reports that
+// finished (none → no block at all), the analysis only when it
+// finished, and never the plan — nor the action, which the plan review
+// decides.
 export const Report = ({
   result,
   runId,
@@ -321,6 +349,13 @@ export const Report = ({
 }: ResultProps) => {
   const { t } = useUiLanguage();
   const usage = result.llm_usage ?? null;
+  const stoppedStage = result.stopped_stage ?? null;
+  const isStopped = stoppedStage !== null;
+  // On a finished run the analysis card always shows (old stored runs
+  // may lack the preliminary record); on a stopped one only when the
+  // analysis finished.
+  const hasAnalysis = !isStopped || !!result.deep_analysis || !!result.preliminary_analysis;
+  const hasDataReports = result.data_reports.length > 0;
   // Token total is the exact sum of what the provider reported per call
   // — the same numbers the transcript shows for each exchange.
   const usageLine = (u: NonNullable<typeof usage>) =>
@@ -331,24 +366,35 @@ export const Report = ({
 
   return (
     <div className="flex flex-col gap-6">
-      <Block title={t('tiered.dataReports.title')}>
-        <DataReports dataReports={result.data_reports} />
-      </Block>
-      {result.deep_analysis ? (
+      {isStopped ? (
+        <p data-testid="stopped-banner" className="text-sm text-caution">
+          {t(
+            result.stopped_stage_finished ? 'tiered.stoppedFinished' : 'tiered.stoppedUnfinished',
+            { stage: stageName(stoppedStage, t) },
+          )}
+        </p>
+      ) : null}
+      {hasDataReports || !isStopped ? (
+        <Block title={t('tiered.dataReports.title')}>
+          <DataReports dataReports={result.data_reports} />
+        </Block>
+      ) : null}
+      {!hasAnalysis ? null : result.deep_analysis ? (
         <Block title={t('tiered.deepAnalysis.title')} helpKey="tiered.help.deepAnalysis">
           <Debate
             result={result}
             section={result.deep_analysis}
             runId={runId}
             loadItems={debateItemsLoader}
+            showAction={!isStopped}
           />
         </Block>
       ) : (
         <Block title={t('tiered.preliminaryAnalysis.title')} helpKey="tiered.help.outlook">
-          <Preliminary result={result} />
+          <Preliminary result={result} showAction={!isStopped} />
         </Block>
       )}
-      {result.outlook === 'bullish' ? (
+      {result.outlook === 'bullish' && !isStopped ? (
         // The trade plan sits under the analysis that judged it — and
         // only under a bullish one (owner decision 2026-08-05): a
         // neutral/bearish/unknown outlook shows no plan section at all;

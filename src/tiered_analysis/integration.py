@@ -47,6 +47,7 @@ from .providers.base import (
 )
 from .providers.registry import detect_market, get_providers
 from .providers.technicals import Bar, read_metric, technicals_as_of
+from .run_control import RunStopped, StoppedRun
 from .run_gate import (
     StaleDataError,
     expected_bar_date,
@@ -161,13 +162,19 @@ class TieredRunOutcome:
 
 
 def _collect_data_reports(
-    providers: Sequence[DataReportProvider], ticker: str
+    providers: Sequence[DataReportProvider],
+    ticker: str,
+    sink: Optional[List[DataReport]] = None,
 ) -> List[DataReport]:
+    """The providers' reports, one after another in registry order.
+    ``sink`` receives each report as it finishes, so a run stopped
+    part-way (``RunStopped``, which passes the crash net below) still
+    has the finished ones."""
     # Stage-label each provider's collection so its LLM calls (the news
     # screens) show under the data_report's name in llm_usage and the run
     # transcript instead of pooling as "unknown".
     tracker = active_tracker()
-    results: List[DataReport] = []
+    results: List[DataReport] = [] if sink is None else sink
     for provider in providers:
         stage = (
             tracker.stage(provider.name) if tracker else nullcontext()
@@ -289,6 +296,7 @@ def run_tiered_analysis(
     staleness_gate: Optional[bool] = None,
     transcript: Optional[LlmTranscript] = None,
     language: str = DEFAULT_LANGUAGE,
+    stop: Optional[Any] = None,
 ) -> TieredRunOutcome:
     """Run one ticker at ``tier`` with full production wiring.
 
@@ -309,6 +317,10 @@ def run_tiered_analysis(
     the cross-provider enrichment unless a loader is passed explicitly.
     ``transcript`` receives every LLM exchange of the run (the API passes
     the run's stored transcript); None counts calls and stores nothing.
+    ``stop`` is the run's stop flag (run_control.py: a ``StopFlag``, or
+    a plain ``threading.Event``): once set, the run ends at its next
+    checkpoint with ``RunStopped``, whose ``partial`` holds the sections
+    that finished; None means the run cannot be stopped.
     """
     if tier not in SUPPORTED_TIERS:
         raise ValueError(f"tier must be one of {SUPPORTED_TIERS}, got {tier}")
@@ -352,121 +364,190 @@ def run_tiered_analysis(
     tracker = LlmUsageTracker(
         transcript=transcript if transcript is not None else LlmTranscript.discard(),
         language=require_supported(language),
+        stop=stop,
     )
-    with tracker.activate():
-        data_reports = _collect_data_reports(providers, ticker)
-        data_reports = enrich_cross_fields(data_reports, cross_bars_loader)
-
-        # STALENESS GATE (2026-08-08): stop BEFORE any LLM stage when the
-        # newest completed bar predates the most recent completed trading
-        # session — no analysis money is spent on yesterday's leftovers.
-        # A clock-gate "run anyway" during the trading day expects the
-        # PREVIOUS session's bar and passes here; only a lagging vendor
-        # stops a run, and there is deliberately no override for that.
-        # Stale bars FAIL the run (owner decision 2026-09-17; it used to
-        # finish with a "stopped" outlook) — the user asked for an
-        # analysis and gets none, so the row says so, with the dates.
-        if staleness_gate:
-            bars_up_to = technicals_as_of(data_reports)
-            stop_reason = staleness_stop_reason(bars_up_to, market_for_symbol(ticker))
-            if stop_reason is not None:
-                logger.warning(
-                    "tiered run stopped for %s before LLM stages: %s",
-                    ticker,
-                    stop_reason,
-                )
-                raise StaleDataError(
-                    stale_data_message(bars_up_to, market_for_symbol(ticker)),
-                    stop_reason,
-                )
-
-        # Formula-only levels: deterministic bases from the technicals
-        # payload; the adjustment machinery runs with zero proposals so
-        # the audit-trail shape (base/formula/inputs per level) stays.
-        bases = bases_from_data_reports(
-            data_reports, reward_ratio=sizing_settings.reward_ratio
-        )
-        decisions, adjust_warnings = apply_adjustments(
-            bases, [], atr=_technicals_atr(data_reports)
-        )
-        level_warnings = list(bases.warnings) + adjust_warnings
-        levels = decisions_to_levels(decisions)
-        levels_detail = decisions_to_detail(decisions, level_warnings)
-
-        # The next earnings date rides in the fundamentals payload (the
-        # provider fetched it); the injectable lookup is a test seam.
-        earnings = (
-            earnings_lookup(ticker, market)
-            if earnings_lookup is not None
-            else _earnings_from_dimensions(data_reports, market=market)
-        )
-        extra_warnings = level_warnings
-
-        state = TierState(ticker=ticker, market=market, max_hold_weeks=max_hold_weeks)
-        if tier == 1:
-            # The preliminary analysis (2026-08-10): the tiered package's own
-            # one-call outlook over the same data_reports the deep analysis
-            # reads (all six since 2026-08-16, both news cards included),
-            # judged against the same max hold time. No outlook
-            # (LLM down, bad replies) → UNKNOWN outlook, fail-loud
-            # warnings, no fallback — same contract as the deep analysis.
-            with tracker.stage("preliminary_analysis"):
-                preliminary = (preliminary_analysis or PreliminaryAnalysis()).run(
-                    ticker, data_reports, max_hold_weeks=max_hold_weeks
-                )
-            outlook = preliminary.outlook
-            report = TierReport(
-                tier=1,
+    # What a stop keeps (run_control.py): the finished data reports as
+    # they come in, then the levels and each analysis once it finishes.
+    collected: List[DataReport] = []
+    partial: Dict[str, Any] = {}
+    try:
+        with tracker.activate():
+            return _run_stages(
+                ticker, market, providers, preliminary_analysis, tier,
+                sizing_settings, tier2_stage, earnings_lookup, plan_summarizer,
+                cross_bars_loader, max_hold_weeks, staleness_gate, tracker,
+                collected, partial,
+            )
+    except RunStopped as stopped:
+        if stopped.partial is None:
+            stopped.partial = StoppedRun(
+                stage=stopped.stage,
                 ticker=ticker,
                 market=market,
-                outlook=outlook.outlook if outlook else Outlook.NO_OUTLOOK,
-                # The outlook is the 0-10 score in detail; the
-                # legacy sentiment-score/confidence columns stay empty
-                # (same shape as tier-2 reports).
-                confidence=None,
-                score=None,
-                summary=outlook.summary if outlook else None,
-                levels=levels,
-                levels_detail=levels_detail,
-                data_reports=data_reports,
-                warnings=list(preliminary.warnings) + extra_warnings,
-                detail=preliminary.to_detail(),
+                tier=tier,
+                max_hold_weeks=max_hold_weeks,
+                data_reports=_finished_reports(collected, cross_bars_loader),
+                llm_usage=tracker.to_detail(),
+                pressed_stage=getattr(stop, "stage", None),
+                **partial,
             )
-        else:
-            # Depth 2 skips the one-blob call entirely: the deep analysis is the
-            # judge, so the foundation report is the data layer + levels
-            # with no outlook of its own. That is the documented tier-2
-            # contract, not a data problem — so no warning for it.
-            report = TierReport(
-                tier=1,
-                ticker=ticker,
-                market=market,
-                outlook=Outlook.NO_OUTLOOK,
-                levels=levels,
-                levels_detail=levels_detail,
-                data_reports=data_reports,
-                warnings=extra_warnings,
+        raise
+
+
+def _finished_reports(
+    collected: List[DataReport],
+    cross_bars_loader: Optional[Callable[[str], List[Bar]]],
+) -> List[DataReport]:
+    """The finished cards of a stopped run with the cross-provider
+    fields added (no LLM; one cached ETF fetch at most), so a kept card
+    reads like a finished run's. An enrichment failure keeps the cards
+    as collected — the stop must land whatever happens here."""
+    try:
+        return enrich_cross_fields(collected, cross_bars_loader)
+    except Exception as exc:
+        logger.warning("cross-field enrichment skipped on a stopped run: %s", exc)
+        return list(collected)
+
+
+def _run_stages(
+    ticker: str,
+    market: Market,
+    providers: Sequence[DataReportProvider],
+    preliminary_analysis: Optional[PreliminaryAnalysis],
+    tier: int,
+    sizing_settings: SizingSettings,
+    tier2_stage: Optional[Tier2Stage],
+    earnings_lookup: Optional[Callable[[str, Market], EarningsInfo]],
+    plan_summarizer: Optional[Callable[[str], str]],
+    cross_bars_loader: Optional[Callable[[str], List[Bar]]],
+    max_hold_weeks: int,
+    staleness_gate: bool,
+    tracker: LlmUsageTracker,
+    collected: List[DataReport],
+    partial: Dict[str, Any],
+) -> TieredRunOutcome:
+    """The stages of ``run_tiered_analysis`` under its activated
+    tracker. ``collected`` and ``partial`` are the caller's records of
+    what has finished, read when a stop ends the run part-way."""
+    data_reports = _collect_data_reports(providers, ticker, sink=collected)
+    data_reports = enrich_cross_fields(data_reports, cross_bars_loader)
+
+    # STALENESS GATE (2026-08-08): stop BEFORE any LLM stage when the
+    # newest completed bar predates the most recent completed trading
+    # session — no analysis money is spent on yesterday's leftovers.
+    # A clock-gate "run anyway" during the trading day expects the
+    # PREVIOUS session's bar and passes here; only a lagging vendor
+    # stops a run, and there is deliberately no override for that.
+    # Stale bars FAIL the run (owner decision 2026-09-17; it used to
+    # finish with a "stopped" outlook) — the user asked for an
+    # analysis and gets none, so the row says so, with the dates.
+    if staleness_gate:
+        bars_up_to = technicals_as_of(data_reports)
+        stop_reason = staleness_stop_reason(bars_up_to, market_for_symbol(ticker))
+        if stop_reason is not None:
+            logger.warning(
+                "tiered run stopped for %s before LLM stages: %s",
+                ticker,
+                stop_reason,
             )
-        state.reports[1] = report
-        state.data_reports = list(data_reports)
+            raise StaleDataError(
+                stale_data_message(bars_up_to, market_for_symbol(ticker)),
+                stop_reason,
+            )
 
-        final = report
-        if tier >= 2:
-            with tracker.stage("deep_analysis"):
-                final = (tier2_stage or Tier2Stage()).run(state)
-            state.reports[2] = final
+    # Formula-only levels: deterministic bases from the technicals
+    # payload; the adjustment machinery runs with zero proposals so
+    # the audit-trail shape (base/formula/inputs per level) stays.
+    bases = bases_from_data_reports(
+        data_reports, reward_ratio=sizing_settings.reward_ratio
+    )
+    decisions, adjust_warnings = apply_adjustments(
+        bases, [], atr=_technicals_atr(data_reports)
+    )
+    level_warnings = list(bases.warnings) + adjust_warnings
+    levels = decisions_to_levels(decisions)
+    levels_detail = decisions_to_detail(decisions, level_warnings)
 
-        # AI plan review (bullish outlooks only): the deterministic checks
-        # may trim the share count or move stop/target with cited
-        # reasons, and produce the plan card's structured warnings.
-        review = None
-        if final.outlook is Outlook.BULLISH and bases.get("entry") is not None:
-            with tracker.stage("trade_plan"):
-                review = review_plan(
-                    ticker, data_reports, bases, final.outlook, market,
-                    sizing_settings,
-                    summarizer=plan_summarizer, max_hold_weeks=max_hold_weeks,
-                )
+    # The next earnings date rides in the fundamentals payload (the
+    # provider fetched it); the injectable lookup is a test seam.
+    earnings = (
+        earnings_lookup(ticker, market)
+        if earnings_lookup is not None
+        else _earnings_from_dimensions(data_reports, market=market)
+    )
+    extra_warnings = level_warnings
+    partial.update(
+        levels=levels, levels_detail=levels_detail,
+        level_warnings=list(level_warnings), earnings=earnings,
+    )
+
+    state = TierState(ticker=ticker, market=market, max_hold_weeks=max_hold_weeks)
+    if tier == 1:
+        # The preliminary analysis (2026-08-10): the tiered package's own
+        # one-call outlook over the same data_reports the deep analysis
+        # reads (all six since 2026-08-16, both news cards included),
+        # judged against the same max hold time. No outlook
+        # (LLM down, bad replies) → UNKNOWN outlook, fail-loud
+        # warnings, no fallback — same contract as the deep analysis.
+        with tracker.stage("preliminary_analysis"):
+            preliminary = (preliminary_analysis or PreliminaryAnalysis()).run(
+                ticker, data_reports, max_hold_weeks=max_hold_weeks
+            )
+        outlook = preliminary.outlook
+        report = TierReport(
+            tier=1,
+            ticker=ticker,
+            market=market,
+            outlook=outlook.outlook if outlook else Outlook.NO_OUTLOOK,
+            # The outlook is the 0-10 score in detail; the
+            # legacy sentiment-score/confidence columns stay empty
+            # (same shape as tier-2 reports).
+            confidence=None,
+            score=None,
+            summary=outlook.summary if outlook else None,
+            levels=levels,
+            levels_detail=levels_detail,
+            data_reports=data_reports,
+            warnings=list(preliminary.warnings) + extra_warnings,
+            detail=preliminary.to_detail(),
+        )
+        partial["preliminary"] = report
+    else:
+        # Depth 2 skips the one-blob call entirely: the deep analysis is the
+        # judge, so the foundation report is the data layer + levels
+        # with no outlook of its own. That is the documented tier-2
+        # contract, not a data problem — so no warning for it.
+        report = TierReport(
+            tier=1,
+            ticker=ticker,
+            market=market,
+            outlook=Outlook.NO_OUTLOOK,
+            levels=levels,
+            levels_detail=levels_detail,
+            data_reports=data_reports,
+            warnings=extra_warnings,
+        )
+    state.reports[1] = report
+    state.data_reports = list(data_reports)
+
+    final = report
+    if tier >= 2:
+        with tracker.stage("deep_analysis"):
+            final = (tier2_stage or Tier2Stage()).run(state)
+        state.reports[2] = final
+        partial["deep"] = final
+
+    # AI plan review (bullish outlooks only): the deterministic checks
+    # may trim the share count or move stop/target with cited
+    # reasons, and produce the plan card's structured warnings.
+    review = None
+    if final.outlook is Outlook.BULLISH and bases.get("entry") is not None:
+        with tracker.stage("trade_plan"):
+            review = review_plan(
+                ticker, data_reports, bases, final.outlook, market,
+                sizing_settings,
+                summarizer=plan_summarizer, max_hold_weeks=max_hold_weeks,
+            )
 
     plan_warnings: Optional[Dict[str, Any]] = None
     if review is not None:

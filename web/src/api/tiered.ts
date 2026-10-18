@@ -399,11 +399,22 @@ export type TieredResult = {
   // absent on old stored runs.
   max_hold_weeks?: number | null;
   data_report_index?: TieredDataReportIndexEntry[];
+  // Stopped runs only (2026-10-19): the step that was running when the
+  // user pressed stop — a data report's name, preliminary_analysis,
+  // deep_analysis or trade_plan — and whether that step still finished
+  // (a stop takes effect at the next checkpoint, so a quick card or a
+  // one-call analysis may complete and be shown). The report holds only
+  // the sections that finished: data_reports is partial, the analysis
+  // is there when it finished, the plan (and the action it decides)
+  // never is.
+  stopped_stage?: string | null;
+  stopped_stage_finished?: boolean;
 };
 
 // queued (2026-09-15): waiting for a free slot in the server's global run
-// queue; it becomes running by itself.
-export type TieredRunStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+// queue; it becomes running by itself. stopped (2026-10-19): the user
+// stopped it part-way; its report holds what finished.
+export type TieredRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'stopped';
 
 // A history row speaks the run form's own words and order (2026-09-24):
 // ticker, capital, risk_pct, reward_ratio, max_hold_weeks, tier — the
@@ -484,7 +495,7 @@ export type TieredRunPage = {
 export type TieredRunDeleted = {
   run_id: string;
   ticker: string;
-  status: 'queued' | 'succeeded' | 'failed';
+  status: 'queued' | 'succeeded' | 'failed' | 'stopped';
 };
 
 // GET /runs/{id}/vote_items: one page of a deep run's vote items.
@@ -507,6 +518,13 @@ export type TieredVoteItemPage = {
 
 // The most vote items one page may hold (the server's cap).
 export const VOTE_ITEMS_PAGE_MAX = 200;
+
+// POST /runs/{run_id}/stop: the run's stop flag is up; it stays running
+// until its current step finishes, then lands as stopped.
+export type TieredRunStopRequested = {
+  run_id: string;
+  ticker: string;
+};
 
 // GET /status: what the server can do right now (2026-09-21).
 export type TieredMarketClock = {
@@ -660,6 +678,17 @@ export const tieredApi = {
   // run_in_progress.
   deleteRun: async (runId: string): Promise<TieredRunDeleted> => {
     const response = await apiClient.delete<TieredRunDeleted>(`/api/v1/tiered/runs/${runId}`);
+    return response.data;
+  },
+
+  // Stop a running run part-way. The run ends at its next checkpoint
+  // (a model call in flight finishes and counts) and lands as stopped
+  // with the sections that finished. A run that is not running is
+  // refused with a 409 whose detail.code is run_not_running.
+  stopRun: async (runId: string): Promise<TieredRunStopRequested> => {
+    const response = await apiClient.post<TieredRunStopRequested>(
+      `/api/v1/tiered/runs/${runId}/stop`,
+    );
     return response.data;
   },
 

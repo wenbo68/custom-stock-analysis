@@ -22,12 +22,14 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from src.languages import DEFAULT_LANGUAGE
 from src.tiered_analysis import history
-from src.tiered_analysis.llm_support import LlmTranscript
+from src.tiered_analysis.llm_support import LlmTranscript, _UNKNOWN_STAGE
+from src.tiered_analysis.providers.registry import detect_market
 from src.tiered_analysis.run_context import llm_model
+from src.tiered_analysis.run_control import RunStopped, StoppedRun
 from src.tiered_analysis.run_queue import QueuedRun, RunQueue
 from src.tiered_analysis.run_request import TieredAnalyzeRequest
 from src.tiered_analysis.settings import SizingSettings, merge_overrides
@@ -39,14 +41,15 @@ def _run_analysis(ticker: str, tier: int = 1,
                   sizing: Optional[SizingSettings] = None,
                   max_hold_weeks: int = 2,
                   transcript: Optional[LlmTranscript] = None,
-                  language: str = DEFAULT_LANGUAGE):
+                  language: str = DEFAULT_LANGUAGE,
+                  stop: Optional[threading.Event] = None):
     """Indirection so tests can patch the multi-minute production run."""
     from src.tiered_analysis.integration import run_tiered_analysis
 
     return run_tiered_analysis(
         ticker, tier=tier, sizing_settings=sizing,
         max_hold_weeks=max_hold_weeks, transcript=transcript,
-        language=language,
+        language=language, stop=stop,
     )
 
 
@@ -77,10 +80,9 @@ def _serialize_tier_section(report: Any) -> Optional[Dict[str, Any]]:
     return section
 
 
-def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
-    report = outcome.report
+def _serialize_data_reports(reports: Sequence[Any]) -> List[Dict[str, Any]]:
     data_reports = []
-    for dim in report.data_reports:
+    for dim in reports:
         data_reports.append({
             "name": dim.name,
             "kind": dim.kind.value,
@@ -104,7 +106,12 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
                 for c in (dim.citations or [])
             ],
         })
+    return data_reports
 
+
+def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
+    report = outcome.report
+    data_reports = _serialize_data_reports(report.data_reports)
     state_reports = getattr(outcome.state, "reports", {}) or {}
     final = outcome.final_report or report
     return {
@@ -147,9 +154,72 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
     }
 
 
+def _serialize_stopped(run: QueuedRun, stopped: RunStopped) -> Dict[str, Any]:
+    """The stored report of a stopped run: the same shape as a finished
+    one, holding only the sections that finished, plus ``stopped_stage``
+    — the step that was running when the user pressed stop — and
+    ``stopped_stage_finished``, whether that step still finished (a stop
+    takes effect at the next checkpoint, so a quick card or a one-call
+    analysis may complete and be shown). The analysis's outlook is there when
+    the analysis finished; the action never is, since it depends on the
+    plan review, which did not (a stop there is the latest possible).
+    The plan receipt (levels detail, sizing, plan warnings) is absent for
+    the same reason, even when the formula levels exist."""
+    partial = stopped.partial
+    if partial is None:
+        partial = StoppedRun(
+            stage=stopped.stage, ticker=run.ticker,
+            market=detect_market(run.ticker),
+            tier=int(run.inputs.get("tier") or 1),
+            max_hold_weeks=int(run.inputs.get("max_hold_weeks") or 2),
+        )
+    analysis = partial.deep or partial.preliminary
+    levels = partial.levels
+    # The step the user saw: where stop was pressed; when that is
+    # unknown (pressed between steps), the step the stop landed in. The
+    # landing step is the one discarded, so any earlier step finished.
+    pressed = partial.pressed_stage
+    if not pressed or pressed == _UNKNOWN_STAGE:
+        pressed = stopped.stage
+    result: Dict[str, Any] = {
+        "ticker": partial.ticker,
+        "market": partial.market.value,
+        "tier": partial.tier,
+        "stopped_stage": pressed,
+        "stopped_stage_finished": pressed != stopped.stage,
+        "score": None,
+        "confidence": None,
+        "levels": (
+            _serialize_levels(levels) if levels is not None
+            else {"entry": None, "stop_loss": None, "target": None}
+        ),
+        "levels_detail": None,
+        "summary": analysis.summary if analysis is not None else None,
+        "warnings": (
+            list(partial.preliminary.warnings) if partial.preliminary is not None
+            else list(partial.level_warnings)
+        ),
+        "preliminary_analysis": (
+            partial.preliminary.detail if partial.preliminary is not None else None
+        ),
+        "data_reports": _serialize_data_reports(partial.data_reports),
+        "final": None,
+        "deep_analysis": _serialize_tier_section(partial.deep),
+        "sizing": None,
+        "llm_usage": partial.llm_usage,
+        "earnings": partial.earnings.to_detail() if partial.earnings else None,
+        "plan_warnings": None,
+        "max_hold_weeks": partial.max_hold_weeks,
+    }
+    if analysis is not None:
+        result["outlook"] = analysis.outlook.value
+    return result
+
+
 def _execute_run(run: QueuedRun) -> None:
     """The queue's runner: execute one run and record its outcome. Never
-    raises — a failure lands on the run row."""
+    raises — a failure lands on the run row, and a stop (``RunStopped``)
+    lands as the stopped row with the sections that finished."""
     try:
         inputs = run.inputs
         outcome = _run_analysis(
@@ -159,8 +229,13 @@ def _execute_run(run: QueuedRun) -> None:
             max_hold_weeks=int(inputs.get("max_hold_weeks") or 2),
             transcript=LlmTranscript.for_run(run.run_id),
             language=str(inputs.get("language") or DEFAULT_LANGUAGE),
+            stop=run.stop,
         )
         history.mark_succeeded(run.run_id, _serialize_outcome(outcome))
+    except RunStopped as stopped:
+        logger.info("tiered run %s for %s stopped during %s",
+                    run.run_id, run.ticker, stopped.stage)
+        history.mark_stopped(run.run_id, _serialize_stopped(run, stopped))
     except Exception as exc:
         logger.error("tiered analysis task failed for %s: %s",
                      run.ticker, exc, exc_info=True)

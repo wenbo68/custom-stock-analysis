@@ -43,7 +43,7 @@ DEFAULT_LIST_PAGE = 10
 CHARS_PER_TOKEN = 4
 
 VoteItemStatus = Literal["counted", "excluded"]
-RunStatus = Literal["queued", "running", "succeeded", "failed"]
+RunStatus = Literal["queued", "running", "succeeded", "failed", "stopped"]
 OutlookFilter = Literal["bullish", "neutral", "bearish", "no_outlook"]
 ExtraSection = Literal["plan", "deep_analysis"]
 DATA_REPORTS = (
@@ -345,7 +345,8 @@ def confirm_delete_run(p: RunParams) -> Dict[str, Any]:
         return not_found("run", p.run_id)
     if run["status"] == history.STATUS_RUNNING:
         return {"error": "run_in_progress", "run_id": p.run_id,
-                "message": "the run is executing and cannot be stopped; wait for it to finish, then delete it"}
+                "message": ("the run is executing and cannot be deleted; stop it first "
+                            "(stop_run), then delete the stopped run")}
     return {"run": run}
 
 
@@ -354,11 +355,42 @@ def run_delete_run(p: RunParams) -> Dict[str, Any]:
         deleted = run_service.run_queue.remove(p.run_id)
     except history.RunInProgressError:
         return {"error": "run_in_progress", "run_id": p.run_id,
-                "message": "the run is executing and cannot be stopped"}
+                "message": ("the run is executing and cannot be deleted; stop it first "
+                            "(stop_run), then delete the stopped run")}
     if deleted is None:
         return not_found("run", p.run_id)
     return {"deleted": True, "run_id": deleted["run_id"],
             "ticker": deleted["ticker"], "status": deleted["status"]}
+
+
+def _not_running(run: Dict[str, Any]) -> Dict[str, Any]:
+    hint = ("cancel a queued run with delete_run" if run["status"] == history.STATUS_QUEUED
+            else "it is already over")
+    return {"error": "run_not_running", "run_id": run["run_id"], "status": run["status"],
+            "message": f"the run is not executing ({run['status']}); {hint}"}
+
+
+def confirm_stop_run(p: RunParams) -> Dict[str, Any]:
+    run = history.get_run_summary(p.run_id)
+    if run is None:
+        return not_found("run", p.run_id)
+    if run["status"] != history.STATUS_RUNNING:
+        return _not_running(run)
+    return {"run": run}
+
+
+def run_stop_run(p: RunParams) -> Dict[str, Any]:
+    """The same as ``POST /runs/{run_id}/stop``: raise the run's stop
+    flag. The run ends at its next checkpoint, not at once, so the
+    answer says the stop was requested, not that the run is over."""
+    run = history.get_run_summary(p.run_id)
+    if run is None:
+        return not_found("run", p.run_id)
+    if not run_service.run_queue.stop(p.run_id):
+        # The run may have ended between the question and the yes.
+        return _not_running(history.get_run_summary(p.run_id) or run)
+    return {"stop_requested": True, "run_id": p.run_id, "ticker": run["ticker"],
+            "status": history.STATUS_RUNNING}
 
 
 # ---------------------------------------------------------------------------
@@ -451,10 +483,24 @@ TOOLS: Tuple[Tool, ...] = (
         params=StartRunParams, run=run_start_run, confirm=confirm_start_run, resolve=resolve_start_run,
     ),
     Tool(
+        name="stop_run",
+        description=(
+            "Stop a running run part-way (the user is asked to confirm first). The run "
+            "ends at its next checkpoint — the start of its next step or its next model "
+            "call — so a step in flight still finishes and is billed; the run stays "
+            "'running' until then, then lands as 'stopped' with the sections that "
+            "finished (check get_run later). Only a running run can be stopped: a queued "
+            "run is cancelled with delete_run (error run_not_running otherwise)."
+        ),
+        params=RunParams, run=run_stop_run, confirm=confirm_stop_run,
+    ),
+    Tool(
         name="delete_run",
         description=(
             "Delete a run and its transcript (the user is asked to confirm first). "
-            "A queued run is thereby cancelled. A running run cannot be stopped."
+            "A queued run is thereby cancelled. A running run cannot be deleted "
+            "(error run_in_progress): stop it with stop_run first, then delete it "
+            "once it has landed as 'stopped'."
         ),
         params=RunParams, run=run_delete_run, confirm=confirm_delete_run,
     ),

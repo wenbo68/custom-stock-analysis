@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Trash2 } from 'lucide-react';
+import { Square, Trash2 } from 'lucide-react';
 import type { TieredResult, TieredRunSummary } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey } from '../../i18n/uiText';
@@ -16,7 +16,7 @@ import { hasAnyFilter, isValidDay, toggled, type HistoryFilters } from './histor
 // 2026-09-17). Only a real opinion counts as an outlook: a run with none
 // (unfinished, failed, or the judge produced nothing) shows a dash —
 // and the outlook filter offers that dash too (owner request 2026-09-18).
-const FILTER_STATUSES = ['queued', 'running', 'succeeded', 'failed'] as const;
+const FILTER_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'stopped'] as const;
 const OUTLOOK_WORDS = ['bullish', 'neutral', 'bearish'] as const;
 // The server's name for "rows with no opinion" in the outlook filter.
 const NO_OUTLOOK = 'no_outlook';
@@ -139,10 +139,22 @@ export interface RunHistoryProps {
   deletingTaskId: string | null;
   /** Why the last removal failed, shown under the expanded row. */
   deleteError: string | null;
+  /** Stop the running run part-way; the page asks the server (2026-10-19). */
+  onStop: (runId: string) => void;
+  /** The runs whose stop was asked for and not yet confirmed by the
+   *  server — their row stays "running" until the step in flight ends. */
+  stoppingTaskIds: string[];
+  /** Why the last stop was refused, shown under that row. */
+  stopError: string | null;
 }
 
-// Whether the row offers removal: a running run cannot be stopped.
+// Whether the row offers removal: a running run offers a stop instead
+// (2026-10-19); once stopped it is history and offers the trash.
 const isRemovable = (run: TieredRunSummary): boolean => run.status !== 'running';
+
+// The same spot and look as the trash, so the two never both show.
+const ROW_BUTTON =
+  'cursor-pointer justify-self-end rounded p-1 text-ink-5 hover:text-negative disabled:cursor-default disabled:opacity-50 disabled:hover:text-ink-5';
 
 // Section 2: run history. Filters at the top apply the moment something is
 // entered or picked — no search button — and show as removable pills
@@ -152,10 +164,12 @@ const isRemovable = (run: TieredRunSummary): boolean => run.status !== 'running'
 // per run (10 per page), each fact sitting directly under its filter:
 // ticker, capital, risk, rewardRatio, max maxHoldWeeks, tier, status, outlook, date,
 // and a trash button at the end of the row (owner request 2026-09-23:
-// no delete link inside the expanded row). Clicking a row expands the
-// full report inline. A freshly started run appears at the top as
-// Queued or Running with a dash for its outlook, and turns into a Done
-// row with its outlook when it finishes.
+// no delete link inside the expanded row) — or, while the run is
+// running, a stop button in the same spot (2026-10-19). Clicking a row
+// expands the full report inline. A freshly started run appears at the
+// top as Queued or Running with a dash for its outlook, and turns into a
+// Succeeded row with its outlook when it finishes, or a Stopped row
+// whose report holds what finished before the stop.
 export const RunHistory = ({
   runs,
   tickers,
@@ -171,6 +185,9 @@ export const RunHistory = ({
   onDelete,
   deletingTaskId,
   deleteError,
+  onStop,
+  stoppingTaskIds,
+  stopError,
 }: RunHistoryProps) => {
   const { t, language } = useUiLanguage();
   // The run whose amber date was clicked — its previous-day note is open.
@@ -180,6 +197,9 @@ export const RunHistory = ({
   // The run whose removal was last confirmed: the server's refusal, if
   // any, shows under that row.
   const [removedTaskId, setRemovedTaskId] = useState<string | null>(null);
+  // The same two for the stop button.
+  const [confirmStopTaskId, setConfirmStopTaskId] = useState<string | null>(null);
+  const [stoppedTaskId, setStoppedTaskId] = useState<string | null>(null);
 
   const hasFilters = hasAnyFilter(filters);
 
@@ -466,6 +486,8 @@ export const RunHistory = ({
                     <span className="text-xs text-info">{t('tiered.status.running')}</span>
                   ) : run.status === 'failed' ? (
                     <span className="text-xs text-negative">{t('tiered.status.failed')}</span>
+                  ) : run.status === 'stopped' ? (
+                    <span className="text-xs text-caution">{t('tiered.status.stopped')}</span>
                   ) : (
                     <span className="text-xs text-positive">{t('tiered.status.succeeded')}</span>
                   )}
@@ -525,12 +547,36 @@ export const RunHistory = ({
                         event.stopPropagation();
                         setConfirmTaskId(run.run_id);
                       }}
-                      className="cursor-pointer justify-self-end rounded p-1 text-ink-5 hover:text-negative disabled:cursor-default disabled:opacity-50 disabled:hover:text-ink-5"
+                      className={ROW_BUTTON}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   ) : (
-                    <span aria-hidden="true" className="w-6" />
+                    // A running run: the stop button sits where the
+                    // trash will once it has stopped. A click here stops
+                    // the run (after a confirmation), never toggles the row.
+                    <button
+                      type="button"
+                      data-testid="run-stop"
+                      aria-label={
+                        stoppingTaskIds.includes(run.run_id)
+                          ? t('tiered.history.stopping')
+                          : t('tiered.history.stop')
+                      }
+                      title={
+                        stoppingTaskIds.includes(run.run_id)
+                          ? t('tiered.history.stopping')
+                          : t('tiered.history.stop')
+                      }
+                      disabled={stoppingTaskIds.includes(run.run_id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setConfirmStopTaskId(run.run_id);
+                      }}
+                      className={ROW_BUTTON}
+                    >
+                      <Square className="h-3.5 w-3.5 fill-current" />
+                    </button>
                   )}
                 </div>
                 {deleteError && removedTaskId === run.run_id ? (
@@ -538,6 +584,40 @@ export const RunHistory = ({
                     {deleteError}
                   </p>
                 ) : null}
+                {stopError && stoppedTaskId === run.run_id ? (
+                  <p className="pb-2 text-xs text-caution" data-testid="run-stop-error">
+                    {stopError}
+                  </p>
+                ) : null}
+                <Modal
+                  isOpen={confirmStopTaskId === run.run_id}
+                  onClose={() => setConfirmStopTaskId(null)}
+                >
+                  <div className={MODAL_BODY}>
+                    <p>{t('tiered.history.stopAsk')}</p>
+                    <div className="flex justify-end gap-4 pt-1">
+                      <button
+                        type="button"
+                        className="cursor-pointer text-ink-3 hover:text-ink-1"
+                        onClick={() => setConfirmStopTaskId(null)}
+                      >
+                        {t('tiered.history.keep')}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="run-stop-confirm"
+                        className="cursor-pointer font-semibold text-negative hover:text-negative-hover"
+                        onClick={() => {
+                          setConfirmStopTaskId(null);
+                          setStoppedTaskId(run.run_id);
+                          onStop(run.run_id);
+                        }}
+                      >
+                        {t('tiered.history.confirmStop')}
+                      </button>
+                    </div>
+                  </div>
+                </Modal>
                 <Modal
                   isOpen={confirmTaskId === run.run_id}
                   onClose={() => setConfirmTaskId(null)}
@@ -590,7 +670,11 @@ export const RunHistory = ({
                     ) : run.status === 'queued' ? (
                       <p className="text-sm text-ink-4">{t('tiered.queued')}</p>
                     ) : run.status === 'running' ? (
-                      <p className="text-sm text-ink-4">{t('tiered.running')}</p>
+                      <p className="text-sm text-ink-4">
+                        {stoppingTaskIds.includes(run.run_id)
+                          ? t('tiered.stopping')
+                          : t('tiered.running')}
+                      </p>
                     ) : expandedResult ? (
                       <Report result={expandedResult} runId={run.run_id} />
                     ) : expandedError ? (

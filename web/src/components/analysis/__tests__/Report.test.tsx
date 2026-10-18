@@ -295,6 +295,73 @@ describe('Report', () => {
     expect(screen.queryByRole('button', { name: /3 .*120/ })).not.toBeInTheDocument();
   });
 
+  // Stopped runs (2026-10-19): the report holds only the sections that
+  // finished, a banner names the step the stop landed in, and the plan
+  // (and the action it decides) never shows.
+  it('a run stopped during the data reports shows the finished cards and nothing else', () => {
+    const result: TieredResult = {
+      ...makeResult(),
+      tier: 1,
+      stopped_stage: 'positioning',
+      data_reports: ['technicals', 'fundamentals'].map(makeDimension),
+      outlook: undefined,
+      action: undefined,
+      deep_analysis: null,
+      preliminary_analysis: null,
+      levels: { entry: null, stop_loss: null, target: null },
+      levels_detail: null,
+      sizing: null,
+      llm_usage: null,
+    };
+    renderResult(result);
+    const banner = screen.getByTestId('stopped-banner');
+    expect(banner).toHaveTextContent(/You stopped during Positioning\. Positioning did not finish and is not shown\.|仓位/);
+    expect(screen.getByTestId('data-report-technicals')).toBeInTheDocument();
+    expect(screen.getByTestId('data-report-fundamentals')).toBeInTheDocument();
+    expect(screen.queryByTestId('data-report-positioning')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('preliminary-analysis')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('deep_analysis')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+    expect(screen.queryByText(/初步分析|Preliminary analysis/)).not.toBeInTheDocument();
+  });
+
+  it('a run stopped before any card finished says so and shows no data-reports block', () => {
+    const result: TieredResult = {
+      ...makeResult(),
+      stopped_stage: 'technicals',
+      data_reports: [],
+      outlook: undefined,
+      deep_analysis: null,
+      levels_detail: null,
+      sizing: null,
+    };
+    renderResult(result);
+    expect(screen.getByTestId('stopped-banner')).toHaveTextContent(/Technicals did not finish|技术面/);
+    expect(screen.queryByText(/数据报告|Data reports/)).not.toBeInTheDocument();
+  });
+
+  it('a run stopped at the trade plan keeps its analysis but shows no action and no plan', () => {
+    // Stop was pressed during the deep analysis, which still finished;
+    // the stop took effect at the trade plan.
+    const result: TieredResult = {
+      ...makeResult(),
+      stopped_stage: 'deep_analysis',
+      stopped_stage_finished: true,
+      action: undefined,
+      levels_detail: null,
+      sizing: null,
+    };
+    renderResult(result);
+    expect(screen.getByTestId('stopped-banner')).toHaveTextContent(
+      /You stopped during Deep analysis\. Deep analysis finished and is shown\.|深度分析/,
+    );
+    expect(screen.getByTestId('deep_analysis')).toBeInTheDocument();
+    expect(screen.getByText(/^(看多|Bullish)$/)).toBeInTheDocument();
+    expect(screen.queryByText(/^(Action|操作)$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Buy now|Buy later|No trade|Re-run|立即买入|稍后买入/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+  });
+
   it('keeps the blocks in the fixed order with their titles above the cards', () => {
     renderResult(makeResult());
     const wanted = ['data-report-technicals', 'deep_analysis', 'plan'];

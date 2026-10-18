@@ -22,7 +22,9 @@ from src.tiered_analysis.run_request import TieredAnalyzeRequest as _TieredAnaly
 # the chat's tool and the user share one vocabulary (owner request
 # 2026-09-24). The engine and the database use the same words too.
 
-RunStatus = Literal["queued", "running", "succeeded", "failed"]
+#: `stopped` = the user stopped the run part-way (2026-10-19); its report
+#: holds the sections that finished and names the step it stopped in.
+RunStatus = Literal["queued", "running", "succeeded", "failed", "stopped"]
 #: `no_outlook` = the run finished but the analysis produced no outlook
 #: (the page's "No outlook").
 Outlook = Literal["bullish", "neutral", "bearish", "no_outlook"]
@@ -115,7 +117,11 @@ class RunDetail(RunSummary):
             "The stored report (shape: web/src/api/tiered.ts TieredResult), "
             "limited to `sections`, plus `data_report_index`: one light row per "
             "data report (name, kind, counted, warnings) whatever the "
-            "sections. Null while queued/running and after a failure."
+            "sections. Null while queued/running and after a failure. On a "
+            "stopped run: the sections that finished, plus `stopped_stage` "
+            "(the step that was running when the user pressed stop) and "
+            "`stopped_stage_finished` (whether that step still finished and "
+            "is in the report)."
         ),
     )
 
@@ -125,9 +131,18 @@ class RunDeleted(BaseModel):
 
     run_id: str
     ticker: str
-    status: Literal["queued", "succeeded", "failed"] = Field(
+    status: Literal["queued", "succeeded", "failed", "stopped"] = Field(
         description="What the run was. `queued` means it was cancelled before it started.",
     )
+
+
+class RunStopRequested(BaseModel):
+    """The run's stop flag is up. It stays `running` until its current
+    step finishes (a model call in flight is never cut off), then lands
+    as `stopped` with the sections that finished."""
+
+    run_id: str
+    ticker: str
 
 
 # ---------------------------------------------------------------------------
