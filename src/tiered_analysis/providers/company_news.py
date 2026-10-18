@@ -13,9 +13,10 @@ fallbacks when no summary could be written.
 Two interchangeable feeds (2026-08-14, source-quality trial):
 ``FINNHUB_API_KEY`` set → Finnhub's company-news endpoint (per-ticker
 with a real date range — Yahoo cannot do that); key absent → Yahoo
-Finance via yfinance (works unconfigured, per the config house rule).
-Both normalize to the same five-field entry shape, so everything
-downstream is source-blind.
+Finance's news SEARCH via yfinance (works unconfigured, per the config
+house rule; the per-ticker news tab went silent 2026-10-02, see
+``_yahoo_news_loader``). Both normalize to the same five-field entry
+shape, so everything downstream is source-blind.
 
 The card originally carried a second "company statements" group (SEC
 filings); the owner deleted it 2026-08-13 — its only unique signal
@@ -99,8 +100,10 @@ NEWS_WINDOW_BDAYS = 6
 
 #: How many articles to request from Yahoo's feed (its default is 10).
 #: 25 -> 150 (owner decision 2026-08-17): the keyless backup should
-#: reach roughly as deep as the window; Yahoo honors counts up to ~200
-#: (measured 2026-08-17: 300 requested -> 198 returned).
+#: reach roughly as deep as the window; the old news tab honored counts
+#: up to ~200 (measured 2026-08-17: 300 requested -> 198 returned); the
+#: news search that replaced it answers ~50 whatever is asked (measured
+#: 2026-10-18), 2-3 days deep.
 NEWS_FETCH_COUNT = 150
 
 
@@ -182,18 +185,29 @@ def normalize_news_entry(entry: Mapping[str, Any]) -> Dict[str, Optional[str]]:
 
 
 def _yahoo_news_loader(ticker: str) -> List[Dict[str, Optional[str]]]:
-    """Recent Yahoo Finance news, normalized to {title, publisher, url,
-    date, summary}. Requests more than Yahoo's 10-article default so a
-    heavily-covered stock still shows more than a day or two."""
+    """Recent Yahoo Finance news via its news SEARCH, normalized to
+    {title, publisher, url, date, summary}. The per-ticker news tab
+    (``Ticker.get_news`` / ``Ticker.news``) is not used: it has returned
+    an empty list for every symbol since 2026-10-02, on every yfinance
+    1.x release through 1.7.0. The search answers the stories that
+    mention the ticker, headline and publisher only (no abstract); an
+    item whose ``relatedTickers`` list exists but omits the ticker is
+    another company's story that merely matched the words and is
+    dropped here — the relevance filter downstream judges the rest."""
     import yfinance as yf
 
-    ticker = yf.Ticker(ticker)
-    try:
-        raw = ticker.get_news(count=NEWS_FETCH_COUNT)
-    except TypeError:  # older yfinance without the count parameter
-        raw = ticker.news
-    raw = raw or []
-    return [normalize_news_entry(entry) for entry in raw if isinstance(entry, Mapping)]
+    raw = yf.Search(ticker, news_count=NEWS_FETCH_COUNT).news or []
+    wanted = ticker.upper()
+    entries: List[Dict[str, Optional[str]]] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        related = entry.get("relatedTickers")
+        if isinstance(related, list) and related:
+            if wanted not in {str(symbol).upper() for symbol in related}:
+                continue
+        entries.append(normalize_news_entry(entry))
+    return entries
 
 
 FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/company-news"

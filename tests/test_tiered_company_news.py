@@ -213,6 +213,57 @@ class TestHelpers(unittest.TestCase):
             },
         )
 
+    def test_yahoo_loader_uses_the_news_search_and_keeps_the_tickers_stories(self):
+        # Yahoo's per-ticker news tab has returned nothing since
+        # 2026-10-02 (every yfinance 1.x); the news SEARCH still
+        # answers. A story whose relatedTickers list exists but omits
+        # the ticker is another company's story that matched the words
+        # — dropped; a story with no such list is kept for the
+        # relevance filter downstream to judge.
+        fake_search = mock.Mock()
+        fake_search.return_value.news = [
+            {
+                "title": "Apple beats on iPhone",
+                "publisher": "Reuters",
+                "link": "https://example.com/apple",
+                "providerPublishTime": 1792324800,  # 2026-10-18 UTC
+                "relatedTickers": ["AAPL", "MSFT"],
+            },
+            {
+                "title": "Own VGT? What is really inside",
+                "publisher": "Motley Fool",
+                "link": "https://example.com/vgt",
+                "providerPublishTime": 1792324800,
+                "relatedTickers": ["VGT", "NVDA"],
+            },
+            {
+                "title": "Untagged story",
+                "publisher": "CNBC",
+                "link": "https://example.com/untagged",
+                "providerPublishTime": 1792324800,
+            },
+            "not a mapping",
+        ]
+        with mock.patch("yfinance.Search", fake_search):
+            entries = company_news._yahoo_news_loader("aapl")
+        fake_search.assert_called_once_with(
+            "aapl", news_count=company_news.NEWS_FETCH_COUNT
+        )
+        self.assertEqual(
+            [entry["url"] for entry in entries],
+            ["https://example.com/apple", "https://example.com/untagged"],
+        )
+        self.assertEqual(
+            entries[0],
+            {
+                "title": "Apple beats on iPhone",
+                "publisher": "Reuters",
+                "url": "https://example.com/apple",
+                "date": "2026-10-18",
+                "summary": None,
+            },
+        )
+
     def test_default_loader_dispatches_on_finnhub_key(self):
         with mock.patch.object(
             company_news, "_finnhub_news_loader", return_value=["finnhub"]
