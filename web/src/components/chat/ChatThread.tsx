@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { chatApi, type ChatMessage, type ChatPendingCall } from '../../api/chat';
+import { chatApi, type ChatMessage, type ChatPendingCall, type ChatRunNotice } from '../../api/chat';
 import type { TieredTranscriptCall } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
+import type { UiTextKey } from '../../i18n/uiText';
 import { cn } from '../../utils/cn';
+import { stageName } from '../analysis/stageNames';
 import { TranscriptCall, UsageLine } from '../analysis/Transcript';
 import { FactFold } from '../analysis/Ui';
 import { ChatMarkdown } from './ChatMarkdown';
@@ -129,13 +131,16 @@ export const ChatThread = ({
   const shown = useMemo(() => messages.filter((message) => !isSkippedCall(message)), [messages]);
 
   // Each bot step's number: 1, 2, 3… after every line of the user's
-  // (0 for the user's own line; the "stopped" line is no step and
-  // keeps the count where it was).
+  // (0 for the user's own line, and for a run notice, which sets off
+  // a turn the same way; the "stopped" line is no step and keeps the
+  // count where it was).
   const stepNumbers = useMemo(
     () =>
       shown.reduce<number[]>((numbers, message) => {
         const previous = numbers.at(-1) ?? 0;
-        return [...numbers, message.role === 'user' ? 0 : message.role === 'stopped' ? previous : previous + 1];
+        const number =
+          message.role === 'user' || message.role === 'notice' ? 0 : message.role === 'stopped' ? previous : previous + 1;
+        return [...numbers, number];
       }, []),
     [shown],
   );
@@ -259,6 +264,9 @@ const MessageRow = ({
   if (message.role === 'stopped') {
     return <StoppedLine step={step} facts={stopped ?? { skipped: [], last: false }} />;
   }
+  if (message.role === 'notice') {
+    return <NoticeLine run={message.run ?? null} />;
+  }
   if (message.role === 'summary') {
     return <SummaryRow message={message} step={step} loadTranscript={loadTranscript} />;
   }
@@ -344,6 +352,40 @@ const StoppedLine = ({ step, facts }: { step: number; facts: StopFacts }) => {
   return (
     <p className="py-1 text-center text-xs text-caution" data-testid="chat-stopped">
       {sentences.join(' ')}
+    </p>
+  );
+};
+
+// The app's line that a run the bot started here has ended (2026-10-20,
+// after Claude Code's task notifications): quiet and centered like the
+// stopped line — a fact about the conversation, not one of its voices —
+// but in the text's own color, since nothing went wrong with the chat
+// itself. A small mark names what it is; the sentence names the run
+// and how it ended, in the page's words for outlooks and steps. The
+// bot's own report follows as the next step.
+const NoticeLine = ({ run }: { run: ChatRunNotice | null }) => {
+  const { t } = useUiLanguage();
+  if (!run) {
+    return null;
+  }
+  const outlookKey = `tiered.outlook.${run.outlook ?? 'no_outlook'}` as UiTextKey;
+  const named = { ticker: run.ticker, tier: run.tier ?? '?' };
+  const sentence =
+    run.status === 'succeeded'
+      ? run.score == null
+        ? t('chat.notice.succeededOutlook', { ...named, outlook: t(outlookKey) })
+        : t('chat.notice.succeeded', { ...named, outlook: t(outlookKey), score: run.score })
+      : run.status === 'failed'
+        ? t('chat.notice.failed', { ...named, error: run.error ?? '' })
+        : run.stopped_stage
+          ? t('chat.notice.stopped', { ...named, stage: stageName(run.stopped_stage, t) })
+          : t('chat.notice.stoppedUnknown', named);
+  return (
+    <p className="py-1 text-center text-xs text-ink-3" data-testid="chat-notice" data-run-id={run.run_id}>
+      <span className="mr-2 font-mono text-[0.7rem] font-semibold uppercase tracking-wide text-ink-4" data-testid="chat-notice-mark">
+        {t('chat.notice.mark')}
+      </span>
+      {sentence}
     </p>
   );
 };

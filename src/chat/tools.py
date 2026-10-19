@@ -156,6 +156,13 @@ class Tool:
     #: model chose to send). Unset, the parsed parameters themselves;
     #: start_run resolves the server's sizing defaults too.
     resolve: Optional[Resolver] = None
+    #: What the call does to the conversation's run watches (2026-10-20,
+    #: src/chat/run_notice.py): ``"start"`` — a result carrying a
+    #: ``run_id`` and no error is a run the conversation now waits to
+    #: hear about; ``"end"`` — such a result is a run the user dealt
+    #: with here (stopped, deleted), so no notice follows. None for
+    #: every tool that only reads.
+    run_watch: Optional[str] = None
 
     @property
     def needs_confirmation(self) -> bool:
@@ -482,9 +489,11 @@ TOOLS: Tuple[Tool, ...] = (
             "as errors: llm_not_configured, market_open (the market is inside its "
             "trading day — do NOT retry with run_anyway unless the user says so), "
             "duplicate_run (an unfinished run has the same ticker and inputs; its "
-            "run_id is given). A run takes minutes; check get_run later."
+            "run_id is given). A run takes minutes; you need not check on it: the app "
+            "sends you a run notice in this conversation when it ends."
         ),
         params=StartRunParams, run=run_start_run, confirm=confirm_start_run, resolve=resolve_start_run,
+        run_watch="start",
     ),
     Tool(
         name="stop_run",
@@ -496,7 +505,7 @@ TOOLS: Tuple[Tool, ...] = (
             "finished (check get_run later). Only a running run can be stopped: a queued "
             "run is cancelled with delete_run (error run_not_running otherwise)."
         ),
-        params=RunParams, run=run_stop_run, confirm=confirm_stop_run,
+        params=RunParams, run=run_stop_run, confirm=confirm_stop_run, run_watch="end",
     ),
     Tool(
         name="delete_run",
@@ -506,7 +515,7 @@ TOOLS: Tuple[Tool, ...] = (
             "(error run_in_progress): stop it with stop_run first, then delete it "
             "once it has landed as 'stopped'."
         ),
-        params=RunParams, run=run_delete_run, confirm=confirm_delete_run,
+        params=RunParams, run=run_delete_run, confirm=confirm_delete_run, run_watch="end",
     ),
 )
 

@@ -147,6 +147,15 @@ def startup_housekeeping() -> None:
             logger.info("filled the token counts of %d older chat message row(s)", filled)
     except Exception as exc:
         logger.warning("startup chat token backfill skipped: %s", exc)
+    try:
+        # Runs that ended while nobody could be told (the server was
+        # down, or housekeeping just failed them) get their chat
+        # notices now (2026-10-20).
+        from api.v1.endpoints import chat as chat_endpoint
+
+        chat_endpoint.harness.catch_up()
+    except Exception as exc:
+        logger.warning("startup chat run-notice catch-up skipped: %s", exc)
 
 
 @asynccontextmanager

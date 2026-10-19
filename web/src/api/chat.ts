@@ -8,8 +8,35 @@ import type { TieredTranscriptCall } from './tiered';
  *  stopped this reply" line): neither a user input nor a bot step.
  *  `summary` is a bot step that summarized the conversation to free up
  *  context (2026-10-13): from it on, the model sees the summary in
- *  place of the rows before it. */
-export type ChatRole = 'user' | 'assistant' | 'tool' | 'stopped' | 'summary';
+ *  place of the rows before it. `notice` is the app's line that a run
+ *  started from the conversation has ended (2026-10-20); the bot's
+ *  report follows it as a turn of its own, with no request from the
+ *  page. */
+export type ChatRole = 'user' | 'assistant' | 'tool' | 'stopped' | 'summary' | 'notice';
+
+/** How a watched run ended (a notice row's facts). */
+export type ChatRunNotice = {
+  run_id: string;
+  ticker: string;
+  tier: number | null;
+  status: 'succeeded' | 'failed' | 'stopped';
+  /** Succeeded runs: the report's outlook and score. */
+  outlook: string | null;
+  score: number | null;
+  /** Failed runs: what went wrong. */
+  error: string | null;
+  /** Stopped runs: the step the stop landed in. */
+  stopped_stage: string | null;
+};
+
+/** A run started by the bot here that has not ended yet; the bot
+ *  reports it when it does, so the page keeps polling while any is
+ *  listed. */
+export type ChatWatchedRun = {
+  run_id: string;
+  /** The language the user had chosen when the run was started. */
+  language: string;
+};
 
 export type ChatToolCall = {
   id: string;
@@ -49,6 +76,9 @@ export type ChatMessage = {
    *  question (the /btw command, 2026-10-16). The page shows it where
    *  it happened; no later LLM call, measure or summary carries it. */
   side_question?: boolean | null;
+  /** Notice rows: the run and how it ended. The page words the line
+   *  from these; the row carries no text. */
+  run?: ChatRunNotice | null;
   /** Assistant rows: the tools the model asked for. */
   tool_calls?: ChatToolCall[];
   usage?: ChatUsage | null;
@@ -106,6 +136,11 @@ export type ChatConversationSummary = {
 export type ChatConversation = ChatConversationSummary & {
   messages: ChatMessage[];
   pending: { calls: ChatPendingCall[] } | null;
+  /** A turn is running on the server right now: one the page sent, or
+   *  the bot's own report of a run that ended. */
+  busy: boolean;
+  /** The runs started from this conversation that have not ended yet. */
+  watched_runs: ChatWatchedRun[];
 };
 
 /** How much of the model's context the next request would take (the

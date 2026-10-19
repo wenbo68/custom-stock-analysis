@@ -27,7 +27,7 @@ const SUMMARY: ChatConversationSummary = {
   id: 'c1', title: 'hi', created_at: '2026-09-23T10:00:00', updated_at: '2026-09-23T10:00:00',
   message_count: 0, user_input_count: 0, total_tokens: 0, ended_at: null,
 };
-const EMPTY: ChatConversation = { ...SUMMARY, messages: [], pending: null };
+const EMPTY: ChatConversation = { ...SUMMARY, messages: [], pending: null, busy: false, watched_runs: [] };
 const ANSWERED: ChatConversation = {
   ...SUMMARY,
   message_count: 2, user_input_count: 1, total_tokens: 738,
@@ -35,7 +35,7 @@ const ANSWERED: ChatConversation = {
     { seq: 1, role: 'user', created_at: null, text: 'hi there' },
     { seq: 2, role: 'assistant', created_at: null, text: 'hello', usage: { input_tokens: 700, output_tokens: 38 }, llm: 'fake', time_ms: 5, transcript_chars: 100 },
   ],
-  pending: null,
+  pending: null, busy: false, watched_runs: [],
 };
 
 afterEach(() => {
@@ -113,7 +113,7 @@ describe('ChatPage', () => {
         { seq: 2, role: 'assistant', created_at: null, text: null, tool_calls: [{ id: 'c1', name: 'list_tickers', arguments: {} }], usage: { input_tokens: 10, output_tokens: 2 }, llm: 'fake' },
         { seq: 3, role: 'tool', created_at: null, tool_call_id: 'c1', name: 'list_tickers', output: { tickers: ['AAPL'] }, output_chars: 20, input: {} },
       ],
-      pending: { calls: [{ call_id: 'c2', name: 'delete_run', input: { run_id: 'x' }, facts: {} }] },
+      pending: { calls: [{ call_id: 'c2', name: 'delete_run', input: { run_id: 'x' }, facts: {} }] }, busy: false, watched_runs: [],
     };
     vi.mocked(chatApi.getConversation).mockResolvedValue(partial);
     renderPage();
@@ -297,7 +297,7 @@ describe('ChatPage — stop', () => {
       { seq: 2, role: 'assistant', created_at: null, text: 'Hello.', usage: null, llm: 'fake', time_ms: 5, transcript_chars: 10 },
       { seq: 3, role: 'stopped', created_at: null, text: '[The user asked to stop this reply, but it had already finished.]', late: true },
     ],
-    pending: null,
+    pending: null, busy: false, watched_runs: [],
   };
 
   it('turns the arrow into a stop button, asks the server to stop on a click, and shows the stopped turn', async () => {
@@ -483,7 +483,7 @@ describe('ChatPage slash commands', () => {
     const held: ChatConversation = {
       ...SUMMARY,
       messages: [{ seq: 1, role: 'user', created_at: null, text: 'cancel q1' }],
-      pending: { calls: [{ call_id: 'c2', name: 'delete_run', input: { run_id: 'q1' }, facts: {} }] },
+      pending: { calls: [{ call_id: 'c2', name: 'delete_run', input: { run_id: 'q1' }, facts: {} }] }, busy: false, watched_runs: [],
     };
     vi.mocked(chatApi.getConversation).mockResolvedValue(held);
     renderPage('/chat/c1');
@@ -585,3 +585,82 @@ describe('ChatPage slash commands', () => {
     expect(screen.getByText('reply two')).toBeInTheDocument();
   });
 });
+
+describe('run notices', () => {
+  const NOTICE: ChatConversation['messages'][number] = {
+    seq: 3, role: 'notice', created_at: null, text: null,
+    run: { run_id: 'r1', ticker: 'AAPL', tier: 1, status: 'succeeded', outlook: 'bullish', score: 7.2, error: null, stopped_stage: null },
+  };
+  const WAITING: ChatConversation = {
+    ...ANSWERED, message_count: 2, watched_runs: [{ run_id: 'r1', language: 'en' }],
+  };
+  const REPORTED: ChatConversation = {
+    ...ANSWERED, message_count: 4, watched_runs: [],
+    messages: [
+      ...ANSWERED.messages,
+      NOTICE,
+      { seq: 4, role: 'assistant', created_at: null, text: 'AAPL came back bullish, 7.2.', usage: { input_tokens: 700, output_tokens: 20 }, llm: 'fake', time_ms: 5, transcript_chars: 100 },
+    ],
+  };
+
+  it('polls while a run is watched, shows the notice and the report when they land, then stops polling', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(chatApi.getConversation).mockResolvedValue(WAITING);
+    renderPage('/chat/c1');
+    await waitFor(() => expect(screen.getByText('hello')).toBeInTheDocument());
+    // Nothing of the page's runs: the box is open, no dots.
+    expect(screen.getByTestId('chat-send')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-working')).toBeNull();
+
+    // The server reports the run while the page polls.
+    vi.mocked(chatApi.getConversation).mockClear();
+    vi.mocked(chatApi.getConversation).mockResolvedValue(REPORTED);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(chatApi.getConversation).toHaveBeenCalledWith('c1');
+    await waitFor(() => expect(screen.getByTestId('chat-notice')).toBeInTheDocument());
+    expect(screen.getByText('AAPL came back bullish, 7.2.')).toBeInTheDocument();
+
+    // Nothing left to wait for: the polling stops.
+    vi.mocked(chatApi.getConversation).mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(chatApi.getConversation).not.toHaveBeenCalled();
+  });
+
+  it('shows the dots and the stop button while the server runs its own turn, and the box blocks', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const BUSY: ChatConversation = { ...WAITING, message_count: 3, messages: [...ANSWERED.messages, NOTICE], busy: true, watched_runs: [] };
+    vi.mocked(chatApi.getConversation).mockResolvedValue(BUSY);
+    vi.mocked(chatApi.stopTurn).mockResolvedValue({ id: 'c1', stopped: true });
+    renderPage('/chat/c1');
+    await waitFor(() => expect(screen.getByTestId('chat-notice')).toBeInTheDocument());
+    const dots = screen.getByTestId('chat-working');
+    expect(screen.getByTestId('chat-notice').compareDocumentPosition(dots) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByTestId('chat-send')).toBeNull();
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('placeholder', expect.stringMatching(/Waiting for the reply|等待回复中/));
+
+    // The stop button asks the server to stop that turn; until the poll sees it end, the unclickable "…" stands.
+    fireEvent.click(screen.getByTestId('chat-stop'));
+    await waitFor(() => expect(chatApi.stopTurn).toHaveBeenCalledWith('c1'));
+    expect(screen.getByTestId('chat-stopping')).toBeInTheDocument();
+
+    const STOPPED: ChatConversation = {
+      ...BUSY, busy: false, message_count: 4,
+      messages: [...BUSY.messages, { seq: 4, role: 'stopped', created_at: null, text: null, late: true }],
+    };
+    vi.mocked(chatApi.getConversation).mockResolvedValue(STOPPED);
+    vi.mocked(chatApi.listConversations).mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    await waitFor(() => expect(screen.getByTestId('chat-stopped')).toBeInTheDocument());
+    expect(screen.queryByTestId('chat-working')).toBeNull();
+    expect(screen.getByTestId('chat-send')).toBeInTheDocument();
+    // The server's turn cost tokens: the history list is refreshed.
+    expect(chatApi.listConversations).toHaveBeenCalled();
+  });
+});
+

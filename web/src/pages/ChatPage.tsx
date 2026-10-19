@@ -80,7 +80,20 @@ import { cn } from '../utils/cn';
 // is open — picking one from the history, starting a new one, the
 // first message of a new conversation and deleting the open one all
 // change the URL, and one effect opens whatever the URL names.
+//
+// A run the bot starts here is reported by the bot when it ends, with
+// no request from the page (owner request 2026-10-20, after Claude
+// Code's task notifications): the server stores a notice line and
+// runs a turn of its own. So while the open conversation waits for a
+// run (`watched_runs`) or the server runs such a turn (`busy`), and no
+// request of the page's own is in flight, the page polls every
+// WATCH_POLL_MS and shows whatever landed — the notice, the bot's
+// steps, even a held call, whose buttons work since no request waits
+// on it. The server's turn blocks the box and shows the dots like one
+// of the page's, and the stop button stops it the same way; the poll
+// sees the stopped line land.
 const TURN_POLL_MS = 800;
+const WATCH_POLL_MS = 2000;
 
 // The text's cap: the analysis page's 1280px column less its 32px side
 // paddings, the 256px history and the 16px gap.
@@ -135,10 +148,10 @@ const withUserLine = (base: ChatConversation, text: string, sideQuestion = false
   ],
 });
 
-// Peek at the conversation on a timer until stopped, handing each longer
-// version to `apply`. Returns the stop function; a peek in flight when
-// stopped is dropped, so nothing lands after the request's own answer.
-const peekWhileWorking = (id: string, apply: (fresh: ChatConversation) => void): (() => void) => {
+// Fetch the conversation every `everyMs` until stopped, handing each
+// copy to `apply`. Returns the stop function; a fetch in flight when
+// stopped is dropped, so nothing lands after the stop.
+const pollConversation = (id: string, everyMs: number, apply: (fresh: ChatConversation) => void): (() => void) => {
   let live = true;
   let inFlight = false;
   const timer = window.setInterval(async () => {
@@ -149,19 +162,33 @@ const peekWhileWorking = (id: string, apply: (fresh: ChatConversation) => void):
     try {
       const fresh = await chatApi.getConversation(id);
       if (live) {
-        apply({ ...fresh, pending: null });
+        apply(fresh);
       }
     } catch {
-      // The turn's own answer — or its error — is what the page reports.
+      // A missed poll changes nothing; the next one, or the request's
+      // own answer, is what the page reports.
     } finally {
       inFlight = false;
     }
-  }, TURN_POLL_MS);
+  }, everyMs);
   return () => {
     live = false;
     window.clearInterval(timer);
   };
 };
+
+// Peek at the conversation while a request of the page's own runs:
+// never with a held call, whose buttons could not be answered until
+// the request returns (its own answer brings it a moment later).
+const peekWhileWorking = (id: string, apply: (fresh: ChatConversation) => void): (() => void) =>
+  pollConversation(id, TURN_POLL_MS, (fresh) => apply({ ...fresh, pending: null }));
+
+/** The server's copy differs from the shown one in what the page shows: rows, a held call, or whether a turn runs. */
+const hasNews = (shown: ChatConversation, fresh: ChatConversation): boolean =>
+  fresh.messages.length !== shown.messages.length ||
+  fresh.busy !== shown.busy ||
+  fresh.watched_runs.length !== shown.watched_runs.length ||
+  (fresh.pending?.calls.length ?? 0) !== (shown.pending?.calls.length ?? 0);
 
 const ChatPage = () => {
   const { language, t } = useUiLanguage();
@@ -179,13 +206,19 @@ const ChatPage = () => {
   // The first message of a new conversation: the conversation is being
   // created, so there is no id to key a turn by yet.
   const [creating, setCreating] = useState(false);
+  // The server's own turns (a run's report) the stop button was clicked
+  // on, by conversation id: "stopping" until the poll sees the turn end.
+  const [serverStops, setServerStops] = useState<Record<string, true>>({});
   const [error, setError] = useState<string | null>(null);
   // A page-side command's answer, shown under the message box.
   const [note, setNote] = useState<ChatNote | null>(null);
   const shownTurn = conversation ? turns[conversation.id] : undefined;
   const pending = conversation?.pending?.calls[0] ?? null;
-  const working = creating || shownTurn !== undefined;
-  const stopping = shownTurn === 'stopping';
+  // A turn the server runs on its own (the bot reporting a run), with
+  // no request of the page's waiting on it.
+  const serverTurn = shownTurn === undefined && conversation?.busy === true;
+  const working = creating || shownTurn !== undefined || serverTurn;
+  const stopping = shownTurn === 'stopping' || (serverTurn && serverStops[conversation.id] === true);
   // The band the menus float in and the dock the message box floats
   // in; their heights are the text's top and bottom insets.
   const [band, setBand] = useState<HTMLDivElement | null>(null);
@@ -241,6 +274,33 @@ const ChatPage = () => {
       void openRef.current(conversationId);
     }
   }, [conversationId]);
+
+  // While the open conversation waits for a run or the server runs a
+  // turn of its own, and no request of the page's is in flight, poll
+  // for what lands (see the notes above). Only a copy with news
+  // replaces the shown one, so the thread is not re-rendered on every
+  // poll; the history list refreshes when the server's turn ends (its
+  // tokens count).
+  const watchedId = conversation?.id ?? null;
+  const watching = conversation !== null && shownTurn === undefined && (conversation.busy || conversation.watched_runs.length > 0);
+  const refreshListRef = useRef(refreshList);
+  refreshListRef.current = refreshList;
+  useEffect(() => {
+    if (!watching || !watchedId) {
+      return undefined;
+    }
+    return pollConversation(watchedId, WATCH_POLL_MS, (fresh) => {
+      const shown = shownRef.current;
+      if (shown?.id !== fresh.id || !hasNews(shown, fresh)) {
+        return;
+      }
+      setConversation(fresh);
+      if (shown.busy && !fresh.busy) {
+        setServerStops((prev) => withoutKey(prev, fresh.id));
+        void refreshListRef.current();
+      }
+    });
+  }, [watching, watchedId]);
 
   // Picking a conversation from the history: the URL changes and the
   // effect opens it; picking the open one again simply reloads it.
@@ -298,7 +358,22 @@ const ChatPage = () => {
   // answer. Until then an unclickable "…" takes the button's place.
   const stopTurn = () => {
     const id = conversation?.id;
-    if (!id || turns[id] !== 'running') {
+    if (!id) {
+      return;
+    }
+    if (turns[id] === undefined && conversation?.busy) {
+      // The server's own turn: the poll sees its stopped line land.
+      if (serverStops[id]) {
+        return;
+      }
+      setServerStops((prev) => ({ ...prev, [id]: true }));
+      void chatApi.stopTurn(id).catch((stopError) => {
+        setError(describe(stopError, t, 'chat.error.stop'));
+        setServerStops((prev) => withoutKey(prev, id));
+      });
+      return;
+    }
+    if (turns[id] !== 'running') {
       return;
     }
     setTurns((prev) => ({ ...prev, [id]: 'stopping' }));
@@ -503,7 +578,7 @@ const ChatPage = () => {
                 stopping={stopping}
                 onSend={send}
                 // Nothing to stop yet while the conversation itself is being created.
-                onStop={shownTurn ? stopTurn : undefined}
+                onStop={shownTurn || serverTurn ? stopTurn : undefined}
               />
               {note ? <ChatCommandNote note={note} /> : null}
             </div>

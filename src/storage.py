@@ -218,6 +218,24 @@ class ChatMessageRecord(Base):
     output_tokens = Column(Integer)
 
 
+class ChatRunWatchRecord(Base):
+    """A run a chat conversation is waiting to hear about (2026-10-20,
+    after Claude Code's task notifications): the bot's start_run tool
+    adds one, and when the run ends the chat harness turns it into a
+    notice row in that conversation and wakes the bot to report it. A
+    row, not memory, so a restart loses no notice. ``language`` is the
+    one the user had chosen when the run was started; the bot's report
+    is written in it."""
+
+    __tablename__ = 'chat_run_watches'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(String(64), nullable=False, index=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    language = Column(String(8), nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now)
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 

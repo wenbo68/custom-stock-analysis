@@ -28,7 +28,7 @@ Enter a ticker, pick a tier and a maximum hold time, and the app runs a pipeline
 - **Two tiers.** Tier 1 is a single preliminary analysis. Tier 2 is a deep analysis: several model roles list and grade the evidence, vote, and a deciding round settles it, with the whole vote tree open to inspection.
 - **Cards as they land.** A running run's report fills in step by step: each data report appears the moment it is fetched, then the analysis, with the card in progress shown as a skeleton and the row's status counting the finished cards. The chat bot sees the same through its run tool.
 - **A stop button** on every running run. The step in flight finishes (so the token totals match the bill), the rest is skipped, and the report keeps the sections that had finished.
-- **A chat page** whose bot reads and acts on your run history through the app's own API: list runs, open a report, start, stop or delete a run. Every action asks you first and every model call is on the record.
+- **A chat page** whose bot reads and acts on your run history through the app's own API: list runs, open a report, start, stop or delete a run. Every action asks you first and every model call is on the record. A run the bot starts is reported back in the chat when it ends, succeeded, failed or stopped, by the bot itself, with no need to ask.
 - **A full transcript** of every model call behind a report: the prompt, the raw reply, the tokens.
 
 | Markets | United States, mainland China (A-shares), Hong Kong, Japan, Korea, Taiwan |

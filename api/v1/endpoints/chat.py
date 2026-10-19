@@ -20,6 +20,12 @@ answers a question from the conversation without adding to it (the
 page's `/btw`, 2026-10-16, src/chat/side_question.py): both rows are
 stored and shown, flagged `side_question`, and no later model call
 carries them.
+
+A run the bot starts is watched (2026-10-20, src/chat/run_notice.py):
+when it ends, the conversation gets a `notice` row and the bot's own
+report after it, with no request from the page. The conversation view
+says so — `busy` while that turn runs, `watched_runs` while a run is
+still to be reported — so the page keeps polling meanwhile.
 """
 from __future__ import annotations
 
@@ -56,6 +62,7 @@ from src.chat.harness import (
 from src.chat.model import LiteLlmClient
 from src.chat.transcript import transcript_chars, transcript_view
 from src.languages import DEFAULT_LANGUAGE
+from src.tiered_analysis import run_service
 from src.tiered_analysis.run_context import llm_model
 
 logger = logging.getLogger(__name__)
@@ -65,6 +72,16 @@ router = APIRouter()
 #: The one harness this process runs; tests replace it with one built
 #: on a scripted model.
 harness = ChatHarness(LiteLlmClient())
+
+
+def _run_finished(run_id: str, status: str) -> None:
+    """The run service's word that a run ended, handed to whichever
+    harness this module holds at that moment (not the one it held at
+    import, which a test may have swapped out)."""
+    harness.run_finished(run_id, status)
+
+
+run_service.on_run_finished(_run_finished)
 
 
 def _parse_json(raw: Any) -> Any:
@@ -103,6 +120,11 @@ def _message_view(message: Dict[str, Any]) -> Dict[str, Any]:
         # The server's own word on what the stop cut (2026-10-14): the
         # page reads this, never the shape of the row before.
         view["late"] = message.get("content") == STOPPED_LATE_MESSAGE
+    if role == "notice":
+        # The page words the notice from the facts; the model's line
+        # (`content`) is not shown.
+        view["text"] = None
+        view["run"] = message.get("run")
     if role == "summary":
         view.update({
             "usage": message.get("usage"), "llm": message.get("llm"), "error": message.get("error"),
@@ -151,6 +173,10 @@ def _conversation_view(conversation_id: str) -> Dict[str, Any]:
         **{k: v for k, v in conversation.items() if k not in ("messages", "pending")},
         "messages": [_message_view(m) for m in conversation["messages"]],
         "pending": _pending_view(conversation.get("pending")),
+        "busy": harness.is_busy(conversation_id),
+        "watched_runs": [
+            {"run_id": w["run_id"], "language": w["language"]} for w in store.watches(conversation_id)
+        ],
     }
 
 

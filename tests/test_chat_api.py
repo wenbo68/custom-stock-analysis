@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from typing import List
 
 import pytest
@@ -414,3 +415,54 @@ class TestSideQuestion:
         assert client.post(f"/chat/conversations/{conversation_id}/side_question", json={"text": "  "}).status_code == 422
         monkeypatch.delenv("MAIN_LLM")
         assert client.post(f"/chat/conversations/{conversation_id}/side_question", json={"text": "hi"}).status_code == 400
+
+
+class TestRunNotices:
+    def test_the_view_shows_the_notice_row_and_what_the_page_polls_on(self, client, scripted):
+        from src.chat import store
+        from src.chat.run_notice import NOTICE_PREFIX, NOTICE_ROLE
+
+        scripted([])
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        store.add_watch(conversation_id, "r2", "ko")
+        facts = {"run_id": "r1", "ticker": "AAPL", "tier": 1, "status": "succeeded",
+                 "outlook": "bullish", "score": 7.2, "error": None, "stopped_stage": None}
+        store.append_message(conversation_id, {"role": NOTICE_ROLE, "content": f"{NOTICE_PREFIX} r1 ended.", "run": facts})
+
+        body = client.get(f"/chat/conversations/{conversation_id}").json()
+        assert body["busy"] is False
+        assert body["watched_runs"] == [{"run_id": "r2", "language": "ko"}]
+        notice = body["messages"][0]
+        assert notice["role"] == "notice"
+        # The page words the notice from the facts; the model's line is not shown.
+        assert notice["text"] is None
+        assert notice["run"] == facts
+        # The sidebar counts no user input for it.
+        assert body["user_input_count"] == 0
+
+    def test_busy_while_the_bots_own_turn_runs(self, client, scripted):
+        from src.chat import store
+
+        model = scripted([text("r1 finished: bullish.")])
+        model.release.clear()
+        conversation_id = client.post("/chat/conversations").json()["id"]
+        history.create_run("r1", "AAPL", inputs={"tier": 1}, status="queued")
+        history.mark_succeeded("r1", {"outlook": "bullish", "score": 7.2})
+        store.add_watch(conversation_id, "r1", "en")
+
+        chat.harness.run_finished("r1", "succeeded")
+        assert model.asked.wait(COLD_TURN_WAIT)
+        body = client.get(f"/chat/conversations/{conversation_id}").json()
+        assert body["busy"] is True
+        assert body["watched_runs"] == []
+        # A message meanwhile is refused as busy, like during any turn.
+        assert client.post(f"/chat/conversations/{conversation_id}/messages", json={"text": "hi"}).status_code == 409
+
+        model.release.set()
+        deadline = time.time() + COLD_TURN_WAIT
+        while time.time() < deadline and chat.harness.is_busy(conversation_id):
+            time.sleep(0.02)
+        body = client.get(f"/chat/conversations/{conversation_id}").json()
+        assert body["busy"] is False
+        assert [m["role"] for m in body["messages"]] == ["notice", "assistant"]
+

@@ -1,5 +1,6 @@
 import { useState, type ComponentProps, type ReactNode } from 'react';
 import { tieredApi, type TieredResult, type TieredTierSection } from '../../api/tiered';
+import { stageName } from './stageNames';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey } from '../../i18n/uiText';
 import { cn } from '../../utils/cn';
@@ -336,22 +337,6 @@ export const ReportSkeleton = () => {
   );
 };
 
-// The stage names a stopped run's banner can carry, as the page already
-// words them: the data reports' titles, then the three analysis steps.
-const STAGE_KEYS: Record<string, UiTextKey> = {
-  technicals: 'tiered.dataReport.technicals',
-  fundamentals: 'tiered.dataReport.fundamentals',
-  macro_economy: 'tiered.dataReport.macro_economy',
-  positioning: 'tiered.dataReport.positioning',
-  company_news: 'tiered.dataReport.company_news',
-  world_news: 'tiered.dataReport.world_news',
-  preliminary_analysis: 'tiered.preliminaryAnalysis.title',
-  deep_analysis: 'tiered.deepAnalysis.title',
-  trade_plan: 'tiered.tradePlan.title',
-};
-
-const stageName = (stage: string, t: (key: UiTextKey) => string): string =>
-  STAGE_KEYS[stage] ? t(STAGE_KEYS[stage]) : stage;
 
 // The fixed skeleton (owner order 2026-09-18): the dataReport reports →
 // one analysis card (preliminary at tier-1, deep at tier-2; both carry

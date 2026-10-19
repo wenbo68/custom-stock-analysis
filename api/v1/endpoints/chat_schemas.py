@@ -16,8 +16,10 @@ from src.languages import DEFAULT_LANGUAGE, LANGUAGES, require_supported
 #: "You stopped this reply" line); it is neither a user input nor a bot step.
 #: `summary` is a bot step that summarized the conversation to free up
 #: context (2026-10-13): from it on, the model sees the summary in place
-#: of the rows before it.
-ChatRole = Literal["user", "assistant", "tool", "stopped", "summary"]
+#: of the rows before it. `notice` is the app's line that a run started
+#: from the conversation has ended (2026-10-20): the bot's report follows
+#: it as a turn of its own.
+ChatRole = Literal["user", "assistant", "tool", "stopped", "summary", "notice"]
 
 
 class ConversationSummary(BaseModel):
@@ -55,6 +57,28 @@ class CompactedFacts(BaseModel):
     tokens_before: Optional[int] = Field(default=None, description="The estimated tokens the request held before the summary.")
 
 
+class RunNoticeFacts(BaseModel):
+    """How a watched run ended (2026-10-20), as the page words it."""
+
+    run_id: str
+    ticker: str
+    tier: Optional[int] = None
+    status: Literal["succeeded", "failed", "stopped"]
+    outlook: Optional[str] = Field(default=None, description="Succeeded runs: the report's outlook.")
+    score: Optional[float] = Field(default=None, description="Succeeded runs: the report's score.")
+    error: Optional[str] = Field(default=None, description="Failed runs: what went wrong.")
+    stopped_stage: Optional[str] = Field(default=None, description="Stopped runs: the step the stop landed in.")
+
+
+class WatchedRun(BaseModel):
+    """A run the conversation waits to hear about (2026-10-20): started
+    by the bot here and not ended yet. The page keeps polling while
+    any is listed."""
+
+    run_id: str
+    language: str = Field(description="The language the user had chosen when the run was started; the bot's report is written in it.")
+
+
 class ChatMessage(BaseModel):
     """One message as the page shows it. A user message has `text`. An
     assistant message (one LLM call) has `text` and/or `tool_calls`. A
@@ -89,6 +113,7 @@ class ChatMessage(BaseModel):
         "User, assistant and stopped rows: true when the row belongs to a side question (the page's `/btw`). "
         "The page shows it where it happened; no later LLM call, measure or summary carries it."
     ))
+    run: Optional[RunNoticeFacts] = Field(default=None, description="Notice rows only: the run and how it ended.")
     tool_call_id: Optional[str] = None
     name: Optional[str] = Field(default=None, description="Tool rows: the tool's name.")
     output: Optional[Any] = Field(default=None, description="Tool rows: what the tool answered (an `error` key on a refusal or miss).")
@@ -121,6 +146,13 @@ class PendingAction(BaseModel):
 class ConversationView(ConversationSummary):
     messages: List[ChatMessage]
     pending: Optional[PendingAction] = None
+    busy: bool = Field(default=False, description=(
+        "A turn is running on the conversation right now — one the page sent, or the bot's own report "
+        "of a run that ended (2026-10-20). The page shows the dots and keeps polling while it is."
+    ))
+    watched_runs: List[WatchedRun] = Field(default_factory=list, description=(
+        "The runs started from this conversation that have not ended yet; the bot reports each when it does."
+    ))
 
 
 LANGUAGE_FIELD_DESCRIPTION = (

@@ -174,8 +174,9 @@ def conversation_exists(conversation_id: str) -> bool:
 
 
 def delete_conversation(conversation_id: str) -> bool:
-    """Remove the conversation and its messages. False for an unknown id."""
-    from src.storage import ChatConversationRecord, ChatMessageRecord
+    """Remove the conversation, its messages and its run watches. False
+    for an unknown id."""
+    from src.storage import ChatConversationRecord, ChatMessageRecord, ChatRunWatchRecord
 
     with _session() as session:
         row = session.get(ChatConversationRecord, conversation_id)
@@ -183,6 +184,11 @@ def delete_conversation(conversation_id: str) -> bool:
             return False
         (
             session.query(ChatMessageRecord)
+            .filter_by(conversation_id=conversation_id)
+            .delete(synchronize_session=False)
+        )
+        (
+            session.query(ChatRunWatchRecord)
             .filter_by(conversation_id=conversation_id)
             .delete(synchronize_session=False)
         )
@@ -224,17 +230,19 @@ def message(conversation_id: str, seq: int) -> Optional[Dict[str, Any]]:
 
 
 def append_message(conversation_id: str, message: Dict[str, Any],
-                   pending: Any = KEEP_PENDING) -> int:
+                   pending: Any = KEEP_PENDING, drop_watch: Optional[str] = None) -> int:
     """Store one message (a dict in the model's shape plus any page
     facts) as the next row and touch the conversation. The first user
     message names an untitled conversation. ``pending`` — a held-calls
     dict, or None to clear — is written in the same commit when given
     (``KEEP_PENDING`` leaves it alone), so answering a held call and
     dropping it from the list can never come apart (2026-10-10).
-    Returns the row's seq."""
+    ``drop_watch`` — a run id — removes the conversation's watch on
+    that run in the same commit, for the same reason: a run notice is
+    stored exactly once (2026-10-20). Returns the row's seq."""
     from sqlalchemy import func
 
-    from src.storage import ChatConversationRecord, ChatMessageRecord, utc_naive_now
+    from src.storage import ChatConversationRecord, ChatMessageRecord, ChatRunWatchRecord, utc_naive_now
 
     with _session() as session:
         conversation = session.get(ChatConversationRecord, conversation_id)
@@ -259,6 +267,12 @@ def append_message(conversation_id: str, message: Dict[str, Any],
             conversation.title = _title_from(str(message.get("content") or ""))
         if pending is not KEEP_PENDING:
             conversation.pending_json = _pending_json(pending)
+        if drop_watch is not None:
+            (
+                session.query(ChatRunWatchRecord)
+                .filter_by(conversation_id=conversation_id, run_id=drop_watch)
+                .delete(synchronize_session=False)
+            )
         conversation.updated_at = utc_naive_now()
         session.commit()
         return seq
@@ -322,3 +336,87 @@ def _parse(raw: Optional[str]) -> Optional[Dict[str, Any]]:
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# Run watches: the runs a conversation waits to hear about (2026-10-20)
+# ---------------------------------------------------------------------------
+
+
+def _watch_view(row: Any) -> Dict[str, Any]:
+    return {
+        "conversation_id": row.conversation_id, "run_id": row.run_id,
+        "language": row.language, "created_at": _iso(row.created_at),
+    }
+
+
+def add_watch(conversation_id: str, run_id: str, language: str) -> None:
+    """Record that the conversation waits for the run to end (the bot's
+    start_run tool). A second watch on the same run by the same
+    conversation is not added twice."""
+    from src.storage import ChatRunWatchRecord
+
+    with _session() as session:
+        existing = (
+            session.query(ChatRunWatchRecord)
+            .filter_by(conversation_id=conversation_id, run_id=run_id)
+            .one_or_none()
+        )
+        if existing is not None:
+            return
+        session.add(ChatRunWatchRecord(conversation_id=conversation_id, run_id=run_id, language=language))
+        session.commit()
+
+
+def remove_watch(conversation_id: str, run_id: str) -> bool:
+    """Forget the run (its notice was delivered, or the conversation
+    stopped or deleted the run itself). False when nothing was watched."""
+    from src.storage import ChatRunWatchRecord
+
+    with _session() as session:
+        deleted = (
+            session.query(ChatRunWatchRecord)
+            .filter_by(conversation_id=conversation_id, run_id=run_id)
+            .delete(synchronize_session=False)
+        )
+        session.commit()
+        return bool(deleted)
+
+
+def watches(conversation_id: str) -> List[Dict[str, Any]]:
+    """The runs the conversation waits for, oldest first."""
+    from src.storage import ChatRunWatchRecord
+
+    with _session() as session:
+        rows = (
+            session.query(ChatRunWatchRecord)
+            .filter_by(conversation_id=conversation_id)
+            .order_by(ChatRunWatchRecord.id)
+            .all()
+        )
+        return [_watch_view(row) for row in rows]
+
+
+def conversations_watching(run_id: str) -> List[str]:
+    """The ids of the conversations waiting for the run."""
+    from src.storage import ChatRunWatchRecord
+
+    with _session() as session:
+        rows = (
+            session.query(ChatRunWatchRecord.conversation_id)
+            .filter_by(run_id=run_id)
+            .order_by(ChatRunWatchRecord.id)
+            .all()
+        )
+        return list(dict.fromkeys(row[0] for row in rows))
+
+
+def conversations_with_watches() -> List[str]:
+    """Every conversation that waits for at least one run (startup
+    catch-up)."""
+    from src.storage import ChatRunWatchRecord
+
+    with _session() as session:
+        rows = session.query(ChatRunWatchRecord.conversation_id).distinct().all()
+        return [row[0] for row in rows]
+

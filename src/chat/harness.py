@@ -65,6 +65,21 @@ Guardrails (owner discussion 2026-09-19):
   a correction line (not stored — it is in the call's transcript) up to
   ``LANGUAGE_RETRY_LIMIT`` times (src/chat/language.py).
 
+- **Run notices** (owner request 2026-10-20, after Claude Code's task
+  notifications; src/chat/run_notice.py). A run the bot starts here is
+  *watched* (``Tool.run_watch``, a row per conversation and run); when
+  it ends, the run service calls ``run_finished``, and the conversation
+  gets a ``notice`` row — the app's line, shown by the page and read by
+  the model as a user line — followed by one turn of the loop, so the
+  bot reports the end without being asked. The row and the turn only
+  happen when the conversation is idle: never inside a running turn
+  (a user line between a tool call and its result would break the
+  provider's exchange), and never while a held call waits for a yes.
+  A notice that cannot land yet waits as its watch, and every turn's
+  exit tries again (``_after_turn``), as does ``catch_up`` at startup
+  for runs that ended while the server was down. The notice turn has
+  a stop flag like any other, so the page's stop button works on it.
+
 - **Stop.** The page's send button turns into a stop button while a
   turn runs (owner request 2026-10-12, after Claude Code's Esc). ``stop``
   raises the turn's flag; the loop checks it after every model call
@@ -102,6 +117,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Tuple, Any, Dict, List, Optional
 
+from src.tiered_analysis import history
 from src.tiered_analysis.run_context import llm_model
 from src.tiered_analysis.server_status import server_status
 
@@ -115,6 +131,7 @@ from .language import (
     DEFAULT_LANGUAGE, LANGUAGE_RETRY_LIMIT, correction_message, matches_language, using_turn_language,
 )
 from .model import CHAT_TEMPERATURE, ModelClient, ModelReply
+from .run_notice import NOTICE_ROLE, notice_message, run_facts
 from .side_question import SIDE_QUESTION_KEY, side_question_line, without_side_questions
 from .transcript import render_prompt, render_reply
 from .prompt import system_prompt
@@ -170,11 +187,12 @@ class NothingToCompactError(RuntimeError):
 
 
 def starts_turn(message: Dict[str, Any]) -> bool:
-    """A row a turn starts at, for ``trim_history``: the user's line,
-    or a summary row that stood and stands in for everything before
-    it. A failed summary row is nothing to the model, so it starts no
-    turn — else the window could open on it and hold no user line."""
-    return message.get("role") == "user" or is_boundary(message)
+    """A row a turn starts at, for ``trim_history``: the user's line, a
+    run notice (the app's line that set off a turn of its own), or a
+    summary row that stood and stands in for everything before it. A
+    failed summary row is nothing to the model, so it starts no turn —
+    else the window could open on it and hold no user line."""
+    return message.get("role") in ("user", NOTICE_ROLE) or is_boundary(message)
 
 
 @dataclass(frozen=True)
@@ -199,11 +217,11 @@ class PendingCall:
 
 def model_view(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """A stored message cut down to what the provider may see. The
-    ``stopped`` row goes as a user line; so does a summary row, with
-    its preface. A summary row that failed is nothing to the model
-    (None)."""
+    ``stopped`` row goes as a user line, and so does a run notice; so
+    does a summary row, with its preface. A summary row that failed is
+    nothing to the model (None)."""
     view = {key: message[key] for key in MODEL_KEYS if message.get(key) is not None}
-    if view.get("role") == STOPPED_ROLE:
+    if view.get("role") in (STOPPED_ROLE, NOTICE_ROLE):
         view["role"] = "user"
     elif view.get("role") == SUMMARY_ROLE:
         if message.get("error") or not view.get("content"):
@@ -350,6 +368,7 @@ class ChatHarness:
                     result = problem
                 else:
                     result, time_ms = self._execute(tool, params)
+                    self._track_run(conversation_id, tool, result, language)
             still_held: Optional[Dict[str, Any]] = None
             if remaining:
                 still_held = {
@@ -413,6 +432,61 @@ class ChatHarness:
                 # The one call was the whole turn and ran to its end.
                 self._store_stopped(conversation_id, late=True, side_question=True)
             return reply is not None
+
+    def run_finished(self, run_id: str, status: str) -> None:
+        """The run service's word that a run ended (see the module
+        notes): every conversation watching it gets its notice — on a
+        thread of its own, so the run's slot is free at once and one
+        conversation's turn never waits for another's."""
+        for conversation_id in store.conversations_watching(run_id):
+            self._deliver_later(conversation_id)
+
+    def catch_up(self) -> None:
+        """Deliver the notices of runs that ended while nobody was
+        told (the server was down; startup housekeeping failed the
+        run), one thread per conversation that still watches a run."""
+        for conversation_id in store.conversations_with_watches():
+            self._deliver_later(conversation_id)
+
+    def deliver_notices(self, conversation_id: str) -> bool:
+        """Turn the conversation's finished watches into notice rows
+        and, when any landed, run one turn so the bot reports them.
+        True when a turn ran. Nothing happens — and the watches wait —
+        while a turn is in flight or a held call waits for the user
+        (the turn's exit tries again), and when no watched run has
+        ended yet. A watch on a run that no longer exists is dropped
+        without a notice.
+
+        Both the held-call check and the finished-watch check come
+        before the lock is taken: a lock taken for nothing is still a
+        turn's exit, which would set off this very delivery again,
+        and so on while the held call waited (found by the tests,
+        2026-10-20). The held-call check repeats under the lock, since
+        a call can be held between the check and the lock."""
+        if store.get_pending(conversation_id) or not self._has_finished_watch(conversation_id):
+            return False
+        try:
+            turn = self._turn(conversation_id)
+            turn.__enter__()
+        except (ConversationBusyError, UnknownConversationError):
+            return False
+        try:
+            if store.get_pending(conversation_id):
+                return False
+            language = self._store_notices(conversation_id)
+            if language is None:
+                return False
+            with using_turn_language(language):
+                self._loop(conversation_id, tool_calls=0, language=language, stop=turn.stop)
+            return True
+        finally:
+            turn.__exit__(None, None, None)
+
+    def is_busy(self, conversation_id: str) -> bool:
+        """A turn is running on the conversation right now (the page
+        keeps polling and shows the dots while one is)."""
+        with self._locks_guard:
+            return conversation_id in self._stops
 
     def context_usage(self, conversation_id: Optional[str], language: str = DEFAULT_LANGUAGE) -> ContextUsage:
         """How much of the model's context the next request would take
@@ -522,6 +596,7 @@ class ChatHarness:
                     held.append(PendingCall(call_id, name, inputs, facts))
                     continue
                 result, time_ms = self._execute(tool, params)
+                self._track_run(conversation_id, tool, result, language)
                 self._store_tool_result(conversation_id, call_id, name, result,
                                         time_ms=time_ms, input=inputs)
             if stop.is_set():
@@ -533,6 +608,75 @@ class ChatHarness:
             if held:
                 store.set_pending(conversation_id, {"calls": [c.to_dict() for c in held], "tool_calls": tool_calls})
                 return
+
+    # -- run notices ----------------------------------------------------
+
+    @staticmethod
+    def _track_run(conversation_id: str, tool: Any, result: Dict[str, Any], language: str) -> None:
+        """After a tool ran: a ``run_watch`` tool's successful result
+        names a run the conversation now waits for (start_run) or one
+        it dealt with itself (stop_run, delete_run), whose notice would
+        tell the user nothing new."""
+        run_id = result.get("run_id")
+        if tool.run_watch is None or result.get("error") is not None or not run_id:
+            return
+        if tool.run_watch == "start":
+            store.add_watch(conversation_id, str(run_id), language)
+        else:
+            store.remove_watch(conversation_id, str(run_id))
+
+    @staticmethod
+    def _has_finished_watch(conversation_id: str) -> bool:
+        """Any watched run that ended, or that is gone (its watch is
+        then dropped) — read without the lock, so a conversation with
+        nothing to hear never waits for one."""
+        for watch in store.watches(conversation_id):
+            run_id = watch["run_id"]
+            if not history.run_exists(run_id):
+                store.remove_watch(conversation_id, run_id)
+                continue
+            if run_facts(run_id) is not None:
+                return True
+        return False
+
+    @staticmethod
+    def _store_notices(conversation_id: str) -> Optional[str]:
+        """Under the lock: a notice row for every watched run that has
+        ended, each written in the same commit as its watch is dropped
+        (so a crash between the two can never notify twice). Returns
+        the language the bot reports in — the one the user had chosen
+        when the newest reported run was started — or None when no
+        notice landed."""
+        language: Optional[str] = None
+        for watch in store.watches(conversation_id):
+            facts = run_facts(watch["run_id"])
+            if facts is None:
+                continue
+            store.append_message(conversation_id, notice_message(facts), drop_watch=watch["run_id"])
+            language = watch["language"]
+        return language
+
+    def _deliver_later(self, conversation_id: str) -> None:
+        """``deliver_notices`` on a daemon thread; what it raises is
+        logged, never thrown at the caller (the run's thread, a turn's
+        exit, startup)."""
+
+        def deliver() -> None:
+            try:
+                self.deliver_notices(conversation_id)
+            except Exception:
+                logger.exception("delivering run notices to %s failed", conversation_id)
+
+        threading.Thread(target=deliver, name=f"chat-notices-{conversation_id[:8]}", daemon=True).start()
+
+    def _after_turn(self, conversation_id: str) -> None:
+        """Every turn's exit (the lock already released): a notice that
+        had to wait for this turn — the run ended during it, or a held
+        call was answered — lands now. Only when something is watched,
+        and the delivery itself runs no turn when nothing has ended, so
+        the notice turn's own exit sets off no further turn."""
+        if store.watches(conversation_id):
+            self._deliver_later(conversation_id)
 
     def _answer_stopped(self, conversation_id: str,
                         calls: List[Tuple[str, str, Optional[Dict[str, Any]]]]) -> None:
@@ -726,7 +870,8 @@ class ChatHarness:
             return self._locks.setdefault(conversation_id, threading.Lock())
 
     def _turn(self, conversation_id: str) -> "_Turn":
-        return _Turn(self._lock_for(conversation_id), conversation_id, self._stops, self._locks_guard)
+        return _Turn(self._lock_for(conversation_id), conversation_id, self._stops, self._locks_guard,
+                     on_exit=self._after_turn)
 
 
 class _Turn:
@@ -734,14 +879,18 @@ class _Turn:
     conversation is looked up under the lock, so a delete cannot slip
     in between the check and the turn (2026-10-10). The turn's stop
     flag (``stop``) is registered for ``ChatHarness.stop`` to raise and
-    taken away again on exit."""
+    taken away again on exit. ``on_exit`` is called once the lock is
+    released (a run notice that waited for this turn may take it now,
+    2026-10-20); only after a turn that was entered."""
 
     def __init__(self, lock: threading.Lock, conversation_id: str,
-                 stops: Dict[str, threading.Event], stops_guard: threading.Lock) -> None:
+                 stops: Dict[str, threading.Event], stops_guard: threading.Lock,
+                 on_exit: Optional[Callable[[str], None]] = None) -> None:
         self._lock = lock
         self._conversation_id = conversation_id
         self._stops = stops
         self._stops_guard = stops_guard
+        self._on_exit = on_exit
         self.stop = threading.Event()
 
     def __enter__(self) -> "_Turn":
@@ -759,3 +908,5 @@ class _Turn:
             if self._stops.get(self._conversation_id) is self.stop:
                 del self._stops[self._conversation_id]
         self._lock.release()
+        if self._on_exit is not None:
+            self._on_exit(self._conversation_id)

@@ -282,3 +282,39 @@ class TestOldDatabases:
                 os.environ.pop("DATABASE_PATH", None)
             else:
                 os.environ["DATABASE_PATH"] = old_database_path
+
+
+class TestRunWatches:
+    def test_add_list_remove(self, isolated_db):
+        first = store.create_conversation()["id"]
+        second = store.create_conversation()["id"]
+        store.add_watch(first, "r1", "en")
+        store.add_watch(first, "r1", "zh")  # the same run again: not added twice
+        store.add_watch(first, "r2", "ko")
+        store.add_watch(second, "r1", "en")
+
+        assert [(w["run_id"], w["language"]) for w in store.watches(first)] == [("r1", "en"), ("r2", "ko")]
+        assert store.conversations_watching("r1") == [first, second]
+        assert sorted(store.conversations_with_watches()) == sorted([first, second])
+
+        assert store.remove_watch(first, "r1") is True
+        assert store.remove_watch(first, "r1") is False
+        assert [w["run_id"] for w in store.watches(first)] == ["r2"]
+        assert store.conversations_watching("r1") == [second]
+
+    def test_a_notice_row_drops_its_watch_in_the_same_commit(self, isolated_db):
+        conversation_id = store.create_conversation()["id"]
+        store.add_watch(conversation_id, "r1", "en")
+        store.add_watch(conversation_id, "r2", "en")
+        store.append_message(conversation_id, {"role": "notice", "content": "[Run notice] r1 ended."}, drop_watch="r1")
+        assert [w["run_id"] for w in store.watches(conversation_id)] == ["r2"]
+        assert [m["role"] for m in store.messages(conversation_id)] == ["notice"]
+        # A notice is no user input: the sidebar counts stay.
+        assert store.get_conversation(conversation_id)["user_input_count"] == 0
+
+    def test_deleting_the_conversation_drops_its_watches(self, isolated_db):
+        conversation_id = store.create_conversation()["id"]
+        store.add_watch(conversation_id, "r1", "en")
+        assert store.delete_conversation(conversation_id) is True
+        assert store.conversations_watching("r1") == []
+

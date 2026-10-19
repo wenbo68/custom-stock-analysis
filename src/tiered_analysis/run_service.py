@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from src.languages import DEFAULT_LANGUAGE
 from src.tiered_analysis import history
@@ -243,10 +243,43 @@ def _record_progress(run_id: str, partial: RunProgress) -> None:
     history.save_progress(run_id, _serialize_running(partial))
 
 
+#: Who to tell when a run ends (2026-10-20): each is called with the
+#: run's id and its final status (succeeded, failed or stopped) after
+#: the row holds it, from the run's own thread. The chat harness
+#: subscribes so a conversation that started the run can report it.
+RunFinishedListener = Callable[[str, str], None]
+_finished_listeners: List[RunFinishedListener] = []
+
+
+def on_run_finished(listener: RunFinishedListener) -> None:
+    """Register ``listener`` for every run's end. Nothing is registered
+    twice."""
+    if listener not in _finished_listeners:
+        _finished_listeners.append(listener)
+
+
+def remove_run_finished_listener(listener: RunFinishedListener) -> None:
+    if listener in _finished_listeners:
+        _finished_listeners.remove(listener)
+
+
+def _notify_finished(run_id: str, status: str) -> None:
+    """Tell every listener; one that raises is logged, never lets the
+    others go untold, and never fails the run (its row is already
+    written)."""
+    for listener in list(_finished_listeners):
+        try:
+            listener(run_id, status)
+        except Exception:
+            logger.exception("run-finished listener failed for %s", run_id)
+
+
 def _execute_run(run: QueuedRun) -> None:
     """The queue's runner: execute one run and record its outcome. Never
     raises — a failure lands on the run row, and a stop (``RunStopped``)
-    lands as the stopped row with the sections that finished."""
+    lands as the stopped row with the sections that finished. Once the
+    row holds the end, the run-finished listeners are told."""
+    status = history.STATUS_FAILED
     try:
         inputs = run.inputs
         outcome = _run_analysis(
@@ -260,14 +293,17 @@ def _execute_run(run: QueuedRun) -> None:
             progress=lambda partial: _record_progress(run.run_id, partial),
         )
         history.mark_succeeded(run.run_id, _serialize_outcome(outcome))
+        status = history.STATUS_SUCCEEDED
     except RunStopped as stopped:
         logger.info("tiered run %s for %s stopped during %s",
                     run.run_id, run.ticker, stopped.stage)
         history.mark_stopped(run.run_id, _serialize_stopped(run, stopped))
+        status = history.STATUS_STOPPED
     except Exception as exc:
         logger.error("tiered analysis task failed for %s: %s",
                      run.ticker, exc, exc_info=True)
         history.mark_failed(run.run_id, str(exc))
+    _notify_finished(run.run_id, status)
 
 
 #: The one queue this process runs; app startup calls ``resume`` on it.

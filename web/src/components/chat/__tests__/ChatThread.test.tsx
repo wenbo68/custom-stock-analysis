@@ -558,3 +558,45 @@ describe('ChatThread summary rows', () => {
     expect(row).toHaveTextContent(/(still sees every message|仍然看到全部消息)/);
   });
 });
+
+describe('run notices', () => {
+  const notice = (run: NonNullable<ChatMessage['run']>, seq = 3): ChatMessage => ({ seq, role: 'notice', created_at: null, text: null, run });
+  const SUCCEEDED = { run_id: 'r1', ticker: 'AAPL', tier: 1, status: 'succeeded' as const, outlook: 'bullish', score: 7.2, error: null, stopped_stage: null };
+
+  it('words a succeeded run with its outlook and score, marked as the app\'s line', () => {
+    renderThread({ messages: [...MESSAGES.slice(0, 1), notice(SUCCEEDED)] });
+    const line = screen.getByTestId('chat-notice');
+    expect(line).toHaveAttribute('data-run-id', 'r1');
+    expect(within(line).getByTestId('chat-notice-mark')).toHaveTextContent(/Run notice|运行通知/);
+    expect(line).toHaveTextContent(/(The run on AAPL \(tier 1\) succeeded: outlook Bullish, score 7\.2\.|AAPL 的运行（第 1 层）已成功：展望看多，评分 7\.2。)/);
+    // A fact about the conversation, not one of its voices: quiet and centered, in the text's own color.
+    expect(line).toHaveClass('text-center', 'text-xs', 'text-ink-3');
+  });
+
+  it('words a failed run with its error and a stopped run with its step', () => {
+    renderThread({
+      messages: [
+        notice({ ...SUCCEEDED, run_id: 'r2', status: 'failed', outlook: null, score: null, error: 'provider down' }, 1),
+        notice({ ...SUCCEEDED, run_id: 'r3', status: 'stopped', outlook: null, score: null, stopped_stage: 'fundamentals' }, 2),
+        notice({ ...SUCCEEDED, run_id: 'r4', status: 'stopped', outlook: null, score: null }, 3),
+      ],
+    });
+    const lines = screen.getAllByTestId('chat-notice');
+    expect(lines[0]).toHaveTextContent(/(failed: provider down|失败：provider down)/);
+    expect(lines[1]).toHaveTextContent(/(was stopped during Fundamentals|在「基本面」阶段被停止)/);
+    expect(lines[2]).toHaveTextContent(/(was stopped; the sections that finished are kept|已被停止；已完成的部分保留)/);
+  });
+
+  it('starts the step count over after a notice, like after the user\'s line', () => {
+    renderThread({
+      messages: [
+        ...MESSAGES,
+        notice(SUCCEEDED, 5),
+        { seq: 6, role: 'assistant', created_at: null, text: 'AAPL came back bullish.', usage: { input_tokens: 10, output_tokens: 2 }, llm: 'fake', time_ms: 5, transcript_chars: 100 },
+      ],
+    });
+    const steps = screen.getAllByTestId('chat-assistant');
+    expect(steps.at(-1)?.firstElementChild?.textContent).toMatch(/^(Step 1: LLM decided to say something|第 1 步：LLM 决定作答)$/);
+  });
+});
+
