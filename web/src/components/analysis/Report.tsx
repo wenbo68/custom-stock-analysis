@@ -14,6 +14,7 @@ import { Card, Modal, WarningsButton } from './Ui';
 import { SummaryOutline } from './SummaryOutline';
 import { VoteTree, VoteScores, type VoteItemsLoader } from './VoteTree';
 import { DataReports } from './DataReports';
+import { SkeletonCard } from './Skeleton';
 import { TradePlan } from './TradePlan';
 import { Transcript } from './Transcript';
 
@@ -314,6 +315,27 @@ interface ResultProps {
   debateItemsLoader?: VoteItemsLoader;
 }
 
+// Which card a running run's step fills: a data report (the grid's
+// skeleton slot), the analysis card, or the trade plan card.
+const ANALYSIS_STAGES = ['preliminary_analysis', 'deep_analysis'];
+const TRADE_PLAN_STAGE = 'trade_plan';
+
+// The skeleton of the card being worked on before any snapshot exists
+// (2026-10-19): the first step is always a data report, so the data
+// reports block with one unnamed skeleton card.
+export const ReportSkeleton = () => {
+  const { t } = useUiLanguage();
+  return (
+    <div className="flex flex-col gap-6">
+      <Block title={t('tiered.dataReports.title')}>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <SkeletonCard testId="skeleton" />
+        </div>
+      </Block>
+    </div>
+  );
+};
+
 // The stage names a stopped run's banner can carry, as the page already
 // words them: the data reports' titles, then the three analysis steps.
 const STAGE_KEYS: Record<string, UiTextKey> = {
@@ -342,6 +364,12 @@ const stageName = (stage: string, t: (key: UiTextKey) => string): string =>
 // finished (none → no block at all), the analysis only when it
 // finished, and never the plan — nor the action, which the plan review
 // decides.
+//
+// A running run (2026-10-19) shows the same again as it goes: the page
+// re-fetches the report at every poll, so the cards land one by one,
+// and the card being worked on sits in its place as a skeleton (owner
+// request 2026-10-19: no progress line; the row's status carries the
+// count). The plan and the action wait for the end.
 export const Report = ({
   result,
   runId,
@@ -351,11 +379,21 @@ export const Report = ({
   const usage = result.llm_usage ?? null;
   const stoppedStage = result.stopped_stage ?? null;
   const isStopped = stoppedStage !== null;
+  const runningStage = result.running_stage ?? null;
+  const isRunning = runningStage !== null;
+  const isComplete = !isStopped && !isRunning;
   // On a finished run the analysis card always shows (old stored runs
-  // may lack the preliminary record); on a stopped one only when the
-  // analysis finished.
-  const hasAnalysis = !isStopped || !!result.deep_analysis || !!result.preliminary_analysis;
+  // may lack the preliminary record); on a stopped or running one only
+  // when the analysis finished.
+  const hasAnalysis = isComplete || !!result.deep_analysis || !!result.preliminary_analysis;
   const hasDataReports = result.data_reports.length > 0;
+  // The skeleton's place: the step in progress is a data report (any
+  // step that is not an analysis or the plan), the analysis, or the plan.
+  const runningAnalysis = isRunning && ANALYSIS_STAGES.includes(runningStage);
+  const runningPlan = isRunning && runningStage === TRADE_PLAN_STAGE;
+  const runningDataReport = isRunning && !runningAnalysis && !runningPlan ? runningStage : null;
+  const analysisTitle =
+    result.tier === 2 ? t('tiered.deepAnalysis.title') : t('tiered.preliminaryAnalysis.title');
   // Token total is the exact sum of what the provider reported per call
   // — the same numbers the transcript shows for each exchange.
   const usageLine = (u: NonNullable<typeof usage>) =>
@@ -374,9 +412,14 @@ export const Report = ({
           )}
         </p>
       ) : null}
-      {hasDataReports || !isStopped ? (
+      {hasDataReports || isComplete || runningDataReport ? (
         <Block title={t('tiered.dataReports.title')}>
-          <DataReports dataReports={result.data_reports} />
+          <DataReports dataReports={result.data_reports} pending={runningDataReport} />
+        </Block>
+      ) : null}
+      {runningAnalysis ? (
+        <Block title={analysisTitle}>
+          <SkeletonCard testId={`skeleton-${runningStage}`} />
         </Block>
       ) : null}
       {!hasAnalysis ? null : result.deep_analysis ? (
@@ -386,15 +429,20 @@ export const Report = ({
             section={result.deep_analysis}
             runId={runId}
             loadItems={debateItemsLoader}
-            showAction={!isStopped}
+            showAction={isComplete}
           />
         </Block>
       ) : (
         <Block title={t('tiered.preliminaryAnalysis.title')} helpKey="tiered.help.outlook">
-          <Preliminary result={result} showAction={!isStopped} />
+          <Preliminary result={result} showAction={isComplete} />
         </Block>
       )}
-      {result.outlook === 'bullish' && !isStopped ? (
+      {runningPlan ? (
+        <Block title={t('tiered.tradePlan.title')}>
+          <SkeletonCard testId={`skeleton-${runningStage}`} />
+        </Block>
+      ) : null}
+      {result.outlook === 'bullish' && isComplete ? (
         // The trade plan sits under the analysis that judged it — and
         // only under a bullish one (owner decision 2026-08-05): a
         // neutral/bearish/unknown outlook shows no plan section at all;

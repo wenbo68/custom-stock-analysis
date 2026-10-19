@@ -163,7 +163,7 @@ export const ChatComposer = ({ blocked, blockedHint, working = false, stopping =
               >
                 <span className="font-mono font-semibold text-ink-1">
                   /{command.name}
-                  {command.argumentKey ? <span className="font-normal text-ink-4"> &lt;{t(command.argumentKey)}&gt;</span> : null}
+                  {command.argumentKey ? <span className="font-normal text-caution"> &lt;{t(command.argumentKey)}&gt;</span> : null}
                 </span>
                 <span className="text-ink-4">{t(command.descriptionKey)}</span>
               </button>

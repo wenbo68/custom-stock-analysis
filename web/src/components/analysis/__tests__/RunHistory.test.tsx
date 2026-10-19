@@ -134,15 +134,31 @@ describe('RunHistory', () => {
     expect(rows[1].compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('shows a queued row with its place in line and explains it when expanded', () => {
-    renderHistory({
+  it('shows a queued row with its place in line, and the row opens nothing', () => {
+    const props = renderHistory({
       runs: [makeRun('q1', { status: 'queued', queue_position: 3, shares: null })],
       expandedTaskId: 'q1',
     });
 
     // two runs ahead → this one is 3rd in line
     expect(screen.getByText(/排队中（第 3 位）|Queued \(3rd\)/)).toBeInTheDocument();
-    expect(screen.getByText(/轮到时会自动开始|starts by itself/)).toBeInTheDocument();
+    // Nothing to show yet (owner request 2026-10-19): no body, no button
+    // role, and a click toggles nothing.
+    expect(screen.queryByText(/starts by itself|轮到时会自动开始/)).not.toBeInTheDocument();
+    expect(document.querySelector('[role="button"][aria-expanded]')).toBeNull();
+    fireEvent.click(screen.getByText('AAPL'));
+    expect(props.onToggle).not.toHaveBeenCalled();
+  });
+
+  it('counts a running row’s finished cards against the total once the server has them', () => {
+    renderHistory({
+      runs: [
+        makeRun('r1', { status: 'running', outlook: null, shares: null, stages_done: 2, stages_total: 8 }),
+        makeRun('r2', { status: 'running', outlook: null, shares: null }),
+      ],
+    });
+    expect(screen.getByText(/^Running \(2\/8\)$|^分析中（2\/8）$/)).toBeInTheDocument();
+    expect(screen.getByText(/^Running$|^分析中$/)).toBeInTheDocument();
   });
 
   it('shows a queued row without a count when the backend sends none', () => {
@@ -419,6 +435,35 @@ describe('RunHistory', () => {
 
   // Stop button (2026-10-19): a running run shows a stop where the trash
   // would sit; once stopped, the row is history with the trash as usual.
+  it('shows a running row’s report so far once it has one, the card in progress a skeleton', () => {
+    renderHistory({
+      runs: [makeRun('r1', { status: 'running', outlook: null, shares: null, stages_done: 1, stages_total: 4 })],
+      expandedTaskId: 'r1',
+      expandedResult: {
+        ticker: 'AAPL', market: 'us', tier: 1, running_stage: 'positioning',
+        stages: ['technicals', 'positioning', 'preliminary_analysis', 'trade_plan'],
+        score: null, confidence: null, levels: { entry: null, stop_loss: null, target: null },
+        summary: null, warnings: [], data_reports: [],
+      },
+      stoppingTaskIds: ['r1'],
+    });
+    expect(screen.getByTestId('skeleton-positioning')).toBeInTheDocument();
+    expect(screen.queryByTestId('skeleton')).not.toBeInTheDocument();
+    // Stop pressed: the status column says so in place of the count.
+    expect(screen.getByText(/^Stopping$|^停止中$/)).toBeInTheDocument();
+    expect(screen.queryByText(/Running \(1\/4\)|分析中（1\/4）/)).not.toBeInTheDocument();
+  });
+
+  it('shows the first card’s skeleton on a running row before any snapshot', () => {
+    renderHistory({
+      runs: [makeRun('r1', { status: 'running', outlook: null, shares: null })],
+      expandedTaskId: 'r1',
+    });
+    expect(screen.getByText(/^Data reports$|^数据报告$/)).toBeInTheDocument();
+    expect(screen.getByTestId('skeleton')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.queryByText(/Running \(2-5|分析中（约/)).not.toBeInTheDocument();
+  });
+
   it('ends a running row in a stop button that stops after a confirmation, without opening the row', () => {
     const props = renderHistory({
       runs: [makeRun('r1', { status: 'running', outlook: null, shares: null })],
@@ -430,7 +475,8 @@ describe('RunHistory', () => {
     fireEvent.click(stop);
     expect(props.onToggle).not.toHaveBeenCalled();
     expect(props.onStop).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog')).toHaveTextContent(/finished|已完成/);
+    expect(screen.getByRole('dialog')).toHaveTextContent(/LLM call in progress still finishes|LLM 调用仍会完成/);
+    expect(screen.getByTestId('run-stop-confirm')).toHaveTextContent(/^Stop$|^停止$/);
     fireEvent.click(screen.getByText(/^Keep$|^保留$/));
     expect(props.onStop).not.toHaveBeenCalled();
 
@@ -449,8 +495,8 @@ describe('RunHistory', () => {
     const stop = screen.getByTestId('run-stop');
     expect(stop).toBeDisabled();
     expect(stop.getAttribute('aria-label')).toMatch(/Stopping…|停止中…/);
-    // The expanded running row says the stop is on its way.
-    expect(screen.getByText(/Stopping…|停止中…/, { selector: 'p' })).toBeInTheDocument();
+    // The status column says the stop is on its way.
+    expect(screen.getByText(/^Stopping$|^停止中$/)).toBeInTheDocument();
 
     cleanup();
     renderHistory({

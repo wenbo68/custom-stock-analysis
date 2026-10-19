@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { TieredTranscriptCall, TieredTranscriptCallSummary } from '../../../api/tiered';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
@@ -54,15 +54,37 @@ function renderTranscript(
 
 // A fact line is one span whose full text is "label: value"; the value
 // sits in a nested span, so plain getByText cannot see the pair together.
-const factLines = (pattern: RegExp) =>
+const factLines = (pattern: RegExp): HTMLElement[] =>
   screen.getAllByTestId('transcript-facts').flatMap((row) =>
-    Array.from(row.children).filter((fact) => pattern.test(fact.textContent ?? '')),
+    Array.from(row.children).filter(
+      (fact): fact is HTMLElement => fact instanceof HTMLElement && pattern.test(fact.textContent ?? ''),
+    ),
   );
 
 const folds = () => Array.from(document.querySelectorAll('details'));
 const summaries = () => Array.from(document.querySelectorAll('summary'));
 
 describe('Transcript', () => {
+  it('shows a provider error body as code, status and message facts in amber', async () => {
+    const loader = vi.fn().mockResolvedValue([
+      summary({
+        output_chars: 0,
+        error:
+          'litellm.ServiceUnavailableError: GeminiException - {\n  "error": {\n    "code": 503,\n    "message": "The service is currently unavailable.",\n    "status": "UNAVAILABLE"\n  }\n}\n',
+      }),
+    ]);
+    renderTranscript(loader, vi.fn());
+    fireEvent.click(screen.getByRole('button', { name: /LLM call/ }));
+    const status = (await screen.findAllByText(/^(status|状态):/, { exact: false }))[0];
+    const line = status.closest('span[class*="text-ink-4"]') ?? status;
+    expect(line).toHaveTextContent(
+      /- \{"code": 503, "status": "UNAVAILABLE", "message": "The service is currently unavailable\."\}$/,
+    );
+    expect(within(line as HTMLElement).getByText('"UNAVAILABLE"')).toHaveClass('text-caution');
+    expect(within(line as HTMLElement).getByText('503')).toHaveClass('text-caution');
+  });
+
+
   it('loads nothing until opened, then shows every call from the index', async () => {
     const loader = vi.fn().mockResolvedValue([
       summary(),
@@ -79,7 +101,23 @@ describe('Transcript', () => {
     // The index has no text, and none is fetched until a fold opens.
     expect(callLoader).not.toHaveBeenCalled();
     expect(screen.queryByText('the prompt')).not.toBeInTheDocument();
-    expect(screen.getByText(/boom/)).toBeInTheDocument();
+    // The status fact sits between the model and the time (owner format
+    // 2026-10-19): green "succeeded", or red "failed" followed by the
+    // error's facts in amber — no separate "Call failed" line.
+    const statusLines = factLines(/^(status|状态):/);
+    expect(statusLines).toHaveLength(2);
+    expect(within(statusLines[0]).getByText(/^(succeeded|成功)$/)).toHaveClass('text-positive');
+    expect(within(statusLines[1]).getByText(/^(failed|失败)$/)).toHaveClass('text-negative');
+    expect(statusLines[1]).toHaveTextContent(/- \{"message": "RuntimeError\('boom'\)"\}$/);
+    expect(within(statusLines[1]).getByText(/boom/)).toHaveClass('text-caution');
+    expect(screen.queryByText(/Call failed|调用失败/)).not.toBeInTheDocument();
+    const factLabels = Array.from(screen.getAllByTestId('transcript-facts')[0].children).map(
+      (fact) => fact.textContent?.split(':')[0],
+    );
+    expect(factLabels.slice(0, 4)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^(llm)$/), expect.stringMatching(/^(status|状态)$/)]),
+    );
+    expect(factLabels.indexOf('llm') + 1).toBe(factLabels.findIndex((label) => /^(status|状态)$/.test(label ?? '')));
     // The call number, then one row of label/value facts: the label
     // stays muted, the value is bright and bold.
     expect(screen.getByText(/^(LLM call 1|第 1 次 LLM 调用)$/)).toBeInTheDocument();

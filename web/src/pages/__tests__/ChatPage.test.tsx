@@ -451,7 +451,6 @@ describe('ChatPage slash commands', () => {
     await waitFor(() => expect(screen.getByText('The deep analysis.')).toBeInTheDocument());
     const replies = screen.getAllByTestId('chat-assistant');
     expect(replies[1].firstElementChild?.textContent).toMatch(/^(Step 1: LLM answered the side question|第 1 步：LLM 回答了题外问题)$/);
-    expect(screen.getByTestId('chat-side-question-note')).toBeInTheDocument();
     expect(chatApi.sendMessage).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('chat-send')).toBeInTheDocument();
   });

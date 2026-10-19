@@ -74,6 +74,18 @@ class RunSummary(BaseModel):
         default=None,
         description="Queued rows only: the run's place in the line, from 1.",
     )
+    stages_done: Optional[int] = Field(
+        default=None,
+        description=(
+            "Running rows only (2026-10-19): the steps finished so far — the "
+            "one being worked on is not counted. Null before the first "
+            "progress snapshot."
+        ),
+    )
+    stages_total: Optional[int] = Field(
+        default=None,
+        description="Running rows only: the run's step total (each data report, the analysis, the trade plan).",
+    )
     # The run's inputs, in the form's order; null on rows stored before
     # a field existed.
     capital: Optional[float] = None
@@ -117,8 +129,12 @@ class RunDetail(RunSummary):
             "The stored report (shape: web/src/api/tiered.ts TieredResult), "
             "limited to `sections`, plus `data_report_index`: one light row per "
             "data report (name, kind, counted, warnings) whatever the "
-            "sections. Null while queued/running and after a failure. On a "
-            "stopped run: the sections that finished, plus `stopped_stage` "
+            "sections. Null while queued and after a failure. On a running "
+            "run (2026-10-19): the sections finished so far, plus "
+            "`running_stage` (the step being worked on, which the report "
+            "lacks) and `stages` (the run's steps in order), replaced at "
+            "every step — poll to watch the cards land. On a stopped run: "
+            "the sections that finished, plus `stopped_stage` "
             "(the step that was running when the user pressed stop) and "
             "`stopped_stage_finished` (whether that step still finished and "
             "is in the report)."

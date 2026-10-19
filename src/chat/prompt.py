@@ -51,7 +51,10 @@ request the full input and output). Transcripts are pruned after a retention \
 period.
 - A run's status goes queued → running → succeeded, failed or stopped. A few runs \
 execute at once (the run slots); the rest queue and start by themselves. A run \
-takes roughly 2-5 minutes. A queued run can be cancelled (deleting it); a running \
+takes roughly 2-5 minutes, and while it runs get_run already shows the sections \
+that finished (the data reports one by one, then the analysis) and the step being \
+worked on (`running_stage`), so you can report its progress without waiting for \
+the end. A queued run can be cancelled (deleting it); a running \
 run can be stopped (stop_run — the same as the Stop button on the analysis page), \
 which takes effect at the run's next step or model call, after which its report \
 holds the sections that had finished (`stopped_stage` names the step the stop was \

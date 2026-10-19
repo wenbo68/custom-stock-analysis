@@ -9,6 +9,7 @@ import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey } from '../../i18n/uiText';
 import { Tooltip } from '../common/Tooltip';
 import { Card, FactFold } from './Ui';
+import { parseCallError } from './transcriptError';
 
 export interface TranscriptProps {
   /** The run whose LLM exchanges to show. */
@@ -151,6 +152,32 @@ const stageName = (stage: string | null, t: (key: UiTextKey) => string): string 
   return key ? t(key) : stage.replace(/_/g, ' ');
 };
 
+// The status fact (owner format 2026-10-19): "succeeded" in green, or
+// "failed" in red followed by the provider's error facts as
+// `{"code": 503, "status": "UNAVAILABLE", "message": "…"}` — the values
+// in amber, the punctuation and keys in the value's usual color.
+const CallStatus = ({ error }: { error: string | null }) => {
+  const { t } = useUiLanguage();
+  if (error == null) {
+    return <span className="font-semibold text-positive">{t('tiered.transcript.statusSucceeded')}</span>;
+  }
+  const facts = parseCallError(error);
+  return (
+    <span className="font-semibold text-ink-1">
+      <span className="text-negative">{t('tiered.transcript.statusFailed')}</span>
+      {' - {'}
+      {facts.map(([key, value], index) => (
+        <span key={key}>
+          {index > 0 ? ', ' : ''}
+          {`"${key}": `}
+          <span className="text-caution [overflow-wrap:anywhere]">{JSON.stringify(value)}</span>
+        </span>
+      ))}
+      {'}'}
+    </span>
+  );
+};
+
 type CallState =
   | { kind: 'idle' }
   | { kind: 'loading' }
@@ -192,9 +219,11 @@ export const TranscriptCall = ({
   const [call, setCall] = useState<CallState>({ kind: 'idle' });
   const input = item.input_tokens ?? 0;
   const output = item.output_tokens ?? 0;
-  const facts: [string, string][] = [
-    ...(showStage ? [[t('tiered.transcript.for'), stageName(item.stage, t)] as [string, string]] : []),
+  // The status sits between the model and the time (owner order 2026-10-19).
+  const facts: [string, ReactNode][] = [
+    ...(showStage ? [[t('tiered.transcript.for'), stageName(item.stage, t)] as [string, ReactNode]] : []),
     [t('tiered.transcript.llm'), item.llm ?? '—'],
+    [t('tiered.transcript.status'), <CallStatus error={item.error ?? null} />],
     [t('tiered.transcript.time'), item.time_ms == null ? '—' : `${item.time_ms}ms`],
   ];
 
@@ -238,7 +267,11 @@ export const TranscriptCall = ({
             <span key={label} className="text-ink-4">
               {label}
               {': '}
-              <span className="font-semibold text-ink-1">{value}</span>
+              {typeof value === 'string' ? (
+                <span className="font-semibold text-ink-1">{value}</span>
+              ) : (
+                value
+              )}
             </span>
           ))}
           <FactFold
@@ -265,9 +298,6 @@ export const TranscriptCall = ({
           </FactFold>
         </div>
       </div>
-      {item.error ? (
-        <p className="text-caution">{t('tiered.transcript.failed', { error: item.error })}</p>
-      ) : null}
     </article>
   );
 };

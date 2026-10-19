@@ -18,8 +18,9 @@ import type { UiTextKey } from '../../i18n/uiText';
 // box says so, and nothing is queued.
 //
 // A command may take the rest of the line (`argumentKey` names what,
-// for the menu and /help: "/btw <question>"); the others ignore what
-// follows their word.
+// for the menu and /help: "/btw <question>", the hint in the caution
+// color so it reads as a blank to fill, owner request 2026-10-19); the
+// others ignore what follows their word.
 export type ChatCommandName = 'help' | 'context' | 'compact' | 'btw';
 
 export interface ChatCommand {

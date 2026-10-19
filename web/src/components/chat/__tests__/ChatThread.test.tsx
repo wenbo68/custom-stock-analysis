@@ -518,10 +518,10 @@ describe('ChatThread side questions', () => {
     // The answer counts as step 1 after the question, like any reply.
     expect(replies[1].firstElementChild?.textContent).toMatch(/^(Step 1: LLM answered the side question|第 1 步：LLM 回答了题外问题)$/);
     expect(replies[1]).toHaveTextContent('The deep analysis.');
-    expect(within(replies[1]).getByTestId('chat-side-question-note')).toHaveTextContent(/(will not see|不会看到)/);
+    // No note under the answer (owner request 2026-10-19): the step line
+    // and the /btw mark on the question say what it is.
+    expect(within(replies[1]).queryByText(/will not see|不会看到/)).toBeNull();
     expect(within(replies[1]).getByTestId('chat-usage')).toHaveTextContent(/23/);
-    // An ordinary reply carries no such note.
-    expect(within(replies[0]).queryByTestId('chat-side-question-note')).toBeNull();
     expect(replies[0].firstElementChild?.textContent).toMatch(/^(Step 1: LLM decided to say something|第 1 步：LLM 决定作答)$/);
   });
 });

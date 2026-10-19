@@ -397,11 +397,6 @@ const ReplyRow = ({
             <ChatMarkdown text={message.text} />
           </div>
         ) : null}
-        {message.side_question ? (
-          <p className="text-xs text-caution" data-testid="chat-side-question-note">
-            {t('chat.sideQuestion.note')}
-          </p>
-        ) : null}
         {message.notice === 'tool_call_limit' ? (
           <p className="text-xs text-caution">{t('chat.notice.toolCallLimit')}</p>
         ) : null}

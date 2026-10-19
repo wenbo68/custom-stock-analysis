@@ -413,7 +413,8 @@ TOOLS: Tuple[Tool, ...] = (
         description=(
             "One page of the run history, newest first, filtered in the database. "
             "Each row: run_id, ticker, status, error, times, capital, risk_pct, "
-            "reward_ratio, max_hold_weeks, tier, outlook (once succeeded) and share count. "
+            "reward_ratio, max_hold_weeks, tier, outlook (once succeeded) and share count; "
+            "a running row adds stages_done/stages_total (finished steps over the total). "
             "Filters combine with AND."
         ),
         params=ListRunsParams, run=run_list_runs,
@@ -430,7 +431,10 @@ TOOLS: Tuple[Tool, ...] = (
             "score, confidence, levels (entry, stop loss, target), share count, summary, "
             "warnings, earnings date, per-stage LLM usage, and data_report_index — one "
             "light row per data report (name, whether it counted, its warnings). "
-            "'result' is null while the run is queued or running and after a failure."
+            "'result' is null while the run is queued and after a failure. While the "
+            "run is running, 'result' holds what has finished so far: the data reports "
+            "that landed, the analysis once it did, 'running_stage' (the step being "
+            "worked on) and 'stages' (the run's steps in order)."
         ),
         params=GetRunParams, run=run_get_run,
     ),

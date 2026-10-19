@@ -220,9 +220,12 @@ def get_tiered_run(
 ) -> Dict[str, Any]:
     """One run with its stored report, whole or by section.
 
-    `result` is null while the run is queued or running and after a
-    failure (see `status` and `error`). Whatever the sections, `result`
-    carries `data_report_index`: one light row per data report (name, kind,
+    `result` is null while the run is queued and after a failure (see
+    `status` and `error`). While the run is running it holds the sections
+    finished so far, `running_stage` (the step being worked on) and
+    `stages` (the run's steps in order), and changes at every step: poll
+    it to watch each card land. Whatever the sections, `result` carries
+    `data_report_index`: one light row per data report (name, kind,
     whether it counted, warnings). 404 for an unknown run id.
     """
     from src.tiered_analysis.report_sections import normalize_sections

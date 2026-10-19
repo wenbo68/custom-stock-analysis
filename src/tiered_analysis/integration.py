@@ -47,7 +47,7 @@ from .providers.base import (
 )
 from .providers.registry import detect_market, get_providers
 from .providers.technicals import Bar, read_metric, technicals_as_of
-from .run_control import RunStopped, StoppedRun
+from .run_control import ProgressSink, RunProgress, RunStopped
 from .run_gate import (
     StaleDataError,
     expected_bar_date,
@@ -165,17 +165,21 @@ def _collect_data_reports(
     providers: Sequence[DataReportProvider],
     ticker: str,
     sink: Optional[List[DataReport]] = None,
+    on_start: Optional[Callable[[str], None]] = None,
 ) -> List[DataReport]:
     """The providers' reports, one after another in registry order.
     ``sink`` receives each report as it finishes, so a run stopped
     part-way (``RunStopped``, which passes the crash net below) still
-    has the finished ones."""
+    has the finished ones; ``on_start`` is told each report's name as
+    its collection begins (the run's progress)."""
     # Stage-label each provider's collection so its LLM calls (the news
     # screens) show under the data_report's name in llm_usage and the run
     # transcript instead of pooling as "unknown".
     tracker = active_tracker()
     results: List[DataReport] = [] if sink is None else sink
     for provider in providers:
+        if on_start is not None:
+            on_start(provider.name)
         stage = (
             tracker.stage(provider.name) if tracker else nullcontext()
         )
@@ -297,6 +301,7 @@ def run_tiered_analysis(
     transcript: Optional[LlmTranscript] = None,
     language: str = DEFAULT_LANGUAGE,
     stop: Optional[Any] = None,
+    progress: Optional[ProgressSink] = None,
 ) -> TieredRunOutcome:
     """Run one ticker at ``tier`` with full production wiring.
 
@@ -320,7 +325,12 @@ def run_tiered_analysis(
     ``stop`` is the run's stop flag (run_control.py: a ``StopFlag``, or
     a plain ``threading.Event``): once set, the run ends at its next
     checkpoint with ``RunStopped``, whose ``partial`` holds the sections
-    that finished; None means the run cannot be stopped.
+    that finished; None means the run cannot be stopped. ``progress``
+    is called with a ``RunProgress`` at the start of every step — the
+    sections finished so far and the step now in progress — so a
+    watcher can show each card as it completes; None shows nothing
+    until the end. A failing ``progress`` call is logged and ignored:
+    it is a window onto the run, never part of it.
     """
     if tier not in SUPPORTED_TIERS:
         raise ValueError(f"tier must be one of {SUPPORTED_TIERS}, got {tier}")
@@ -366,32 +376,66 @@ def run_tiered_analysis(
         language=require_supported(language),
         stop=stop,
     )
-    # What a stop keeps (run_control.py): the finished data reports as
-    # they come in, then the levels and each analysis once it finishes.
+    # What a stop keeps and what progress shows (run_control.py): the
+    # finished data reports as they come in, then the levels and each
+    # analysis once it finishes. ``partial`` holds the enriched reports
+    # under "data_reports" once the data stage is through.
     collected: List[DataReport] = []
     partial: Dict[str, Any] = {}
+    stages = run_stages(providers, tier)
+
+    def finished_so_far(stage: str, enrich: bool = False) -> RunProgress:
+        finished = dict(partial)
+        data_reports = finished.pop("data_reports", None)
+        if data_reports is None:
+            # The cards as collected: cross-provider fields come with
+            # the data stage's end (a stop adds them, since it is the
+            # end; a progress snapshot does not — the next one has them).
+            data_reports = (
+                _finished_reports(collected, cross_bars_loader) if enrich
+                else list(collected)
+            )
+        return RunProgress(
+            stage=stage, ticker=ticker, market=market, tier=tier,
+            max_hold_weeks=max_hold_weeks, data_reports=data_reports,
+            llm_usage=tracker.to_detail(), stages=stages, **finished,
+        )
+
+    def report_progress(stage: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(finished_so_far(stage))
+        except Exception as exc:
+            logger.warning("run progress for %s not recorded at %s: %s", ticker, stage, exc)
+
     try:
         with tracker.activate():
             return _run_stages(
                 ticker, market, providers, preliminary_analysis, tier,
                 sizing_settings, tier2_stage, earnings_lookup, plan_summarizer,
                 cross_bars_loader, max_hold_weeks, staleness_gate, tracker,
-                collected, partial,
+                collected, partial, report_progress,
             )
     except RunStopped as stopped:
         if stopped.partial is None:
-            stopped.partial = StoppedRun(
-                stage=stopped.stage,
-                ticker=ticker,
-                market=market,
-                tier=tier,
-                max_hold_weeks=max_hold_weeks,
-                data_reports=_finished_reports(collected, cross_bars_loader),
-                llm_usage=tracker.to_detail(),
+            stopped.partial = replace(
+                finished_so_far(stopped.stage, enrich=True),
                 pressed_stage=getattr(stop, "stage", None),
-                **partial,
             )
         raise
+
+
+#: The name of the analysis step at each tier, as the page words it.
+ANALYSIS_STAGE = {1: "preliminary_analysis", 2: "deep_analysis"}
+TRADE_PLAN_STAGE = "trade_plan"
+
+
+def run_stages(providers: Sequence[DataReportProvider], tier: int) -> List[str]:
+    """The run's steps in order: each data report, the analysis the
+    tier runs, then the trade plan (which runs on a bullish outlook
+    only; a finished run without one simply never reached it)."""
+    return [p.name for p in providers] + [ANALYSIS_STAGE[tier], TRADE_PLAN_STAGE]
 
 
 def _finished_reports(
@@ -425,12 +469,17 @@ def _run_stages(
     tracker: LlmUsageTracker,
     collected: List[DataReport],
     partial: Dict[str, Any],
+    report_progress: Callable[[str], None],
 ) -> TieredRunOutcome:
     """The stages of ``run_tiered_analysis`` under its activated
     tracker. ``collected`` and ``partial`` are the caller's records of
-    what has finished, read when a stop ends the run part-way."""
-    data_reports = _collect_data_reports(providers, ticker, sink=collected)
+    what has finished, read when a stop ends the run part-way and at
+    every ``report_progress`` (called with the step about to start)."""
+    data_reports = _collect_data_reports(
+        providers, ticker, sink=collected, on_start=report_progress,
+    )
     data_reports = enrich_cross_fields(data_reports, cross_bars_loader)
+    partial["data_reports"] = list(data_reports)
 
     # STALENESS GATE (2026-08-08): stop BEFORE any LLM stage when the
     # newest completed bar predates the most recent completed trading
@@ -481,6 +530,7 @@ def _run_stages(
         level_warnings=list(level_warnings), earnings=earnings,
     )
 
+    report_progress(ANALYSIS_STAGE[tier])
     state = TierState(ticker=ticker, market=market, max_hold_weeks=max_hold_weeks)
     if tier == 1:
         # The preliminary analysis (2026-08-10): the tiered package's own
@@ -542,7 +592,8 @@ def _run_stages(
     # reasons, and produce the plan card's structured warnings.
     review = None
     if final.outlook is Outlook.BULLISH and bases.get("entry") is not None:
-        with tracker.stage("trade_plan"):
+        report_progress(TRADE_PLAN_STAGE)
+        with tracker.stage(TRADE_PLAN_STAGE):
             review = review_plan(
                 ticker, data_reports, bases, final.outlook, market,
                 sizing_settings,

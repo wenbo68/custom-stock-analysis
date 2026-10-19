@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { TieredRunSummary } from '../../api/tiered';
+import type { TieredReportSection, TieredRunSummary } from '../../api/tiered';
 import { UiLanguageProvider } from '../../contexts/UiLanguageContext';
 
 vi.mock('../../api/tiered', async (importOriginal) => {
@@ -148,5 +148,83 @@ describe('AnalysisPage — stopping a run', () => {
     expect(await screen.findByTestId('run-stop-error')).toHaveTextContent(/no longer running/);
     // Nothing is marked as stopping after a refusal.
     expect(screen.getByTestId('run-stop')).not.toBeDisabled();
+  });
+});
+
+// Live cards (2026-10-19): a running run's report is re-fetched on every
+// poll and shows what has finished so far; the final report replaces it
+// once the row flips.
+describe('AnalysisPage — watching a run', () => {
+  const runningRow: TieredRunSummary = {
+    run_id: 'r1', ticker: 'AAPL', status: 'running', error: null,
+    created_at: '2026-10-19T04:00:00', updated_at: null, tier: 1,
+    capital: 100000, risk_pct: 1, reward_ratio: 2, max_hold_weeks: 2,
+    outlook: null, shares: null,
+  };
+  const page = (items: TieredRunSummary[]) => ({
+    items, page: 1, page_size: 10, total: items.length, page_count: 1,
+  });
+  const sections: TieredReportSection[] = ['core', 'data_reports', 'deep_analysis', 'plan'];
+  const soFar = (stage: string) => ({
+    ...runningRow,
+    sections,
+    result: {
+      ticker: 'AAPL', market: 'us', tier: 1, running_stage: stage,
+      stages: ['technicals', 'fundamentals', 'preliminary_analysis', 'trade_plan'],
+      score: null, confidence: null, levels: { entry: null, stop_loss: null, target: null },
+      summary: null, warnings: [], data_reports: [],
+    },
+  });
+
+  it('re-fetches a running run’s report on every poll, then the final report once', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    window.localStorage.setItem('uiLanguage', 'en');
+    // A fresh page object per poll, as a real response is.
+    vi.mocked(tieredApi.listRuns).mockImplementation(async () => page([runningRow]));
+    vi.mocked(tieredApi.getRun).mockResolvedValue(soFar('technicals'));
+    render(
+      <UiLanguageProvider>
+        <AnalysisPage />
+      </UiLanguageProvider>,
+    );
+    try {
+      fireEvent.click(await screen.findByRole('button', { name: /AAPL/ }));
+      // The card being fetched is a skeleton in its place; no progress line.
+      expect(await screen.findByTestId('skeleton-technicals')).toHaveTextContent(/Technicals/);
+      expect(screen.queryByText(/Working on|Still to come/)).not.toBeInTheDocument();
+
+      // The next poll: the next step is in progress.
+      vi.mocked(tieredApi.getRun).mockResolvedValue(soFar('fundamentals'));
+      vi.advanceTimersByTime(5000);
+      await waitFor(() =>
+        expect(screen.getByTestId('skeleton-fundamentals')).toHaveTextContent(/Fundamentals/),
+      );
+      expect(screen.queryByTestId('skeleton-technicals')).not.toBeInTheDocument();
+
+      // The row flips: the final report replaces the snapshot.
+      const doneRow: TieredRunSummary = { ...runningRow, status: 'succeeded' };
+      vi.mocked(tieredApi.listRuns).mockImplementation(async () => page([doneRow]));
+      vi.mocked(tieredApi.getRun).mockResolvedValue({
+        ...doneRow,
+        sections,
+        result: {
+          ticker: 'AAPL', market: 'us', tier: 1, outlook: 'neutral',
+          score: null, confidence: null, levels: { entry: null, stop_loss: null, target: null },
+          summary: null, warnings: [], data_reports: [],
+        },
+      });
+      vi.advanceTimersByTime(5000);
+      await waitFor(() =>
+        expect(screen.queryByTestId('skeleton-fundamentals')).not.toBeInTheDocument(),
+      );
+      expect(await screen.findByTestId('preliminary-analysis')).toBeInTheDocument();
+      const fetches = vi.mocked(tieredApi.getRun).mock.calls.length;
+      // No further fetch for a finished report: the next poll leaves it.
+      vi.advanceTimersByTime(5000);
+      await waitFor(() => expect(tieredApi.listRuns).toHaveBeenCalled());
+      expect(vi.mocked(tieredApi.getRun).mock.calls.length).toBe(fetches);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

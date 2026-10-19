@@ -29,7 +29,7 @@ from src.tiered_analysis import history
 from src.tiered_analysis.llm_support import LlmTranscript, _UNKNOWN_STAGE
 from src.tiered_analysis.providers.registry import detect_market
 from src.tiered_analysis.run_context import llm_model
-from src.tiered_analysis.run_control import RunStopped, StoppedRun
+from src.tiered_analysis.run_control import ProgressSink, RunProgress, RunStopped
 from src.tiered_analysis.run_queue import QueuedRun, RunQueue
 from src.tiered_analysis.run_request import TieredAnalyzeRequest
 from src.tiered_analysis.settings import SizingSettings, merge_overrides
@@ -42,14 +42,15 @@ def _run_analysis(ticker: str, tier: int = 1,
                   max_hold_weeks: int = 2,
                   transcript: Optional[LlmTranscript] = None,
                   language: str = DEFAULT_LANGUAGE,
-                  stop: Optional[threading.Event] = None):
+                  stop: Optional[threading.Event] = None,
+                  progress: Optional[ProgressSink] = None):
     """Indirection so tests can patch the multi-minute production run."""
     from src.tiered_analysis.integration import run_tiered_analysis
 
     return run_tiered_analysis(
         ticker, tier=tier, sizing_settings=sizing,
         max_hold_weeks=max_hold_weeks, transcript=transcript,
-        language=language, stop=stop,
+        language=language, stop=stop, progress=progress,
     )
 
 
@@ -154,39 +155,22 @@ def _serialize_outcome(outcome: Any) -> Dict[str, Any]:
     }
 
 
-def _serialize_stopped(run: QueuedRun, stopped: RunStopped) -> Dict[str, Any]:
-    """The stored report of a stopped run: the same shape as a finished
-    one, holding only the sections that finished, plus ``stopped_stage``
-    — the step that was running when the user pressed stop — and
-    ``stopped_stage_finished``, whether that step still finished (a stop
-    takes effect at the next checkpoint, so a quick card or a one-call
-    analysis may complete and be shown). The analysis's outlook is there when
-    the analysis finished; the action never is, since it depends on the
-    plan review, which did not (a stop there is the latest possible).
-    The plan receipt (levels detail, sizing, plan warnings) is absent for
-    the same reason, even when the formula levels exist."""
-    partial = stopped.partial
-    if partial is None:
-        partial = StoppedRun(
-            stage=stopped.stage, ticker=run.ticker,
-            market=detect_market(run.ticker),
-            tier=int(run.inputs.get("tier") or 1),
-            max_hold_weeks=int(run.inputs.get("max_hold_weeks") or 2),
-        )
+def _serialize_progress(partial: RunProgress) -> Dict[str, Any]:
+    """The report of a run that is not (or not yet) complete: the same
+    shape as a finished one, holding only the sections that finished.
+    The analysis's outlook is there when the analysis finished; the
+    action never is, since it depends on the plan review, which did not
+    (a stop there is the latest possible, and a running run has not
+    reached it). The plan receipt (levels detail, sizing, plan warnings)
+    is absent for the same reason, even when the formula levels exist.
+    ``stages`` names the run's steps in order."""
     analysis = partial.deep or partial.preliminary
     levels = partial.levels
-    # The step the user saw: where stop was pressed; when that is
-    # unknown (pressed between steps), the step the stop landed in. The
-    # landing step is the one discarded, so any earlier step finished.
-    pressed = partial.pressed_stage
-    if not pressed or pressed == _UNKNOWN_STAGE:
-        pressed = stopped.stage
     result: Dict[str, Any] = {
         "ticker": partial.ticker,
         "market": partial.market.value,
         "tier": partial.tier,
-        "stopped_stage": pressed,
-        "stopped_stage_finished": pressed != stopped.stage,
+        "stages": list(partial.stages),
         "score": None,
         "confidence": None,
         "levels": (
@@ -216,6 +200,49 @@ def _serialize_stopped(run: QueuedRun, stopped: RunStopped) -> Dict[str, Any]:
     return result
 
 
+def _serialize_running(partial: RunProgress) -> Dict[str, Any]:
+    """The stored report of a run in progress (2026-10-19): what has
+    finished so far plus ``running_stage``, the step being worked on —
+    the one the report lacks. Replaced at every step, and by the final
+    report when the run ends."""
+    return {**_serialize_progress(partial), "running_stage": partial.stage}
+
+
+def _serialize_stopped(run: QueuedRun, stopped: RunStopped) -> Dict[str, Any]:
+    """The stored report of a stopped run: what finished, plus
+    ``stopped_stage`` — the step that was running when the user pressed
+    stop — and ``stopped_stage_finished``, whether that step still
+    finished (a stop takes effect at the next checkpoint, so a quick
+    card or a one-call analysis may complete and be shown)."""
+    partial = stopped.partial
+    if partial is None:
+        partial = RunProgress(
+            stage=stopped.stage, ticker=run.ticker,
+            market=detect_market(run.ticker),
+            tier=int(run.inputs.get("tier") or 1),
+            max_hold_weeks=int(run.inputs.get("max_hold_weeks") or 2),
+        )
+    # The step the user saw: where stop was pressed; when that is
+    # unknown (pressed between steps), the step the stop landed in. The
+    # landing step is the one discarded, so any earlier step finished.
+    pressed = partial.pressed_stage
+    if not pressed or pressed == _UNKNOWN_STAGE:
+        pressed = stopped.stage
+    return {
+        **_serialize_progress(partial),
+        "stopped_stage": pressed,
+        "stopped_stage_finished": pressed != stopped.stage,
+    }
+
+
+def _record_progress(run_id: str, partial: RunProgress) -> None:
+    """Store a running run's progress on its row so the page's poll
+    shows each finished card as it lands (2026-10-19). Raises on a
+    storage failure; the run logs and ignores that — a missed snapshot
+    costs nothing, the next one or the final report replaces it."""
+    history.save_progress(run_id, _serialize_running(partial))
+
+
 def _execute_run(run: QueuedRun) -> None:
     """The queue's runner: execute one run and record its outcome. Never
     raises — a failure lands on the run row, and a stop (``RunStopped``)
@@ -230,6 +257,7 @@ def _execute_run(run: QueuedRun) -> None:
             transcript=LlmTranscript.for_run(run.run_id),
             language=str(inputs.get("language") or DEFAULT_LANGUAGE),
             stop=run.stop,
+            progress=lambda partial: _record_progress(run.run_id, partial),
         )
         history.mark_succeeded(run.run_id, _serialize_outcome(outcome))
     except RunStopped as stopped:

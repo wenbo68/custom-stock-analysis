@@ -280,8 +280,9 @@ class TestRunListEndpoint:
         # The row speaks the run form's words, in its order (2026-09-24).
         assert list(row) == [
             "run_id", "ticker", "status", "error", "created_at",
-            "updated_at", "queue_position", "capital", "risk_pct",
-            "reward_ratio", "max_hold_weeks", "tier", "outlook", "shares",
+            "updated_at", "queue_position", "stages_done", "stages_total",
+            "capital", "risk_pct", "reward_ratio", "max_hold_weeks", "tier",
+            "outlook", "shares",
         ]
         assert row["ticker"] == "AAPL" and row["status"] == "succeeded"
         assert (row["tier"], row["max_hold_weeks"]) == (2, 3)
@@ -418,23 +419,30 @@ class TestStopEndpoint:
         """A runner that works until released or stopped — like a stage
         that checks the flag between its steps — and, stopped, hands
         back the one card it had finished."""
-        from src.tiered_analysis.run_control import RunStopped, StoppedRun
+        from src.tiered_analysis.run_control import RunStopped, RunProgress
 
         release = threading.Event()
 
-        def runner(code, stop=None, **kwargs):
+        def finished_so_far(code):
+            return RunProgress(
+                stage="positioning", ticker=code, market=Market.US,
+                tier=1, max_hold_weeks=2,
+                data_reports=[DataReport(
+                    name="technicals", kind=SourceKind.NUMERIC,
+                    payload={"close": 1},
+                )],
+                llm_usage={"stages": {}, "total": {
+                    "calls": 0, "input_tokens": 0, "output_tokens": 0}},
+                stages=["technicals", "positioning", "preliminary_analysis", "trade_plan"],
+            )
+
+        def runner(code, stop=None, progress=None, **kwargs):
+            # The card landed: the run says so before working on the next.
+            if progress is not None:
+                progress(finished_so_far(code))
             while not release.wait(timeout=0.02):
                 if stop is not None and stop.is_set():
-                    raise RunStopped("positioning", partial=StoppedRun(
-                        stage="positioning", ticker=code, market=Market.US,
-                        tier=1, max_hold_weeks=2,
-                        data_reports=[DataReport(
-                            name="technicals", kind=SourceKind.NUMERIC,
-                            payload={"close": 1},
-                        )],
-                        llm_usage={"stages": {}, "total": {
-                            "calls": 0, "input_tokens": 0, "output_tokens": 0}},
-                    ))
+                    raise RunStopped("positioning", partial=finished_so_far(code))
             return _outcome(code)
 
         return runner, release
@@ -455,6 +463,24 @@ class TestStopEndpoint:
                 "code": "run_not_running", "run_id": second["run_id"], "status": "queued",
             }
             assert client.post("/tiered/runs/nope/stop").status_code == 404
+
+            # While it runs, the report shows the card that landed and the
+            # step being worked on (2026-10-19).
+            live = client.get(f"/tiered/runs/{first['run_id']}").json()
+            assert live["status"] == "running"
+            assert live["result"]["running_stage"] == "positioning"
+            # The row counts the finished steps against the total.
+            assert (live["stages_done"], live["stages_total"]) == (
+                1, len(live["result"]["stages"]),
+            )
+            listed = client.get("/tiered/runs").json()["items"]
+            by_id = {row["run_id"]: row for row in listed}
+            assert by_id[first["run_id"]]["stages_done"] == 1
+            assert by_id[second["run_id"]]["stages_done"] is None
+            assert live["result"]["stages"][-1] == "trade_plan"
+            assert [d["name"] for d in live["result"]["data_reports"]] == ["technicals"]
+            assert live["result"]["data_report_index"][0]["name"] == "technicals"
+            assert "stopped_stage" not in live["result"]
 
             accepted = client.post(f"/tiered/runs/{first['run_id']}/stop")
             assert accepted.status_code == 200

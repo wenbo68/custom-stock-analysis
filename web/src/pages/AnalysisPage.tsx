@@ -255,13 +255,21 @@ const AnalysisPage = () => {
     [runs, expandedTaskId],
   );
 
-  // Fetch the full report the first time a finished run is expanded (a run
-  // started as Running loads here too, the moment polling flips it to
-  // done). A stopped run has a report too: the sections that finished.
+  // Fetch the report the first time a finished or stopped run is
+  // expanded, and a running run's report on every poll (2026-10-19):
+  // the server stores what has finished so far at every step, so the
+  // cards land one by one. When the row flips to succeeded or stopped,
+  // the final report is fetched once more and replaces the last
+  // snapshot. detailStatusRef remembers the row status each stored
+  // report was fetched under, so a finished report is fetched once.
+  const detailStatusRef = useRef<Record<string, string>>({});
   useEffect(() => {
     const runId = expandedTaskId;
     const status = expandedRun?.status;
-    if (!runId || (status !== 'succeeded' && status !== 'stopped') || details[runId]) {
+    if (!runId || !status || status === 'queued' || status === 'failed') {
+      return;
+    }
+    if (status !== 'running' && detailStatusRef.current[runId] === status) {
       return;
     }
     if (loadingDetailRef.current === runId) {
@@ -273,18 +281,39 @@ const AnalysisPage = () => {
         const run = await tieredApi.getRun(runId);
         const result = run.result;
         if (result) {
+          detailStatusRef.current[runId] = status;
           setDetails((prev) => ({ ...prev, [runId]: result }));
           setDetailError(null);
-        } else {
+        } else if (status !== 'running') {
           setDetailError(run.error || t('tiered.error.title'));
         }
+        // A running run without a snapshot yet: the row shows the
+        // first card's skeleton.
       } catch (error) {
-        setDetailError(error instanceof Error ? error.message : String(error));
+        // A poll that fails is retried by the next one; a finished
+        // run's missing report is an error the row shows.
+        if (status !== 'running') {
+          setDetailError(error instanceof Error ? error.message : String(error));
+        }
       } finally {
         loadingDetailRef.current = null;
       }
     })();
-  }, [expandedTaskId, expandedRun?.status, details, t]);
+  }, [expandedTaskId, expandedRun?.status, runs, t]);
+
+  // A finished row shows its final report only: the last running
+  // snapshot, still in hand while the final report is fetched, would
+  // show a skeleton, so the row says loading until it arrives.
+  const expandedResult = useMemo(() => {
+    if (!expandedTaskId) {
+      return null;
+    }
+    const result = details[expandedTaskId] ?? null;
+    if (result && expandedRun?.status !== 'running' && result.running_stage != null) {
+      return null;
+    }
+    return result;
+  }, [details, expandedTaskId, expandedRun?.status]);
 
   const handleToggle = useCallback((runId: string) => {
     setDetailError(null);
@@ -331,6 +360,7 @@ const AnalysisPage = () => {
       try {
         await tieredApi.deleteRun(runId);
         setExpandedTaskId((prev) => (prev === runId ? null : prev));
+        delete detailStatusRef.current[runId];
         setDetails((prev) =>
           Object.fromEntries(Object.entries(prev).filter(([id]) => id !== runId)),
         );
@@ -486,7 +516,7 @@ const AnalysisPage = () => {
             pageCount={runPage.page_count}
             onPage={setPage}
             expandedTaskId={expandedTaskId}
-            expandedResult={expandedTaskId ? (details[expandedTaskId] ?? null) : null}
+            expandedResult={expandedResult}
             expandedError={detailError}
             onToggle={handleToggle}
             onDelete={(runId) => void handleDelete(runId)}

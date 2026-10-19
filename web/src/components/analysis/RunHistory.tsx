@@ -7,7 +7,7 @@ import { cn } from '../../utils/cn';
 import { formatDateTime, isFromPreviousDay, parseUtc, plainNumber, queuePosition, rowKeyDown } from './format';
 import { ALT_COLOR, OUTLOOK_TEXT } from './styles';
 import { PageSelector, PairField, Pill, PillRow, Select } from './Fields';
-import { Report } from './Report';
+import { Report, ReportSkeleton } from './Report';
 import { Modal, MODAL_BODY } from './Ui';
 import { hasAnyFilter, isValidDay, toggled, type HistoryFilters } from './historyFilters';
 
@@ -433,17 +433,24 @@ export const RunHistory = ({
           <ul className="flex flex-col divide-y divide-border/40">
           {runs.map((run) => {
             const isExpanded = run.run_id === expandedTaskId;
+            const isStopping = stoppingTaskIds.includes(run.run_id);
+            // A queued run has nothing to show yet, so its row opens
+            // nothing (owner request 2026-10-19). The page may still
+            // mark it — a duplicate start points at it — and the row
+            // fills in by itself once the run starts.
+            const canExpand = run.status !== 'queued';
             return (
               <li key={run.run_id}>
                 <div
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={isExpanded}
-                  onClick={() => onToggle(run.run_id)}
-                  onKeyDown={rowKeyDown(() => onToggle(run.run_id))}
+                  role={canExpand ? 'button' : undefined}
+                  tabIndex={canExpand ? 0 : undefined}
+                  aria-expanded={canExpand ? isExpanded : undefined}
+                  onClick={canExpand ? () => onToggle(run.run_id) : undefined}
+                  onKeyDown={canExpand ? rowKeyDown(() => onToggle(run.run_id)) : undefined}
                   className={cn(
                     ROW_GRID,
-                    'cursor-pointer items-center rounded py-2.5 text-start text-sm hover:bg-surface-2/60',
+                    'items-center rounded py-2.5 text-start text-sm',
+                    canExpand ? 'cursor-pointer hover:bg-surface-2/60' : '',
                     isExpanded ? 'bg-surface-2/40' : '',
                   )}
                 >
@@ -483,7 +490,19 @@ export const RunHistory = ({
                           })}
                     </span>
                   ) : run.status === 'running' ? (
-                    <span className="text-xs text-info">{t('tiered.status.running')}</span>
+                    // The finished-card count over the total once the
+                    // server has a snapshot; "Stopping" from the stop
+                    // press until the server says stopped (2026-10-19).
+                    <span className={cn('text-xs', isStopping ? 'text-caution' : 'text-info')}>
+                      {isStopping
+                        ? t('tiered.status.stopping')
+                        : run.stages_done != null && run.stages_total != null
+                          ? t('tiered.status.runningAt', {
+                              done: run.stages_done,
+                              total: run.stages_total,
+                            })
+                          : t('tiered.status.running')}
+                    </span>
                   ) : run.status === 'failed' ? (
                     <span className="text-xs text-negative">{t('tiered.status.failed')}</span>
                   ) : run.status === 'stopped' ? (
@@ -558,17 +577,9 @@ export const RunHistory = ({
                     <button
                       type="button"
                       data-testid="run-stop"
-                      aria-label={
-                        stoppingTaskIds.includes(run.run_id)
-                          ? t('tiered.history.stopping')
-                          : t('tiered.history.stop')
-                      }
-                      title={
-                        stoppingTaskIds.includes(run.run_id)
-                          ? t('tiered.history.stopping')
-                          : t('tiered.history.stop')
-                      }
-                      disabled={stoppingTaskIds.includes(run.run_id)}
+                      aria-label={isStopping ? t('tiered.history.stopping') : t('tiered.history.stop')}
+                      title={isStopping ? t('tiered.history.stopping') : t('tiered.history.stop')}
+                      disabled={isStopping}
                       onClick={(event) => {
                         event.stopPropagation();
                         setConfirmStopTaskId(run.run_id);
@@ -661,20 +672,22 @@ export const RunHistory = ({
                     {t('tiered.staleWarning')}
                   </p>
                 </Modal>
-                {isExpanded ? (
+                {isExpanded && canExpand ? (
                   <div className="pb-5 pt-3">
                     {run.status === 'failed' ? (
                       <p className="text-sm text-negative">
                         {run.error ?? expandedError ?? t('tiered.error.title')}
                       </p>
-                    ) : run.status === 'queued' ? (
-                      <p className="text-sm text-ink-4">{t('tiered.queued')}</p>
                     ) : run.status === 'running' ? (
-                      <p className="text-sm text-ink-4">
-                        {stoppingTaskIds.includes(run.run_id)
-                          ? t('tiered.stopping')
-                          : t('tiered.running')}
-                      </p>
+                      // The report so far (2026-10-19): the page re-fetches
+                      // it at every poll, so the cards land one by one,
+                      // the card in progress a skeleton. Before the first
+                      // snapshot, the first card's skeleton.
+                      expandedResult ? (
+                        <Report result={expandedResult} runId={run.run_id} />
+                      ) : (
+                        <ReportSkeleton />
+                      )
                     ) : expandedResult ? (
                       <Report result={expandedResult} runId={run.run_id} />
                     ) : expandedError ? (

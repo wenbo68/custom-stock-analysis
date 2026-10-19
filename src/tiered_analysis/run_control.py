@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Stopping a run part-way (2026-10-19).
+"""Stopping a run part-way (2026-10-19), and watching it progress.
 
 A run is minutes of data fetches and model calls, and a user who
 started one by mistake should not have to pay for the rest of it. The
@@ -15,7 +15,14 @@ Between checkpoints nothing is interrupted: the call in flight finishes
 and is recorded, so the token totals match the bill (the chat's rule,
 2026-10-12). The stage the stop lands in is discarded whole — a section
 is either complete or absent, never half-built — and the run ends as
-``stopped`` with what finished before it (``StoppedRun``).
+``stopped`` with what finished before it (``RunProgress``).
+
+The same record is what a running run shows as it goes (2026-10-19):
+at the start of every step the run hands a ``RunProgress`` to its
+``progress`` callback, and the run service stores it on the run's row,
+so the page's poll sees each card the moment it is complete rather
+than the whole report at the end. A section is still either complete
+or absent: a snapshot never holds a half-built card.
 
 ``RunStopped`` is a ``BaseException`` on purpose. The stages degrade
 ordinary failures into warnings with ``except Exception`` (a failed
@@ -58,12 +65,16 @@ class StopFlag:
 
 
 @dataclass(frozen=True)
-class StoppedRun:
-    """What a stopped run had finished when it stopped. ``stage`` names
-    the step the stop landed in — the one whose work is absent;
-    ``pressed_stage`` the step that was running when the user pressed
-    stop (None when unknown), which may be an earlier step that then
-    finished, since a stop only takes effect at the next checkpoint."""
+class RunProgress:
+    """What a run has finished so far. ``stage`` names the step now in
+    progress — the one whose work is absent: on a running run the step
+    being worked on, on a stopped run the step the stop landed in.
+    ``stages`` is the run's steps in order (each data report, the
+    analysis, the trade plan), so a reader can tell what is still to
+    come. ``pressed_stage`` (stopped runs) is the step that was running
+    when the user pressed stop (None when unknown), which may be an
+    earlier step that then finished, since a stop only takes effect at
+    the next checkpoint."""
 
     stage: str
     ticker: str
@@ -84,6 +95,12 @@ class StoppedRun:
     #: The run's LLM usage up to the stop — what it cost.
     llm_usage: Optional[Dict[str, Any]] = None
     pressed_stage: Optional[str] = None
+    #: The run's steps in order; empty on a record built without them.
+    stages: List[str] = field(default_factory=list)
+
+
+#: What a run calls with its progress at the start of every step.
+ProgressSink = Callable[[RunProgress], None]
 
 
 class RunStopped(BaseException):
@@ -91,7 +108,7 @@ class RunStopped(BaseException):
     is the step the stop landed in; ``partial`` is attached by the
     orchestrator on its way out (None when raised below it)."""
 
-    def __init__(self, stage: str, partial: Optional[StoppedRun] = None) -> None:
+    def __init__(self, stage: str, partial: Optional[RunProgress] = None) -> None:
         super().__init__(f"run stopped during {stage}")
         self.stage = stage
         self.partial = partial

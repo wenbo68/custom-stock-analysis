@@ -14,6 +14,7 @@ import unittest
 
 from src.tiered_analysis.integration import (
     _collect_data_reports,
+    run_stages,
     run_tiered_analysis,
 )
 from src.tiered_analysis.llm_support import (
@@ -29,7 +30,7 @@ from src.tiered_analysis.providers.base import (
     Market,
     SourceKind,
 )
-from src.tiered_analysis.run_control import RunStopped, StopFlag, StoppedRun
+from src.tiered_analysis.run_control import RunStopped, StopFlag, RunProgress
 from src.tiered_analysis.schema import Outlook
 from src.tiered_analysis.tiers import Tier2Stage
 
@@ -193,7 +194,7 @@ class TestRunTieredAnalysisStopped(unittest.TestCase):
         stopped = caught.exception
         self.assertEqual(stopped.stage, "positioning")
         partial = stopped.partial
-        self.assertIsInstance(partial, StoppedRun)
+        self.assertIsInstance(partial, RunProgress)
         self.assertEqual(partial.ticker, "AAPL")
         self.assertEqual(partial.market, Market.US)
         self.assertEqual(partial.tier, 1)
@@ -303,3 +304,80 @@ class TestRunTieredAnalysisStopped(unittest.TestCase):
     def test_no_stop_flag_runs_as_before(self):
         outcome = self._run([_Provider("technicals")], stop=None)
         self.assertIs(outcome.outlook, Outlook.BULLISH)
+
+
+class TestRunProgress(unittest.TestCase):
+    """A running run reports what it has finished at the start of every
+    step (2026-10-19), so a watcher sees each card as it lands."""
+
+    def _run(self, providers, progress, tier=1, stop=None):
+        return run_tiered_analysis(
+            "AAPL", market=Market.US, providers=providers,
+            preliminary_analysis=_FakeQuickJudge(), tier=tier,
+            tier2_stage=Tier2Stage(engine=_FakeDebateEngine(outlook=None)),
+            earnings_lookup=_no_earnings, progress=progress, stop=stop,
+        )
+
+    def test_reports_at_the_start_of_every_step_with_what_finished(self):
+        seen = []
+        providers = [_Provider("technicals"), _Provider("fundamentals"), _Provider("positioning")]
+        outcome = self._run(providers, seen.append)
+
+        # One snapshot per data report, then one for the analysis; the
+        # plan runs on a bullish outlook only, and the fake judge is not.
+        self.assertEqual(
+            [p.stage for p in seen],
+            ["technicals", "fundamentals", "positioning", "preliminary_analysis"],
+        )
+        self.assertEqual(
+            [[d.name for d in p.data_reports] for p in seen],
+            [[], ["technicals"], ["technicals", "fundamentals"],
+             ["technicals", "fundamentals", "positioning"]],
+        )
+        for snapshot in seen:
+            self.assertIsInstance(snapshot, RunProgress)
+            self.assertEqual(snapshot.ticker, "AAPL")
+            self.assertEqual(snapshot.tier, 1)
+            self.assertEqual(
+                snapshot.stages,
+                ["technicals", "fundamentals", "positioning", "preliminary_analysis", "trade_plan"],
+            )
+            self.assertIsNone(snapshot.pressed_stage)
+        # Before the analysis: the levels are there, the analysis is not.
+        self.assertIsNone(seen[2].levels)
+        self.assertIsNotNone(seen[3].levels)
+        self.assertIsNone(seen[3].preliminary)
+        self.assertIsNone(seen[3].deep)
+        # The run itself is unchanged by being watched.
+        self.assertEqual([d.name for d in outcome.report.data_reports],
+                         ["technicals", "fundamentals", "positioning"])
+
+    def test_a_watcher_that_fails_does_not_touch_the_run(self):
+        calls = []
+
+        def broken(snapshot):
+            calls.append(snapshot.stage)
+            raise RuntimeError("storage down")
+
+        outcome = self._run([_Provider("technicals")], broken)
+        self.assertEqual(calls, ["technicals", "preliminary_analysis"])
+        self.assertEqual(outcome.tier, 1)
+
+    def test_no_watcher_means_no_reports(self):
+        outcome = self._run([_Provider("technicals")], None)
+        self.assertEqual(outcome.tier, 1)
+
+    def test_a_stop_keeps_the_step_list_too(self):
+        stop = threading.Event()
+        providers = [_Provider("technicals", on_collect=stop.set), _Provider("fundamentals")]
+        with self.assertRaises(RunStopped) as caught:
+            self._run(providers, None, stop=stop)
+        self.assertEqual(caught.exception.partial.stages,
+                         ["technicals", "fundamentals", "preliminary_analysis", "trade_plan"])
+
+    def test_the_step_list_names_the_tiers_analysis(self):
+        providers = [_Provider("technicals"), _Provider("company_news")]
+        self.assertEqual(run_stages(providers, 1),
+                         ["technicals", "company_news", "preliminary_analysis", "trade_plan"])
+        self.assertEqual(run_stages(providers, 2),
+                         ["technicals", "company_news", "deep_analysis", "trade_plan"])

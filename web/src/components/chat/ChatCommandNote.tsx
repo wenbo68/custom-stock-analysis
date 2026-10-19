@@ -40,7 +40,7 @@ const HelpLines = () => {
           <div key={command.name} className="contents">
             <dt className={cn('font-mono', FACT_VALUE)}>
               /{command.name}
-              {command.argumentKey ? <span className={cn('font-normal', FACT_LABEL)}> &lt;{t(command.argumentKey)}&gt;</span> : null}
+              {command.argumentKey ? <span className="font-normal text-caution"> &lt;{t(command.argumentKey)}&gt;</span> : null}
             </dt>
             <dd className={FACT_LABEL}>{t(command.descriptionKey)}</dd>
           </div>

@@ -150,7 +150,19 @@ def mark_succeeded(run_id: str, result: Dict[str, Any]) -> None:
 
 
 def mark_failed(run_id: str, error: str) -> None:
-    _update_run(run_id, status=STATUS_FAILED, error=str(error))
+    """The run failed: no report, whatever progress it had stored —
+    the user asked for an analysis and gets none, so the row says so."""
+    _update_run(run_id, status=STATUS_FAILED, error=str(error), result_json=None)
+
+
+def save_progress(run_id: str, result: Dict[str, Any]) -> None:
+    """A running run's report so far (2026-10-19): the sections that
+    finished plus ``running_stage``, the step being worked on. Stored
+    on the row while the status stays ``running``, replaced at every
+    step and by the final report when the run ends, so ``get_run`` shows
+    each card as it lands. The list columns are untouched: a running
+    run has no outlook or shares yet."""
+    _update_run(run_id, result_json=json.dumps(result))
 
 
 def mark_stopped(run_id: str, result: Dict[str, Any]) -> None:
@@ -210,7 +222,7 @@ def fail_stale_running_runs(error: str = STALE_RUN_ERROR) -> int:
         changed = (
             session.query(TieredRunRecord)
             .filter_by(status=STATUS_RUNNING)
-            .update({"status": STATUS_FAILED, "error": error},
+            .update({"status": STATUS_FAILED, "error": error, "result_json": None},
                     synchronize_session=False)
         )
         session.commit()
@@ -465,6 +477,7 @@ def _row_summary(row: Any) -> Dict[str, Any]:
         "error": row.error,
         "created_at": utc_iso(row.created_at),
         "updated_at": utc_iso(row.updated_at),
+        **_stage_counts(row),
         "capital": row.capital,
         "risk_pct": row.risk_pct,
         "reward_ratio": row.reward_ratio,
@@ -473,6 +486,22 @@ def _row_summary(row: Any) -> Dict[str, Any]:
         "outlook": row.outlook,
         "shares": row.shares,
     }
+
+
+def _stage_counts(row: Any) -> Dict[str, Optional[int]]:
+    """A running row's progress as two counts (2026-10-19): the steps
+    finished so far (the one being worked on is not counted) and the
+    run's step total, read from the stored progress. Both None on any
+    other row, and on a running row before its first snapshot."""
+    none: Dict[str, Optional[int]] = {"stages_done": None, "stages_total": None}
+    if row.status != STATUS_RUNNING:
+        return none
+    result = _parse_result(row.result_json)
+    stages = result.get("stages") if result else None
+    stage = result.get("running_stage") if result else None
+    if not isinstance(stages, list) or stage not in stages:
+        return none
+    return {"stages_done": stages.index(stage), "stages_total": len(stages)}
 
 
 # ---------------------------------------------------------------------------
@@ -487,9 +516,10 @@ def get_run(
 ) -> Optional[Dict[str, Any]]:
     """One run: its summary row plus ``result``, the stored report cut
     down to ``sections`` (see report_sections.py; None while the run is
-    unfinished or failed; on a stopped run, the sections that finished),
-    and ``sections`` naming what ``result`` holds. None for an unknown
-    run id."""
+    queued or has no progress yet, and after a failure; on a running
+    run the sections finished so far plus ``running_stage``; on a
+    stopped run the sections that finished), and ``sections`` naming
+    what ``result`` holds. None for an unknown run id."""
     from src.storage import TieredRunRecord
 
     with _session() as session:

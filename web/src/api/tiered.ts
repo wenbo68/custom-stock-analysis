@@ -409,6 +409,12 @@ export type TieredResult = {
   // never is.
   stopped_stage?: string | null;
   stopped_stage_finished?: boolean;
+  // Running runs only (2026-10-19): the step being worked on — the one
+  // the report lacks — and the run's steps in order, so the page can
+  // say what is still to come. The report holds the sections finished
+  // so far and changes at every step; the final report replaces it.
+  running_stage?: string | null;
+  stages?: string[];
 };
 
 // queued (2026-09-15): waiting for a free slot in the server's global run
@@ -428,6 +434,11 @@ export type TieredRunSummary = {
   updated_at: string | null;
   // Queued rows only: the run's place in the line, from 1.
   queue_position?: number | null;
+  // Running rows only (2026-10-19): the steps finished so far (the one
+  // being worked on is not counted) over the run's step total — the
+  // row's "Running (2/8)". Null before the first progress snapshot.
+  stages_done?: number | null;
+  stages_total?: number | null;
   // The run's inputs, known from the moment it is created; null on runs
   // stored before a field existed. Capital is in the ticker's own
   // currency; risk is the percent the user typed (1 = 1%).

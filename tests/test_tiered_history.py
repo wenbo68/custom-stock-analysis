@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from src.tiered_analysis import history
 from src.tiered_analysis.history import (
     RunFilters,
     RunInProgressError,
@@ -391,6 +392,41 @@ class TestSections:
         create_run("task-1", "AAPL")
         run = get_run("task-1", sections=("core", "plan"))
         assert run["result"] is None and run["sections"] == ["core", "plan"]
+
+    def test_progress_shows_on_a_running_run_and_a_failure_clears_it(self, isolated_db):
+        create_run("task-1", "AAPL")
+        history.save_progress("task-1", {
+            "running_stage": "fundamentals", "stages": ["technicals", "fundamentals"],
+            "data_reports": [{"name": "technicals", "kind": "numeric", "counted": True, "warnings": []}],
+        })
+        run = get_run("task-1")
+        assert run["status"] == "running"
+        assert run["result"]["running_stage"] == "fundamentals"
+        assert [d["name"] for d in run["result"]["data_reports"]] == ["technicals"]
+        assert run["outlook"] is None
+        # The row's counts: one step finished out of two.
+        assert (run["stages_done"], run["stages_total"]) == (1, 2)
+        history.mark_failed("task-1", "boom")
+        failed = get_run("task-1")
+        assert failed["result"] is None
+        assert (failed["stages_done"], failed["stages_total"]) == (None, None)
+
+    def test_a_running_run_without_a_snapshot_has_no_step_counts(self, isolated_db):
+        create_run("task-1", "AAPL")
+        run = get_run("task-1")
+        assert run["status"] == "running"
+        assert (run["stages_done"], run["stages_total"]) == (None, None)
+        # A snapshot naming a step outside the list counts nothing either.
+        history.save_progress("task-1", {"running_stage": "odd", "stages": ["technicals"]})
+        run = get_run("task-1")
+        assert (run["stages_done"], run["stages_total"]) == (None, None)
+
+    def test_startup_cleanup_drops_a_dead_runs_progress(self, isolated_db):
+        create_run("task-1", "AAPL")
+        history.save_progress("task-1", {"running_stage": "technicals", "data_reports": []})
+        assert history.fail_stale_running_runs() == 1
+        run = get_run("task-1")
+        assert run["status"] == "failed" and run["result"] is None
 
 
 class TestDebateItems:

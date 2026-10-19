@@ -325,6 +325,110 @@ describe('Report', () => {
     expect(screen.queryByText(/初步分析|Preliminary analysis/)).not.toBeInTheDocument();
   });
 
+  it('a running run shows the cards that landed and a skeleton where the next one goes', () => {
+    const result: TieredResult = {
+      ...makeResult(),
+      tier: 1,
+      running_stage: 'positioning',
+      stages: ['technicals', 'fundamentals', 'positioning', 'macro_economy', 'preliminary_analysis', 'trade_plan'],
+      data_reports: ['technicals', 'fundamentals'].map(makeDimension),
+      outlook: undefined,
+      action: undefined,
+      deep_analysis: null,
+      preliminary_analysis: null,
+      levels: { entry: null, stop_loss: null, target: null },
+      levels_detail: null,
+      sizing: null,
+      llm_usage: null,
+    };
+    renderResult(result);
+    // The skeleton sits in the data-reports grid, after the finished
+    // cards, named for the report on its way; no progress line.
+    const skeleton = screen.getByTestId('skeleton-positioning');
+    expect(skeleton).toHaveTextContent(/Positioning|仓位/);
+    expect(skeleton).toHaveAttribute('aria-busy', 'true');
+    // A numeric report: metric rows in two columns, like the real card.
+    expect(screen.getByTestId('skeleton-positioning-columns')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('data-report-fundamentals').compareDocumentPosition(skeleton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByText(/Working on|Still to come|正在进行|尚未开始/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('data-report-technicals')).toBeInTheDocument();
+    expect(screen.getByTestId('data-report-fundamentals')).toBeInTheDocument();
+    expect(screen.queryByTestId('data-report-positioning')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('preliminary-analysis')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('deep_analysis')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('stopped-banner')).not.toBeInTheDocument();
+  });
+
+  it('a run fetching a news report shows a one-column skeleton', () => {
+    const result: TieredResult = {
+      ...makeResult(),
+      tier: 1,
+      running_stage: 'company_news',
+      stages: ['technicals', 'company_news', 'preliminary_analysis', 'trade_plan'],
+      data_reports: ['technicals'].map(makeDimension),
+      outlook: undefined,
+      action: undefined,
+      deep_analysis: null,
+      preliminary_analysis: null,
+      levels_detail: null,
+      sizing: null,
+      llm_usage: null,
+    };
+    renderResult(result);
+    expect(screen.getByTestId('skeleton-company_news')).toHaveTextContent(/Company news|公司新闻/);
+    expect(screen.queryByTestId('skeleton-company_news-columns')).not.toBeInTheDocument();
+  });
+
+  it('a run working on its analysis shows the analysis block as a skeleton', () => {
+    const result: TieredResult = {
+      ...makeResult(),
+      tier: 1,
+      running_stage: 'preliminary_analysis',
+      stages: ['technicals', 'preliminary_analysis', 'trade_plan'],
+      data_reports: ['technicals'].map(makeDimension),
+      outlook: undefined,
+      action: undefined,
+      deep_analysis: null,
+      preliminary_analysis: null,
+      levels_detail: null,
+      sizing: null,
+      llm_usage: null,
+    };
+    renderResult(result);
+    expect(screen.getByText(/^Preliminary analysis$|^初步分析$/)).toBeInTheDocument();
+    expect(screen.getByTestId('skeleton-preliminary_analysis')).toBeInTheDocument();
+    expect(screen.queryByTestId('preliminary-analysis')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Trade plan$|^交易计划$/)).not.toBeInTheDocument();
+  });
+
+  it('a run working on its trade plan shows the finished analysis and a plan skeleton under it', () => {
+    const result: TieredResult = {
+      ...makeResult(),
+      tier: 2,
+      running_stage: 'trade_plan',
+      stages: ['technicals', 'deep_analysis', 'trade_plan'],
+      data_reports: ['technicals'].map(makeDimension),
+      outlook: 'bullish',
+      action: undefined,
+      levels_detail: null,
+      sizing: null,
+      llm_usage: null,
+    };
+    renderResult(result);
+    const analysis = screen.getByTestId('deep_analysis');
+    const skeleton = screen.getByTestId('skeleton-trade_plan');
+    expect(analysis.compareDocumentPosition(skeleton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText(/^Trade plan$|^交易计划$/)).toBeInTheDocument();
+    expect(screen.queryByTestId('plan')).not.toBeInTheDocument();
+    // The action waits for the plan review.
+    expect(screen.queryByText(/Buy now|Buy later|No trade|现在买入|稍后买入|不交易/)).not.toBeInTheDocument();
+  });
+
   it('a run stopped before any card finished says so and shows no data-reports block', () => {
     const result: TieredResult = {
       ...makeResult(),

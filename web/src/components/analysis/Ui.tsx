@@ -12,12 +12,18 @@ interface CardProps {
   children: ReactNode;
   className?: string;
   testId?: string;
+  /** A skeleton card: tells assistive tech the content is on its way. */
+  busy?: boolean;
 }
 
 // The only surface on the alt page: flat gray-800, small radius, no border,
 // no shadow — separation comes from the gray-900 canvas and whitespace.
-export const Card = ({ children, className, testId }: CardProps) => (
-  <section data-testid={testId} className={cn('rounded bg-surface-2 p-5', className)}>
+export const Card = ({ children, className, testId, busy }: CardProps) => (
+  <section
+    data-testid={testId}
+    aria-busy={busy || undefined}
+    className={cn('rounded bg-surface-2 p-5', className)}
+  >
     {children}
   </section>
 );

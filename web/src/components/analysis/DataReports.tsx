@@ -15,6 +15,7 @@ import { EVENTS_REPORTS, eventsWindowLabel } from './eventsData';
 import { FieldWarnings, MetricValue } from './MetricFormula';
 import { ALT_LINK } from './styles';
 import { Card, SummaryText, WarningsButton } from './Ui';
+import { SkeletonCard } from './Skeleton';
 
 const DATA_REPORT_LABEL_KEYS: Record<string, UiTextKey> = {
   technicals: 'tiered.dataReport.technicals',
@@ -23,6 +24,12 @@ const DATA_REPORT_LABEL_KEYS: Record<string, UiTextKey> = {
   positioning: 'tiered.dataReport.positioning',
   company_news: 'tiered.dataReport.company_news',
   world_news: 'tiered.dataReport.world_news',
+};
+
+// The report's label as the page words it; an unknown name humanized.
+const dataReportLabel = (name: string, t: (key: UiTextKey) => string): string => {
+  const labelKey = DATA_REPORT_LABEL_KEYS[name];
+  return labelKey ? t(labelKey) : name.replace(/_/g, ' ');
 };
 
 // Named sections for payloads the backend sends (partly) flat, so every
@@ -261,7 +268,6 @@ interface DataReportCardProps {
 
 const DataReportCard = ({ dataReport }: DataReportCardProps) => {
   const { t } = useUiLanguage();
-  const labelKey = DATA_REPORT_LABEL_KEYS[dataReport.name];
   const fieldNotes = dataReport.field_warnings ?? null;
   // Notes that sit beside their own field (field_warnings) no longer show
   // at the card level (owner request 2026-08-05). What remains — notes
@@ -298,7 +304,7 @@ const DataReportCard = ({ dataReport }: DataReportCardProps) => {
           {/* Unknown dataReports fall back to their raw name, humanized —
               payload identifiers never reach the UI with underscores. */}
           <span>
-            {labelKey ? t(labelKey) : dataReport.name.replace(/_/g, ' ')}
+            {dataReportLabel(dataReport.name, t)}
           </span>
           {window != null ? (
             <span className="ml-2 text-xs font-normal text-ink-4">
@@ -382,12 +388,26 @@ const DataReportCard = ({ dataReport }: DataReportCardProps) => {
 
 interface DataReportsProps {
   dataReports: TieredDataReport[];
+  /** A running run: the report being fetched right now, shown as a skeleton after the finished ones. */
+  pending?: string | null;
 }
 
-export const DataReports = ({ dataReports }: DataReportsProps) => (
-  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-    {dataReports.map((dataReport) => (
-      <DataReportCard key={dataReport.name} dataReport={dataReport} />
-    ))}
-  </div>
-);
+export const DataReports = ({ dataReports, pending = null }: DataReportsProps) => {
+  const { t } = useUiLanguage();
+  return (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {dataReports.map((dataReport) => (
+        <DataReportCard key={dataReport.name} dataReport={dataReport} />
+      ))}
+      {pending ? (
+        // The news cards are bullet lists; every other report is metric
+        // rows in two columns, so its skeleton is too.
+        <SkeletonCard
+          title={dataReportLabel(pending, t)}
+          testId={`skeleton-${pending}`}
+          columns={EVENTS_REPORTS.includes(pending) ? 1 : 2}
+        />
+      ) : null}
+    </div>
+  );
+};
