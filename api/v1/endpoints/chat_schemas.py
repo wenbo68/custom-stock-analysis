@@ -28,7 +28,10 @@ class ConversationSummary(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     message_count: int
-    user_input_count: int = Field(description="How many messages the user sent (the page's \"user inputs\").")
+    user_input_count: int = Field(description=(
+        "How many turns were set off (the page's \"convo turns\"): the user's own messages "
+        "and the run notices the app wrote (2026-10-20)."
+    ))
     total_tokens: int = Field(description="Tokens every LLM call in the conversation used, together.")
     ended_at: Optional[str] = Field(default=None, description="When the user last sent a message (the page's \"end date\"); null before the first.")
 
@@ -57,15 +60,34 @@ class CompactedFacts(BaseModel):
     tokens_before: Optional[int] = Field(default=None, description="The estimated tokens the request held before the summary.")
 
 
+class RunNoticeLevels(BaseModel):
+    """A report's headline levels; each None until the plan computed it."""
+
+    entry: Optional[float] = None
+    stop_loss: Optional[float] = None
+    target: Optional[float] = None
+
+
 class RunNoticeFacts(BaseModel):
-    """How a watched run ended (2026-10-20), as the page words it."""
+    """How a watched run ended (2026-10-20). The page words its line
+    from the run, when it ended, the outlook and score; the rest is
+    the headline the model's own line carries (src/chat/run_notice.py),
+    kept here so the row reads whole."""
 
     run_id: str
     ticker: str
     tier: Optional[int] = None
     status: Literal["succeeded", "failed", "stopped"]
+    ended_at: Optional[str] = Field(default=None, description="When the run ended (ISO 8601, UTC).")
     outlook: Optional[str] = Field(default=None, description="Succeeded runs: the report's outlook.")
     score: Optional[float] = Field(default=None, description="Succeeded runs: the report's score.")
+    confidence: Optional[float] = None
+    action: Optional[str] = None
+    levels: Optional[RunNoticeLevels] = None
+    shares: Optional[float] = None
+    earnings_date: Optional[str] = None
+    summary: Optional[str] = None
+    warning_count: int = 0
     error: Optional[str] = Field(default=None, description="Failed runs: what went wrong.")
     stopped_stage: Optional[str] = Field(default=None, description="Stopped runs: the step the stop landed in.")
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, List
@@ -16,7 +17,7 @@ import pytest
 
 from src.chat import store
 from src.chat import tools as tools_module
-from src.chat.harness import ChatHarness, model_view, starts_turn, trim_history
+from src.chat.harness import STOPPED_LATE_MESSAGE, ChatHarness, model_view, starts_turn, trim_history
 from src.chat.model import ModelReply
 from src.chat.run_notice import NOTICE_PREFIX, NOTICE_ROLE, notice_line, run_facts
 from src.tiered_analysis import history, run_service
@@ -64,7 +65,7 @@ class ScriptedModel:
     def complete(self, messages, tools, tool_choice="auto"):
         self.asked.set()
         self.release.wait(timeout=5)
-        self.requests.append({"messages": messages, "tools": tools})
+        self.requests.append({"messages": messages, "tools": tools, "tool_choice": tool_choice})
         if not self.replies:
             raise AssertionError("model asked more often than scripted")
         return self.replies.pop(0)
@@ -98,6 +99,7 @@ def finished_run(run_id="r1", ticker="AAPL", status=history.STATUS_SUCCEEDED, **
     history.create_run(run_id, ticker, inputs={"tier": 1}, status=history.STATUS_QUEUED)
     if status == history.STATUS_SUCCEEDED:
         history.mark_succeeded(run_id, {"outlook": "bullish", "score": 7.2, **report})
+        history._update_run(run_id, outlook="bullish")
     elif status == history.STATUS_FAILED:
         history.mark_failed(run_id, report.get("error", "boom"))
     else:
@@ -106,22 +108,53 @@ def finished_run(run_id="r1", ticker="AAPL", status=history.STATUS_SUCCEEDED, **
 
 
 class TestNoticeText:
-    def test_a_succeeded_run_names_its_outlook_and_score(self, isolated_db):
-        finished_run()
+    def test_a_succeeded_run_carries_the_headline_the_bot_reports(self, isolated_db):
+        finished_run(
+            confidence=0.8, action="buy", levels={"entry": 190.5, "stop_loss": 184.0, "target": 203.5},
+            earnings={"next_date": "2026-11-03"}, summary="Momentum backs the trend.",
+            warnings=["one", "two"],
+        )
+        history._update_run("r1", shares=52.0)
         facts = run_facts("r1")
-        assert facts == {
+        assert facts["ended_at"] == history.get_run_summary("r1")["updated_at"]
+        assert {k: v for k, v in facts.items() if k != "ended_at"} == {
             "run_id": "r1", "ticker": "AAPL", "tier": 1, "status": "succeeded",
-            "outlook": "bullish", "score": 7.2, "error": None, "stopped_stage": None,
+            "outlook": "bullish", "score": 7.2, "confidence": 0.8, "action": "buy",
+            "levels": {"entry": 190.5, "stop_loss": 184.0, "target": 203.5}, "shares": 52.0,
+            "earnings_date": "2026-11-03", "summary": "Momentum backs the trend.", "warning_count": 2,
+            "error": None, "stopped_stage": None,
         }
         line = notice_line(facts)
         assert line.startswith(NOTICE_PREFIX)
         assert "AAPL, tier 1, run_id r1" in line
-        assert "succeeded: outlook bullish, score 7.2" in line
+        assert re.search(r"finished \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC", line)
+        assert "It succeeded: outlook bullish, score 7.2, action buy, confidence 0.8" in line
+        assert "entry 190.5, stop loss 184.0, target 203.5" in line and "shares 52.0" in line
+        assert "next earnings 2026-11-03" in line and "2 warnings" in line
+        assert "Summary: Momentum backs the trend." in line
+        # The reply is one call with no tool: the line says so where it matters.
+        assert "no tool can be called" in line
+
+    def test_the_score_is_read_where_the_page_reads_it(self, isolated_db):
+        # A tier-1 report keeps its score under the preliminary analysis,
+        # a tier-2 report under the deep analysis's record; the top-level
+        # score is null on both (the real stored shape, 2026-10-20).
+        finished_run("t1", score=None, preliminary_analysis={"outlook": {"outlook": "bearish", "final_score": 3.5}})
+        finished_run("t2", score=None, deep_analysis={"outlook": "bullish", "detail": {"outlook": {"final_score": 6.31}, "vote_items": []}})
+        finished_run("t3", score=None)
+        assert run_facts("t1")["score"] == 3.5
+        assert run_facts("t2")["score"] == 6.31
+        assert run_facts("t3")["score"] is None
+        assert "score not given" in notice_line(run_facts("t3"))
 
     def test_a_failed_run_carries_its_error(self, isolated_db):
         finished_run(status=history.STATUS_FAILED, error="provider down")
-        line = notice_line(run_facts("r1"))
+        facts = run_facts("r1")
+        assert facts["status"] == "failed" and facts["error"] == "provider down"
+        assert facts["levels"] == {"entry": None, "stop_loss": None, "target": None}
+        line = notice_line(facts)
         assert "It failed: provider down." in line
+        assert "outlook" not in line.split("It failed")[1]
 
     def test_a_stopped_run_names_the_step(self, isolated_db):
         finished_run(status=history.STATUS_STOPPED, stopped_stage="fundamentals")
@@ -216,6 +249,16 @@ class TestDelivery:
         sent = model.requests[0]["messages"]
         assert sent[-1] == {"role": "user", "content": rows[2]["content"]}
         assert "[Run notice]" in sent[0]["content"]
+        # One call, no tool: the menu is offered as always (the history
+        # holds real tool calls) but every call is refused (2026-10-20).
+        assert model.requests[0]["tools"] and model.requests[0]["tool_choice"] == "none"
+
+    def test_a_users_turn_still_offers_every_tool(self, isolated_db):
+        model = ScriptedModel([text("Hi.")])
+        bot = ChatHarness(model)
+        conversation_id = store.create_conversation()["id"]
+        bot.send(conversation_id, "hi")
+        assert model.requests[0]["tool_choice"] == "auto"
 
     def test_the_report_is_written_in_the_language_the_run_was_started_in(self, isolated_db):
         finished_run()
@@ -338,7 +381,7 @@ class TestDelivery:
 
     def test_the_page_can_stop_the_notice_turn(self, isolated_db):
         finished_run()
-        model = ScriptedModel([call("get_run", {"run_id": "r1"})])
+        model = ScriptedModel([text("r1: bullish.")])
         model.release.clear()
         bot = ChatHarness(model)
         conversation_id = store.create_conversation()["id"]
@@ -347,7 +390,9 @@ class TestDelivery:
         assert model.asked.wait(COLD_TURN_WAIT)
         assert bot.stop(conversation_id) is True
         model.release.set()
-        assert wait_until(lambda: roles(conversation_id) == [NOTICE_ROLE, "assistant", "tool", "stopped"])
+        # The one call ran to its end: the reply stands, and the row says the stop cut nothing.
+        assert wait_until(lambda: roles(conversation_id) == [NOTICE_ROLE, "assistant", "stopped"])
+        assert store.messages(conversation_id)[-1]["content"] == STOPPED_LATE_MESSAGE
 
 
 class TestRunServiceSignal:

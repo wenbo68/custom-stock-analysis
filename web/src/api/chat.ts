@@ -14,15 +14,26 @@ import type { TieredTranscriptCall } from './tiered';
  *  page. */
 export type ChatRole = 'user' | 'assistant' | 'tool' | 'stopped' | 'summary' | 'notice';
 
-/** How a watched run ended (a notice row's facts). */
+/** How a watched run ended (a notice row's facts). The page's line
+ *  uses the run, when it ended, the outlook and score; the rest is the
+ *  headline the model's own line carries, kept so the row reads whole. */
 export type ChatRunNotice = {
   run_id: string;
   ticker: string;
   tier: number | null;
   status: 'succeeded' | 'failed' | 'stopped';
+  /** When the run ended (ISO 8601, UTC). */
+  ended_at: string | null;
   /** Succeeded runs: the report's outlook and score. */
   outlook: string | null;
   score: number | null;
+  confidence?: number | null;
+  action?: string | null;
+  levels?: { entry: number | null; stop_loss: number | null; target: number | null } | null;
+  shares?: number | null;
+  earnings_date?: string | null;
+  summary?: string | null;
+  warning_count?: number;
   /** Failed runs: what went wrong. */
   error: string | null;
   /** Stopped runs: the step the stop landed in. */

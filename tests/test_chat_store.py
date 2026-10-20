@@ -309,8 +309,12 @@ class TestRunWatches:
         store.append_message(conversation_id, {"role": "notice", "content": "[Run notice] r1 ended."}, drop_watch="r1")
         assert [w["run_id"] for w in store.watches(conversation_id)] == ["r2"]
         assert [m["role"] for m in store.messages(conversation_id)] == ["notice"]
-        # A notice is no user input: the sidebar counts stay.
-        assert store.get_conversation(conversation_id)["user_input_count"] == 0
+        # A notice sets off a turn like the user's own line, so the
+        # sidebar's turn count and last-turn time take it in (owner
+        # decision 2026-10-20).
+        facts = store.get_conversation(conversation_id)
+        assert facts["user_input_count"] == 1
+        assert facts["ended_at"] == store.messages(conversation_id)[0]["created_at"]
 
     def test_deleting_the_conversation_drops_its_watches(self, isolated_db):
         conversation_id = store.create_conversation()["id"]

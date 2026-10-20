@@ -33,6 +33,11 @@ TITLE_MAX_CHARS = 60
 #: None can mean "clear it".
 KEEP_PENDING: Any = object()
 
+#: The roles whose row sets off a turn of the bot's: the user's own
+#: line, and a run notice (src/chat/run_notice.py). The sidebar counts
+#: these as the conversation's turns.
+TURN_ROLES = ("user", "notice")
+
 #: The facts of a conversation with no messages yet.
 _EMPTY_STATS: Dict[str, Any] = {
     "message_count": 0, "user_input_count": 0, "total_tokens": 0, "ended_at": None,
@@ -63,23 +68,26 @@ def _conversation_view(row: Any, stats: Optional[Dict[str, Any]] = None) -> Dict
 
 def _stats_by_conversation(session: Any, conversation_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
     """What the history rows show for each conversation (2026-09-23), in
-    the page's words: how many messages it holds, how many of them the
-    user sent (``user_input_count``), the tokens every model call cost
-    together, and when the user last wrote (``ended_at``; ``None``
-    before the first message). One grouped query over the message
-    table, for every conversation or for the one given; a conversation
-    with no rows is absent."""
+    the page's words: how many messages it holds, how many turns were
+    set off (``user_input_count``, the page's "convo turns": the user's
+    own lines and the run notices the app wrote, since a notice sets
+    off a turn the same way — owner decision 2026-10-20), the tokens
+    every model call cost together, and when the last turn was set off
+    (``ended_at``; ``None`` before the first message). One grouped
+    query over the message table, for every conversation or for the
+    one given; a conversation with no rows is absent."""
     from sqlalchemy import case, func
 
     from src.storage import ChatMessageRecord as M
 
     tokens = func.coalesce(M.input_tokens, 0) + func.coalesce(M.output_tokens, 0)
+    is_turn = M.role.in_(TURN_ROLES)
     query = session.query(
         M.conversation_id,
         func.count(M.id),
-        func.sum(case((M.role == "user", 1), else_=0)),
+        func.sum(case((is_turn, 1), else_=0)),
         func.sum(tokens),
-        func.max(case((M.role == "user", M.created_at))),
+        func.max(case((is_turn, M.created_at))),
     ).group_by(M.conversation_id)
     if conversation_id is not None:
         query = query.filter(M.conversation_id == conversation_id)

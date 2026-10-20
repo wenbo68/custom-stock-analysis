@@ -589,7 +589,7 @@ describe('ChatPage slash commands', () => {
 describe('run notices', () => {
   const NOTICE: ChatConversation['messages'][number] = {
     seq: 3, role: 'notice', created_at: null, text: null,
-    run: { run_id: 'r1', ticker: 'AAPL', tier: 1, status: 'succeeded', outlook: 'bullish', score: 7.2, error: null, stopped_stage: null },
+    run: { run_id: 'r1', ticker: 'AAPL', tier: 1, status: 'succeeded', ended_at: '2026-10-18T18:30:00+00:00', outlook: 'bullish', score: 7.2, error: null, stopped_stage: null },
   };
   const WAITING: ChatConversation = {
     ...ANSWERED, message_count: 2, watched_runs: [{ run_id: 'r1', language: 'en' }],

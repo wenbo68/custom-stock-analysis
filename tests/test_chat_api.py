@@ -426,7 +426,11 @@ class TestRunNotices:
         conversation_id = client.post("/chat/conversations").json()["id"]
         store.add_watch(conversation_id, "r2", "ko")
         facts = {"run_id": "r1", "ticker": "AAPL", "tier": 1, "status": "succeeded",
-                 "outlook": "bullish", "score": 7.2, "error": None, "stopped_stage": None}
+                 "ended_at": "2026-10-20T09:25:50+00:00", "outlook": "bullish", "score": 7.2,
+                 "confidence": None, "action": "buy",
+                 "levels": {"entry": 190.5, "stop_loss": 184.0, "target": 203.5}, "shares": 52.0,
+                 "earnings_date": "2026-11-03", "summary": "Momentum backs the trend.", "warning_count": 2,
+                 "error": None, "stopped_stage": None}
         store.append_message(conversation_id, {"role": NOTICE_ROLE, "content": f"{NOTICE_PREFIX} r1 ended.", "run": facts})
 
         body = client.get(f"/chat/conversations/{conversation_id}").json()
@@ -437,8 +441,8 @@ class TestRunNotices:
         # The page words the notice from the facts; the model's line is not shown.
         assert notice["text"] is None
         assert notice["run"] == facts
-        # The sidebar counts no user input for it.
-        assert body["user_input_count"] == 0
+        # The sidebar counts it as a turn, like the user's own line (2026-10-20).
+        assert body["user_input_count"] == 1
 
     def test_busy_while_the_bots_own_turn_runs(self, client, scripted):
         from src.chat import store

@@ -561,16 +561,36 @@ describe('ChatThread summary rows', () => {
 
 describe('run notices', () => {
   const notice = (run: NonNullable<ChatMessage['run']>, seq = 3): ChatMessage => ({ seq, role: 'notice', created_at: null, text: null, run });
-  const SUCCEEDED = { run_id: 'r1', ticker: 'AAPL', tier: 1, status: 'succeeded' as const, outlook: 'bullish', score: 7.2, error: null, stopped_stage: null };
+  const SUCCEEDED = {
+    run_id: 'r1', ticker: 'AAPL', tier: 1, status: 'succeeded' as const, ended_at: '2026-10-18T18:30:00+00:00',
+    outlook: 'bullish', score: 7.2, error: null, stopped_stage: null,
+  };
+  // The stored UTC time in the viewer's zone, as the run history shows it.
+  const when = (iso: string) => {
+    const date = new Date(iso);
+    const pad = (part: number) => String(part).padStart(2, '0');
+    return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}, ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
 
-  it('words a succeeded run with its outlook and score, marked as the app\'s line', () => {
+  it('words a succeeded run with when it ended, its outlook and score, as a user-styled line with an amber mark', () => {
     renderThread({ messages: [...MESSAGES.slice(0, 1), notice(SUCCEEDED)] });
     const line = screen.getByTestId('chat-notice');
     expect(line).toHaveAttribute('data-run-id', 'r1');
-    expect(within(line).getByTestId('chat-notice-mark')).toHaveTextContent(/Run notice|运行通知/);
-    expect(line).toHaveTextContent(/(The run on AAPL \(tier 1\) succeeded: outlook Bullish, score 7\.2\.|AAPL 的运行（第 1 层）已成功：展望看多，评分 7\.2。)/);
-    // A fact about the conversation, not one of its voices: quiet and centered, in the text's own color.
-    expect(line).toHaveClass('text-center', 'text-xs', 'text-ink-3');
+    const mark = within(line).getByTestId('chat-notice-mark');
+    expect(mark).toHaveTextContent(/^(notice|通知)$/);
+    expect(mark).toHaveClass('text-caution');
+    const at = when(SUCCEEDED.ended_at);
+    expect(line).toHaveTextContent(
+      new RegExp(`(The AAPL tier 1 run succeeded at ${at} with outlook Bullish, score 7\\.2\\.|AAPL 第 1 层运行已于 ${at} 成功：展望看多，评分 7\\.2。)`),
+    );
+    // It sets off a turn like the user's line, so it sits where the user's lines sit.
+    expect(line).toHaveClass('justify-end');
+    expect(line.firstElementChild).toHaveClass('text-ink-1');
+  });
+
+  it('leaves the score out when the report has none', () => {
+    renderThread({ messages: [notice({ ...SUCCEEDED, score: null })] });
+    expect(screen.getByTestId('chat-notice')).toHaveTextContent(/(with outlook Bullish\.|展望看多。)$/);
   });
 
   it('words a failed run with its error and a stopped run with its step', () => {
@@ -582,9 +602,10 @@ describe('run notices', () => {
       ],
     });
     const lines = screen.getAllByTestId('chat-notice');
-    expect(lines[0]).toHaveTextContent(/(failed: provider down|失败：provider down)/);
-    expect(lines[1]).toHaveTextContent(/(was stopped during Fundamentals|在「基本面」阶段被停止)/);
-    expect(lines[2]).toHaveTextContent(/(was stopped; the sections that finished are kept|已被停止；已完成的部分保留)/);
+    const at = when(SUCCEEDED.ended_at);
+    expect(lines[0]).toHaveTextContent(new RegExp(`(run failed at ${at}: provider down|运行已于 ${at} 失败：provider down)`));
+    expect(lines[1]).toHaveTextContent(/(was stopped at .* during Fundamentals|在「基本面」阶段被停止)/);
+    expect(lines[2]).toHaveTextContent(/(was stopped at .*; the sections that finished are kept|被停止；已完成的部分保留)/);
   });
 
   it('starts the step count over after a notice, like after the user\'s line', () => {

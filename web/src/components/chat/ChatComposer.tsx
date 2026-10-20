@@ -1,7 +1,8 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowUp, Ellipsis, Square } from 'lucide-react';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { cn } from '../../utils/cn';
+import { getSessionStorage, readStoredValue, writeStoredValue } from '../../utils/storedValue';
 import { ALT_COLOR } from '../analysis/styles';
 import { CHAT_SURFACE_1 } from './chatSurfaces';
 import { matchingCommands } from './commands';
@@ -34,6 +35,8 @@ const STOP_BUTTON = `${ROUND_BUTTON} ${ALT_COLOR[1]}`;
 const STOPPING_BUTTON = `${ROUND_BUTTON} ring-ink-5 text-ink-4`;
 /** The box grows with the text up to this many lines, then scrolls. */
 export const MAX_ROWS = 6;
+/** Where the tab keeps the unsent draft (sessionStorage), so it outlives the box. */
+export const DRAFT_STORAGE_KEY = 'chat.draft';
 /** The width the send arrow takes beside a one-line draft: h-7 (28px) plus gap-3 (12px). */
 const ARROW_LANE_PX = 40;
 
@@ -101,9 +104,14 @@ const measureDraft = (box: HTMLTextAreaElement, draft: string): Measured => {
 // while the word is being typed a menu over the box lists the commands
 // it could be, one line each; a click fills the word in and Tab fills
 // in the first. Enter sends the line as typed, and the page runs it.
+//
+// The draft lives in the tab's storage as well as in the box (owner
+// request 2026-10-20): the mode switch opens the manual page, which
+// tears this box down, and the draft must be there again on the way
+// back. A refresh keeps it the same way; closing the tab drops it.
 export const ChatComposer = ({ blocked, blockedHint, working = false, stopping = false, onSend, onStop }: ChatComposerProps) => {
   const { t } = useUiLanguage();
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => readStoredValue(getSessionStorage(), DRAFT_STORAGE_KEY) ?? '');
   const [isMultiline, setMultiline] = useState(false);
   const boxRef = useRef<HTMLTextAreaElement>(null);
   const isCommandLine = draft.trimStart().startsWith('/');
@@ -119,6 +127,10 @@ export const ChatComposer = ({ blocked, blockedHint, working = false, stopping =
     if (boxRef.current) {
       setMultiline(measureDraft(boxRef.current, draft).needsOwnRow);
     }
+  }, [draft]);
+
+  useEffect(() => {
+    writeStoredValue(getSessionStorage(), DRAFT_STORAGE_KEY, draft);
   }, [draft]);
 
   const send = () => {

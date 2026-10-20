@@ -4,6 +4,7 @@ import type { TieredTranscriptCall } from '../../api/tiered';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import type { UiTextKey } from '../../i18n/uiText';
 import { cn } from '../../utils/cn';
+import { formatDateTime } from '../analysis/format';
 import { stageName } from '../analysis/stageNames';
 import { TranscriptCall, UsageLine } from '../analysis/Transcript';
 import { FactFold } from '../analysis/Ui';
@@ -356,20 +357,21 @@ const StoppedLine = ({ step, facts }: { step: number; facts: StopFacts }) => {
   );
 };
 
-// The app's line that a run the bot started here has ended (2026-10-20,
-// after Claude Code's task notifications): quiet and centered like the
-// stopped line — a fact about the conversation, not one of its voices —
-// but in the text's own color, since nothing went wrong with the chat
-// itself. A small mark names what it is; the sentence names the run
-// and how it ended, in the page's words for outlooks and steps. The
-// bot's own report follows as the next step.
+// The line the app writes when a run the bot started here ends (2026-10-20,
+// after Claude Code's task notifications). It sets off a turn the way
+// the user's line does, so it sits where the user's lines sit — a
+// right-aligned bubble — with an amber "notice" mark in the /btw
+// mark's place to say it is the app's, not the user's. The sentence
+// names the run, when it ended (the viewer's local time) and how, in
+// the page's words for outlooks and steps. The bot's own report
+// follows as the turn's one step.
 const NoticeLine = ({ run }: { run: ChatRunNotice | null }) => {
   const { t } = useUiLanguage();
   if (!run) {
     return null;
   }
   const outlookKey = `tiered.outlook.${run.outlook ?? 'no_outlook'}` as UiTextKey;
-  const named = { ticker: run.ticker, tier: run.tier ?? '?' };
+  const named = { ticker: run.ticker, tier: run.tier ?? '?', when: formatDateTime(run.ended_at) };
   const sentence =
     run.status === 'succeeded'
       ? run.score == null
@@ -381,12 +383,14 @@ const NoticeLine = ({ run }: { run: ChatRunNotice | null }) => {
           ? t('chat.notice.stopped', { ...named, stage: stageName(run.stopped_stage, t) })
           : t('chat.notice.stoppedUnknown', named);
   return (
-    <p className="py-1 text-center text-xs text-ink-3" data-testid="chat-notice" data-run-id={run.run_id}>
-      <span className="mr-2 font-mono text-[0.7rem] font-semibold uppercase tracking-wide text-ink-4" data-testid="chat-notice-mark">
-        {t('chat.notice.mark')}
-      </span>
-      {sentence}
-    </p>
+    <div className="flex justify-end" data-testid="chat-notice" data-run-id={run.run_id}>
+      <p className={cn('min-w-0 max-w-[85%] whitespace-pre-wrap rounded px-4 py-2.5 text-sm leading-relaxed text-ink-1', CHAT_SURFACE_1)}>
+        <span className="font-mono text-xs font-semibold text-caution" data-testid="chat-notice-mark">
+          {t('chat.notice.mark')}
+        </span>{' '}
+        {sentence}
+      </p>
+    </div>
   );
 };
 

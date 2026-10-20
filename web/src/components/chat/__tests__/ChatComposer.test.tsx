@@ -1,9 +1,12 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
-import { ChatComposer, MAX_ROWS } from '../ChatComposer';
+import { ChatComposer, DRAFT_STORAGE_KEY, MAX_ROWS } from '../ChatComposer';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.sessionStorage.clear();
+});
 
 const renderComposer = (blocked = false, hint: string | null = null) => {
   const onSend = vi.fn(() => true);
@@ -37,6 +40,25 @@ describe('ChatComposer', () => {
     fireEvent.keyDown(box, { key: 'Enter' });
     expect(onSend).toHaveBeenCalledWith('/context');
     expect(box).toHaveValue('/context');
+  });
+
+  it('keeps an unsent draft across a page switch, and forgets it once sent', () => {
+    // The box is torn down when the user opens the manual page and built
+    // again on the way back (owner request 2026-10-20): the draft must
+    // survive that, so it lives in the tab's storage, not in the box.
+    renderComposer();
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'half a thought' } });
+    cleanup();
+    expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBe('half a thought');
+    const onSend = renderComposer();
+    const box = screen.getByTestId('chat-input');
+    expect(box).toHaveValue('half a thought');
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(onSend).toHaveBeenCalledWith('half a thought');
+    expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+    cleanup();
+    renderComposer();
+    expect(screen.getByTestId('chat-input')).toHaveValue('');
   });
 
   it('sends with the button', () => {

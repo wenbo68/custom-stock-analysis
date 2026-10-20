@@ -71,7 +71,12 @@ Guardrails (owner discussion 2026-09-19):
   it ends, the run service calls ``run_finished``, and the conversation
   gets a ``notice`` row — the app's line, shown by the page and read by
   the model as a user line — followed by one turn of the loop, so the
-  bot reports the end without being asked. The row and the turn only
+  bot reports the end without being asked. That turn offers the tool
+  menu (the history holds real tool calls, which a provider may refuse
+  without one) but refuses every call (``tool_choice`` ``none``, owner
+  decision 2026-10-20): the notice line carries every fact the report
+  needs, so the turn is one call, and whatever the user wants next is
+  a normal turn. The row and the turn only
   happen when the conversation is idle: never inside a running turn
   (a user line between a tool call and its result would break the
   provider's exchange), and never while a held call waits for a yes.
@@ -477,7 +482,8 @@ class ChatHarness:
             if language is None:
                 return False
             with using_turn_language(language):
-                self._loop(conversation_id, tool_calls=0, language=language, stop=turn.stop)
+                self._loop(conversation_id, tool_calls=0, language=language, stop=turn.stop,
+                           tool_choice="none")
             return True
         finally:
             turn.__exit__(None, None, None)
@@ -501,14 +507,17 @@ class ChatHarness:
     # -- the loop -------------------------------------------------------
 
     def _loop(self, conversation_id: str, tool_calls: int, language: str,
-              stop: threading.Event) -> None:
+              stop: threading.Event, tool_choice: str = "auto") -> None:
         """``tool_calls`` counts the model replies that asked for tools in
         this turn, against ``TOOL_CALL_LIMIT``. A final reply in the wrong
         language goes back with a correction, ``LANGUAGE_RETRY_LIMIT``
         times at most; after that the last reply stands, with its notice.
         ``stop`` is the turn's stop flag (see the module notes): checked
         after every model call and before every tool, never during a
-        call — the step in flight finishes and is stored."""
+        call — the step in flight finishes and is stored. ``tool_choice``
+        is the provider's word for every call of the turn: ``auto`` on
+        the user's turns, ``none`` on a run notice's (the menu offered,
+        every call refused)."""
         language_retries = 0
         correction: Optional[str] = None
         #: One summary per turn at most, whether it stood or failed.
@@ -528,7 +537,7 @@ class ChatHarness:
                     # summary changes nothing and the request stands.
                     request = self._request(conversation_id, language)
             correction = None
-            reply = self._ask_model(conversation_id, language, request)
+            reply = self._ask_model(conversation_id, language, request, tool_choice)
             if reply is None:
                 return
             if not reply.tool_calls:
@@ -775,9 +784,11 @@ class ChatHarness:
         store.append_message(conversation_id, message)
         return bool(summary)
 
-    def _ask_model(self, conversation_id: str, language: str, request: Request) -> Optional[ModelReply]:
-        """The loop's model call: the request as built, every tool offered."""
-        return self._call(conversation_id, language, request.messages, request.tools)
+    def _ask_model(self, conversation_id: str, language: str, request: Request,
+                   tool_choice: str = "auto") -> Optional[ModelReply]:
+        """The loop's model call: the request as built, every tool offered
+        (and, on a notice turn, every call refused)."""
+        return self._call(conversation_id, language, request.messages, request.tools, tool_choice=tool_choice)
 
     def _call(self, conversation_id: str, language: str, messages: List[Dict[str, Any]],
               tools: List[Dict[str, Any]], tool_choice: str = "auto",

@@ -17,7 +17,7 @@ import {
   type HistoryFilters,
 } from '../components/analysis/historyFilters';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
-import { getLocalStorage, readStoredValue } from '../utils/storedValue';
+import { getLocalStorage, readStoredValue, writeStoredValue } from '../utils/storedValue';
 
 const POLL_INTERVAL_MS = 5000;
 const DEFAULT_TIER: TieredTier = 1;
@@ -119,15 +119,7 @@ function readStoredNumber(key: string): string | null {
 }
 
 function storeNumber(key: string, value: string | null): void {
-  try {
-    if (value) {
-      window.localStorage.setItem(key, value);
-    } else {
-      window.localStorage.removeItem(key);
-    }
-  } catch {
-    // storage unavailable (private mode) — the run still works
-  }
+  writeStoredValue(getLocalStorage(), key, value);
 }
 
 // Alternate skin for tiered analysis, styled after showplayer.net. Two
