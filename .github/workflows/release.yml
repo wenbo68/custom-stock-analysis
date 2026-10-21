@@ -1,0 +1,40 @@
+name: Release
+
+# Turns a pushed version tag (v0.1.0, v1.2.3, ...) into a GitHub release
+# whose notes are that version's section of CHANGELOG.md. The Docker
+# workflow publishes the matching image tag from the same push. To cut
+# a release: bump [project].version in pyproject.toml, add the section
+# to CHANGELOG.md, commit, then
+#   git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin main vX.Y.Z
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Take this version's section out of CHANGELOG.md
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## / { on = ($2 == v) ; next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no '## $version' section" >&2
+            exit 1
+          fi
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md

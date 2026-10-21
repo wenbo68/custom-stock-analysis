@@ -57,7 +57,7 @@ docker compose up -d          # builds the image the first time, then serves it
 
 Open <http://localhost:8000>. Your run history lives in `./data/` on the host and survives restarts and upgrades. To upgrade, `git pull && docker compose up -d --build`.
 
-A prebuilt image is published on every push to `main` as `ghcr.io/wenbo68/custom-stock-analysis:latest`; `docker compose pull && docker compose up -d` uses it instead of building.
+A prebuilt image is published on every push to `main` as `ghcr.io/wenbo68/custom-stock-analysis:latest`; `docker compose pull && docker compose up -d` uses it instead of building. Every [release](https://github.com/wenbo68/custom-stock-analysis/releases) is also published under its version number (`:0.1.0`); change `latest` to a version in `docker-compose.yml` to upgrade only when you choose to. What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 ### Option B: from source
 
@@ -176,7 +176,7 @@ cd web && npm install && npm run dev     # web app with hot reload at :5173, pro
 cd web && npm run lint && npm test       # web lint and tests
 ```
 
-Run `uv run server.py` in a second terminal for the dev server's API. Both test suites and the web build run on every push through [GitHub Actions](.github/workflows/ci.yml); the Docker image is built and published by [a second workflow](.github/workflows/docker.yml).
+Run `uv run server.py` in a second terminal for the dev server's API. Both test suites and the web build run on every push through [GitHub Actions](.github/workflows/ci.yml); the Docker image is built and published by [a second workflow](.github/workflows/docker.yml), and a pushed `v*` tag becomes a GitHub release through [a third](.github/workflows/release.yml) (the steps are in its header).
 
 A hosted, many-user version with sign-in and per-user keys is developed in a separate, private repo. Engine and UI improvements flow between the two by merging.
 
