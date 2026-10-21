@@ -1,0 +1,8 @@
+Custom Stock Analysis
+Copyright (c) 2026 wenbo68
+
+This project began in 2026 as an extraction from daily_stock_analysis
+(https://github.com/ZhuLinsen/daily_stock_analysis), which is
+Copyright (c) 2026 ZhuLinsen and released under the MIT License. The
+price-bar fetchers and the configuration layer still trace back there.
+Its license text is the same as the one in LICENSE.

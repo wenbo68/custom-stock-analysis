@@ -14,6 +14,8 @@
 
 Self-hosted. One person, one machine, your own model key. No sign-in.
 
+<img src="readme-images/csa_run_result_3.png" alt="A tier 2 deep analysis: the outlook, score and action, then the reasons by data report, every number underlined as a checked citation" width="900">
+
 </div>
 
 ---
@@ -35,6 +37,10 @@ Enter a ticker, pick a tier and a maximum hold time, and the app runs a pipeline
 | --- | --- |
 | **Languages** | English, Simplified Chinese, Korean. The page, and everything the model writes for you, follow one switch. |
 | **Models** | Any provider [litellm](https://docs.litellm.ai/docs/providers) supports: OpenAI, Anthropic, Gemini, DeepSeek, OpenRouter, local Ollama and more. |
+
+<p align="center"><img src="readme-images/csa_run_result_1.png" alt="The technicals and fundamentals data reports, each value with a plain-language label and the sources listed under the card" width="900"><br><sub>Two of the six data reports. Every value has a plain-language label, and each card lists its sources.</sub></p>
+
+<p align="center"><img src="readme-images/csa_run_result_2.png" alt="The positioning and macro economy data reports, with the company news and world news cards starting below them" width="900"><br><sub>Positioning, macro economy, and the start of the two news reports.</sub></p>
 
 ## Quick start
 
@@ -88,12 +94,16 @@ A missing optional key never fails a run: the matching data report is left empty
 
 ## How a run works
 
+<p align="center"><img src="readme-images/csa_manual_mode_main.png" alt="The analysis page: the new-run form with ticker, capital, risk, reward ratio, max hold and tier, and the filterable run history below it" width="900"><br><sub>The analysis page: the run form, and the history with its filters.</sub></p>
+
 1. **Market check.** A run is refused while that stock's market is open, because intraday numbers would be judged against a daily report. The form says when runs are accepted again; **Run anyway** overrides it.
 2. **Data reports.** The six reports are fetched one after another. Each number carries a plain-language definition and, where useful, how a trader reads it.
 3. **News screen.** Articles are judged for relevance, grouped, ranked and summarised by the model; the report shows the kept ones with their sentences.
 4. **Analysis.** Tier 1 writes one preliminary analysis. Tier 2 runs the deep analysis: two listers each write a grade sheet, a check round challenges them, and a deciding round votes. Every claim must cite a report value; citations that do not match the report are rejected and the model is asked again.
 5. **Plan.** Entry, stop loss, target and shares are computed from the report and your inputs, then the plan review may adjust them, with each adjustment explained and shown next to the original.
 6. **Report.** Summary, outlook, plan, the vote tree (tier 2), the six reports, the warnings, and the model transcript.
+
+<p align="center"><img src="readme-images/csa_run_result_4.png" alt="The trade plan table with computed and adjusted entry, stop loss, target and shares, and the list of every model call the run made with its model, time and token counts" width="900"><br><sub>The trade plan, then the run's model calls with their tokens. Each call opens to its full prompt and reply.</sub></p>
 
 A run can be stopped at any point. The stop takes effect at the next step boundary or the next model call, so a call already in flight finishes and is counted. The stopped run stays in the history with the sections that had finished: the reports fetched so far, the analysis if it was done, never a half-built section and never the plan.
 
@@ -102,6 +112,8 @@ Every model reply that must be JSON is asked for in a schema-enforced mode and t
 **Run queue.** At most `MAX_CONCURRENT_RUNS` analyses run at once; the rest wait in line and start on their own, and a restart resumes whatever was still waiting. An unfinished run with the same ticker and inputs cannot be started twice.
 
 ## Chat
+
+<p align="center"><img src="readme-images/csa_agentic_mode_main.png" alt="The chat page: the bot's steps shown one by one, a tool call to start a run, the app's notice that the run ended, and the slash-command menu over the box" width="900"><br><sub>The chat page: each step of a reply on the record, the run notice when a run the bot started ends, and the slash-command menu.</sub></p>
 
 `/chat` is a chat page whose bot can read and act on the run history through the app's own API, and nothing else. It uses the same model and key as the analysis.
 
@@ -166,10 +178,10 @@ cd web && npm run lint && npm test       # web lint and tests
 
 Run `uv run server.py` in a second terminal for the dev server's API. Both test suites and the web build run on every push through [GitHub Actions](.github/workflows/ci.yml); the Docker image is built and published by [a second workflow](.github/workflows/docker.yml).
 
-A hosted, many-user version with sign-in and per-user keys lives in the separate [custom-stock-analysis-hosted](https://github.com/wenbo68/custom-stock-analysis-hosted) repo. Engine and UI improvements flow between the two by merging.
+A hosted, many-user version with sign-in and per-user keys is developed in a separate, private repo. Engine and UI improvements flow between the two by merging.
 
 ## Credits and license
 
 This project began in 2026 as the analysis page of [daily_stock_analysis](https://github.com/ZhuLinsen/daily_stock_analysis), extracted into its own app and rebuilt around tiered analysis, citation checking and the chat bot. The price-bar fetchers and the configuration layer still trace back there.
 
-Released under the [MIT License](LICENSE). This is a research and planning tool, not financial advice; every number comes from third-party data sources and every sentence from a language model, and both can be wrong.
+Released under the [MIT License](LICENSE); see [NOTICE](NOTICE) for the attribution. This is a research and planning tool, not financial advice; every number comes from third-party data sources and every sentence from a language model, and both can be wrong.
